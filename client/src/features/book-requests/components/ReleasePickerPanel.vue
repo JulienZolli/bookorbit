@@ -24,10 +24,17 @@ import {
   Zap,
 } from '@lucide/vue'
 import { Permission, releaseInspectionBlocksGrab } from '@bookorbit/types'
-import type { DownloadDelivery, IndexerSearchFailure, ReleaseCandidateItem, ReleaseFileInspection, ReleaseSearchCriteria } from '@bookorbit/types'
+import type {
+  DownloadDelivery,
+  IndexerSearchFailure,
+  ReleaseCandidateItem,
+  ReleaseFileInspection,
+  ReleaseProfileMismatchFailure,
+  ReleaseSearchCriteria,
+} from '@bookorbit/types'
 import { Button } from '@/components/ui/button'
 import { formatColorVar } from '@/features/book/lib/format-colors'
-import { formatDate, formatLanguageName } from '@/i18n/formatters'
+import { formatDate, formatLanguageName, formatList } from '@/i18n/formatters'
 import { formatBytes } from '@/lib/formatting'
 import GrabReleaseDialog from './GrabReleaseDialog.vue'
 import ReleaseFileInspectionPanel from './ReleaseFileInspectionPanel.vue'
@@ -221,6 +228,11 @@ const noSourcesHint = computed(() => {
 const nothingMatchedProfile = computed(
   () => profileActive.value && releases.value.length > 0 && releases.value.every((release) => release.tier === null),
 )
+const profileSettingsLink = computed(() => ({
+  name: 'settings-admin-requests',
+  query: { tab: 'automation' },
+  hash: `#release-profile-${criteria.value?.mediaKind ?? 'ebook'}`,
+}))
 /**
  * A search that ran and found nothing is stated by the panel itself, which is also where the next
  * key to try lives. Repeating it below the list only put the explanation further from the fix.
@@ -517,6 +529,54 @@ function reasonText(reason: ReleaseCandidateItem['reasons'][number]): string {
 
 function reasonPoints(points: number): string {
   return points > 0 ? `+${points}` : String(points)
+}
+
+function profileFailureText(release: ReleaseCandidateItem, failure: ReleaseProfileMismatchFailure): string {
+  const key = `bookRequests.releases.profileMismatch.failures.${failure.code}`
+  switch (failure.code) {
+    case 'formatUnknown':
+      return t(key, { source: release.indexerName, expected: formatList(failure.expected.map((format) => format.toUpperCase())) })
+    case 'format':
+      return t(key, {
+        actual: formatList(failure.actual.map((format) => format.toUpperCase())),
+        expected: formatList(failure.expected.map((format) => format.toUpperCase())),
+      })
+    case 'fileLayoutUnknown':
+      return t(key, { source: release.indexerName, expected: t(`bookRequests.releases.fileLayout.${failure.expected}`) })
+    case 'fileLayout':
+      return t(key, {
+        actual: t(`bookRequests.releases.fileLayout.${failure.actual}`),
+        expected: t(`bookRequests.releases.fileLayout.${failure.expected}`),
+      })
+    case 'channels':
+      return t(key, {
+        actual: t(`bookRequests.releases.channels.${failure.actual === 1 ? 'mono' : 'stereo'}`),
+        expected: t(`bookRequests.releases.channels.${failure.expected === 1 ? 'mono' : 'stereo'}`),
+      })
+    case 'bitrate':
+    case 'seeders':
+      return t(key, { actual: failure.actual, expected: failure.expected })
+    case 'languageUnknown':
+      return t(key, { source: release.indexerName, expected: formatList(failure.expected.map(formatLanguageName)) })
+    case 'language':
+      return t(key, { actual: formatLanguageName(failure.actual), expected: formatList(failure.expected.map(formatLanguageName)) })
+    case 'sizeUnknown':
+      return t(key, { source: release.indexerName, expected: formatBytes(failure.expected) })
+    case 'size':
+      return t(key, { actual: formatBytes(failure.actual), expected: formatBytes(failure.expected) })
+    case 'source':
+    case 'freeleech':
+    case 'vipOnly':
+      return t(key)
+  }
+}
+
+function profileMismatchText(release: ReleaseCandidateItem): string | null {
+  if (!release.profileMismatch) return null
+  return t('bookRequests.releases.profileMismatch.row', {
+    tier: release.profileMismatch.tierName,
+    reasons: release.profileMismatch.failures.map((failure) => profileFailureText(release, failure)).join(' '),
+  })
 }
 
 /**
@@ -1037,14 +1097,31 @@ function showEverySource(): void {
               </template>
             </p>
 
-            <p
+            <div
               v-if="nothingMatchedProfile"
               role="status"
               class="mt-3 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-foreground"
             >
               <TriangleAlert :size="14" class="mt-px shrink-0 text-warning" aria-hidden="true" />
-              <span class="settings-prose">{{ t('bookRequests.releases.noneMatchedProfile') }}</span>
-            </p>
+              <div class="min-w-0 flex-1">
+                <p>
+                  {{
+                    t('bookRequests.releases.profileMismatch.summary', {
+                      count: releases.length,
+                      medium: t(`bookRequests.mediaKind.${criteria?.mediaKind ?? 'ebook'}`),
+                    })
+                  }}
+                </p>
+                <RouterLink
+                  v-if="canFixSources"
+                  :to="profileSettingsLink"
+                  class="mt-1.5 inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-2 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                >
+                  {{ t('bookRequests.releases.profileMismatch.review', { medium: t(`bookRequests.mediaKind.${criteria?.mediaKind ?? 'ebook'}`) }) }}
+                  <ArrowUpRight :size="12" aria-hidden="true" />
+                </RouterLink>
+              </div>
+            </div>
 
             <!--
               Sort is one choice among a few, so it reads as a segmented control; the facets are
@@ -1245,6 +1322,11 @@ function showEverySource(): void {
                       <p v-if="audioParts(release).length" class="mt-0.5 text-xs text-muted-foreground">
                         <span class="sr-only">{{ t('bookRequests.releases.audio') }}: </span>
                         {{ audioParts(release).join(' · ') }}
+                      </p>
+
+                      <p v-if="profileMismatchText(release)" class="mt-1 flex items-start gap-1.5 text-xs text-warning">
+                        <TriangleAlert :size="12" class="mt-px shrink-0" aria-hidden="true" />
+                        <span>{{ profileMismatchText(release) }}</span>
                       </p>
 
                       <span

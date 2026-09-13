@@ -65,6 +65,12 @@ Three kinds of row, added two ways, identical once they exist:
   `<APP_DATA_PATH>/plugins/indexers/<name>/index.mjs`. Plugins live in their own repositories and
   are not distributed with BookOrbit.
 
+A plugin may declare a signed update manifest. BookOrbit checks each declared channel at most once
+every 12 hours, supports a review-before-install flow, and can install verified updates
+automatically when a superuser enables that option for the plugin. The downloaded source must match
+both the manifest's SHA-256 and its Ed25519 signature. Installs are atomic, activate without a
+restart, and restore the previous plugin if activation fails.
+
 Per source you can set the medium it is searched for, its categories, whether it is handed an ISBN
 when the request has one, and a colour that marks its releases in the release picker.
 

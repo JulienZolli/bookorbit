@@ -218,3 +218,14 @@ export class UpdateIndexerDto {
   @Type(() => NetworkProfileDto)
   networkProfile?: NetworkProfileDto | null;
 }
+
+export class InstallPluginUpdateDto {
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  sha256!: string;
+}
+
+export class UpdatePluginAutomaticDto {
+  @IsBoolean()
+  enabled!: boolean;
+}

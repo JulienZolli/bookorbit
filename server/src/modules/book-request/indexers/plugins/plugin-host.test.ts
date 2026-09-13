@@ -17,6 +17,8 @@ vi.mock('dns/promises', async (importOriginal) => ({
   lookup: vi.fn(() => Promise.resolve([{ address: '93.184.216.34', family: 4 }])),
 }));
 
+import { lookup } from 'dns/promises';
+
 import type { IndexerCredentialStore } from '../indexer-credential-store';
 import { IndexerSearchException, type ReleaseQuery, type ResolvedIndexerConfig } from '../indexer-adapter';
 import { PluginIndexerAdapter } from './plugin-host';
@@ -269,6 +271,37 @@ describe('PluginIndexerAdapter', () => {
           AbortSignal.timeout(1000),
         ),
       ).rejects.toThrow();
+    });
+
+    it('treats a source DNS failure as a temporary outage', async () => {
+      vi.mocked(lookup).mockRejectedValueOnce(new Error('ENOTFOUND'));
+      const { adapter } = makeAdapter({
+        search: (_query, _config, host) => host.fetch('https://does-not-resolve.invalid').then(() => []),
+      });
+
+      await expect(adapter.search(query(), config(), AbortSignal.timeout(1000))).rejects.toMatchObject({
+        failure: 'unreachable',
+        message: 'Example Tracker: the source host could not be resolved',
+      });
+    });
+
+    it('treats an unresolved download host as a temporary outage', async () => {
+      vi.mocked(lookup).mockRejectedValueOnce(new Error('ENOTFOUND'));
+      const { adapter } = makeAdapter({
+        fetchTorrentFile: undefined,
+        resolveFile: () => Promise.resolve({ url: 'https://does-not-resolve.invalid/book', fileName: 'book.epub', sizeBytes: 1, format: 'epub' }),
+      });
+
+      await expect(
+        adapter.resolveFile!(
+          { indexerId: 4, guid: 'g', title: 't', sizeBytes: null, seeders: null, leechers: null },
+          config(),
+          AbortSignal.timeout(1000),
+        ),
+      ).rejects.toMatchObject({
+        failure: 'unreachable',
+        message: 'Example Tracker: the download host could not be resolved',
+      });
     });
 
     it('refuses a torrent file too large to be one', async () => {

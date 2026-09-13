@@ -392,4 +392,20 @@ describe('toReleaseItem', () => {
     expect(item.formats).toEqual([]);
     expect(item.format).toBeNull();
   });
+
+  it('carries the closest profile tier and why an unknown format missed it', () => {
+    const scoringRequest = request({
+      tiers: [
+        { id: 'strict', name: 'Strict EPUB', conditions: { formats: ['epub'], languages: ['en'] } },
+        { id: 'everyday', name: 'Everyday EPUB', conditions: { formats: ['epub'] } },
+      ],
+    });
+    const scored = scoreRelease(release({ title: 'Frank Herbert - Dune', format: null }), scoringRequest);
+
+    expect(toReleaseItem(scored, 'nzb.life', scoringRequest).profileMismatch).toEqual({
+      tier: 1,
+      tierName: 'Everyday EPUB',
+      failures: [{ code: 'formatUnknown', expected: ['epub'] }],
+    });
+  });
 });

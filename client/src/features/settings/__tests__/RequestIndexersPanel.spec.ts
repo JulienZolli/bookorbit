@@ -67,6 +67,7 @@ const PLUGIN = descriptor({
   label: 'Demo Tracker',
   builtIn: false,
   version: '2.4.1',
+  updateable: true,
   requiresCredential: true,
   credentialKind: 'sessionId',
   baseUrlHint: "The tracker's own address.",
@@ -130,11 +131,22 @@ function response(body: unknown, ok = true): Response {
 }
 
 async function mountPanel(
-  options: { indexers?: IndexerItem[]; adapters?: IndexerAdapterDescriptor[]; pluginFailures?: Array<{ directory: string; reason: string }> } = {},
+  options: {
+    indexers?: IndexerItem[]
+    adapters?: IndexerAdapterDescriptor[]
+    pluginFailures?: Array<{ directory: string; reason: string }>
+    pluginUpdates?: unknown[]
+  } = {},
 ) {
-  const { indexers = [], adapters = [descriptor(), OPEN_LIBRARY], pluginFailures = [] } = options
+  const { indexers = [], adapters = [descriptor(), OPEN_LIBRARY], pluginFailures = [], pluginUpdates = [] } = options
   apiMock.mockImplementation((url: string) =>
-    Promise.resolve(url.endsWith('/adapters') ? response({ adapters, pluginFailures }) : response({ indexers, encryptionConfigured: true })),
+    Promise.resolve(
+      url.endsWith('/adapters')
+        ? response({ adapters, pluginFailures })
+        : url.endsWith('/plugins/updates')
+          ? response({ updates: pluginUpdates })
+          : response({ indexers, encryptionConfigured: true }),
+    ),
   )
   const wrapper = mount(RequestIndexersPanel, { global: { stubs: DROPDOWN_STUBS } })
   mounted = wrapper
@@ -347,6 +359,65 @@ describe('RequestIndexersPanel', () => {
       const labels = [...sheet().querySelectorAll('button')].map((button) => button.textContent?.trim())
       expect(labels).toContain('Install plugin')
       expect(labels).not.toContain('Save')
+    })
+
+    it('shows, verifies and installs a published signed update', async () => {
+      const updates = [{ type: 'demo-tracker', currentVersion: '2.4.1', latestVersion: '2.5.0', state: 'available', autoUpdate: false }]
+      const review = {
+        ...INSPECTION,
+        type: 'demo-tracker',
+        label: 'Demo Tracker',
+        version: '2.5.0',
+        currentVersion: '2.4.1',
+        sha256: 'a'.repeat(64),
+        verified: true,
+        replaces: true,
+      }
+      const usingPlugin = indexer({ adapterType: 'demo-tracker', name: 'A tracker' })
+      apiMock.mockImplementation((url: string, init?: RequestInit) => {
+        if (url.endsWith('/plugins/demo-tracker/update/inspect')) return Promise.resolve(response(review))
+        if (url.endsWith('/plugins/demo-tracker/update') && init?.method === 'POST') {
+          return Promise.resolve(response({ ...updates[0], currentVersion: '2.5.0', state: 'current' }))
+        }
+        if (url.endsWith('/plugins/updates')) return Promise.resolve(response({ updates }))
+        if (url.endsWith('/adapters')) return Promise.resolve(response({ adapters: [descriptor(), PLUGIN], pluginFailures: [] }))
+        return Promise.resolve(response({ indexers: [usingPlugin], encryptionConfigured: true }))
+      })
+      const wrapper = mount(RequestIndexersPanel, { global: { stubs: DROPDOWN_STUBS } })
+      mounted = wrapper
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('Version 2.5.0 available')
+      await clickInPanel(wrapper, 'Review update')
+      expect(sheet().textContent).toContain("matches the publisher's Ed25519 signature")
+
+      clickInSheet('Replace plugin')
+      await flushPromises()
+
+      expect(apiMock).toHaveBeenCalledWith(
+        `${PATH}/plugins/demo-tracker/update`,
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ sha256: 'a'.repeat(64) }) }),
+      )
+      expect(toastMock.success).toHaveBeenCalledWith('Updated Demo Tracker to 2.5.0.')
+    })
+
+    it('requires an explicit per-plugin opt-in for automatic signed updates', async () => {
+      const status = { type: 'demo-tracker', currentVersion: '2.4.1', latestVersion: '2.5.0', state: 'available', autoUpdate: false }
+      const usingPlugin = indexer({ adapterType: 'demo-tracker', name: 'A tracker' })
+      const wrapper = await mountPanel({ indexers: [usingPlugin], adapters: [descriptor(), PLUGIN], pluginUpdates: [status] })
+      apiMock.mockClear()
+      apiMock.mockResolvedValue(response({ ...status, autoUpdate: true }))
+
+      const automatic = wrapper.find('[aria-label="Install signed updates automatically"]')
+      expect(automatic.attributes('aria-checked')).toBe('false')
+      await automatic.trigger('click')
+      await flushPromises()
+
+      expect(apiMock).toHaveBeenCalledWith(
+        `${PATH}/plugins/demo-tracker/auto-update`,
+        expect.objectContaining({ method: 'PUT', body: JSON.stringify({ enabled: true }) }),
+      )
+      expect(automatic.attributes('aria-checked')).toBe('true')
     })
 
     /**

@@ -3,6 +3,7 @@ import {
   bookRequestIsbn10To13,
   COMIC_FORMAT_LIST,
   EBOOK_FORMAT_LIST,
+  explainReleaseProfileMismatch,
   ISO_639_2_TO_1,
   isAudioFormat,
   isComicFormat,
@@ -227,6 +228,7 @@ export function toReleaseItem(scored: ScoredRelease, indexerName: string, reques
     score: scored.score,
     tier,
     tierName: tier === null ? null : (request.tiers[tier]?.name ?? null),
+    profileMismatch: tier === null ? explainReleaseProfileMismatch(base, request.tiers) : null,
     reasons: scored.reasons,
   };
 }

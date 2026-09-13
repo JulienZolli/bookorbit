@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ChevronRight, Loader2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
@@ -28,7 +28,7 @@ const { t } = useI18n()
 
 const { settings, loading, loadFailed, fetchSettings, save } = useRequestAutomation()
 const { libraries, fetchLibraries } = useLibraries()
-const { indexers, fetchIndexers } = useIndexers()
+const { indexers, adapters, fetchIndexers } = useIndexers()
 /**
  * Auto-grab switched on with nothing to search is the one setting on this tab that reports success
  * and does nothing. Every request it touches is handed straight back, and the summary above it
@@ -89,7 +89,13 @@ watch(settings, (next) => {
 onMounted(fetchSettings)
 onMounted(fetchLibraries)
 onMounted(fetchSourceStatus)
-onMounted(() => fetchIndexers({ withAdapters: false }))
+onMounted(fetchIndexers)
+
+watch(loading, async (isLoading) => {
+  if (isLoading || !/^#release-profile-(ebook|audiobook|comic)$/.test(window.location.hash)) return
+  await nextTick()
+  document.getElementById(window.location.hash.slice(1))?.scrollIntoView({ block: 'start' })
+})
 
 /**
  * What this server will actually do to an approved request, in one sentence. Assembled from the
@@ -423,6 +429,47 @@ function handleVerificationChange(enabled: boolean) {
     </div>
 
     <div class="settings-card">
+      <fieldset>
+        <legend class="settings-card-header w-full">
+          <span class="settings-card-title">{{ t('settings.system.requests.profiles.title') }}</span>
+        </legend>
+
+        <div class="border-t border-border px-4 py-3.5 md:px-5 md:py-4">
+          <p class="text-xs font-medium text-foreground">
+            {{ t('settings.system.requests.profiles.effectiveRule', { score: minScore }) }}
+          </p>
+          <p class="mt-1 settings-hint">{{ t('settings.system.requests.profiles.summary') }}</p>
+
+          <details class="group mt-2">
+            <summary
+              class="flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              <ChevronRight class="size-3.5 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
+              {{ t('settings.system.requests.profiles.howProfiles') }}
+            </summary>
+            <p class="mt-2 settings-hint settings-prose">{{ t('settings.system.requests.profiles.hint') }}</p>
+          </details>
+
+          <div class="mt-3 grid gap-4">
+            <div v-for="mediaKind in MEDIA_KINDS" :id="`release-profile-${mediaKind}`" :key="mediaKind" class="scroll-mt-6">
+              <h3 class="text-xs font-medium text-foreground">{{ t(`bookRequests.mediaKind.${mediaKind}`) }}</h3>
+              <div class="mt-1.5">
+                <ReleaseProfileEditor
+                  :key="`${mediaKind}-${editorRevision}`"
+                  :media-kind="mediaKind"
+                  :tiers="settings.profiles[mediaKind]"
+                  :indexers="indexers"
+                  :adapters="adapters"
+                  @update="handleProfileChange"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+    </div>
+
+    <div class="settings-card">
       <div class="settings-card-header">
         <span class="settings-card-title">{{ t('settings.system.requests.automation.groupImports') }}</span>
         <span class="settings-state-pill">{{ stateLabel(settings.verificationEnabled) }}</span>
@@ -480,33 +527,6 @@ function handleVerificationChange(enabled: boolean) {
               :destination="settings.destinations[mediaKind]"
               @update="handleDestinationChange"
             />
-          </div>
-        </div>
-      </fieldset>
-    </div>
-
-    <div class="settings-card">
-      <fieldset>
-        <legend class="settings-card-header w-full">
-          <span class="settings-card-title">{{ t('settings.system.requests.profiles.title') }}</span>
-        </legend>
-
-        <div class="border-t border-border px-4 py-3.5 md:px-5 md:py-4">
-          <p class="settings-hint settings-prose">{{ t('settings.system.requests.profiles.hint') }}</p>
-
-          <div class="mt-3 grid gap-4">
-            <div v-for="mediaKind in MEDIA_KINDS" :key="mediaKind">
-              <h3 class="text-xs font-medium text-foreground">{{ t(`bookRequests.mediaKind.${mediaKind}`) }}</h3>
-              <div class="mt-1.5">
-                <ReleaseProfileEditor
-                  :key="`${mediaKind}-${editorRevision}`"
-                  :media-kind="mediaKind"
-                  :tiers="settings.profiles[mediaKind]"
-                  :indexers="indexers"
-                  @update="handleProfileChange"
-                />
-              </div>
-            </div>
           </div>
         </div>
       </fieldset>

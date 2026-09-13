@@ -1,4 +1,5 @@
 import type { BookRequestMediaKind } from "./book-request";
+import type { ReleaseProfileMismatch } from "./book-request-profile";
 import type { BookRequestDownloadSource, DownloadDelivery } from "./download-client";
 import type { NetworkProfile } from "./network-profile";
 import { REQUEST_CREDENTIAL_ERROR_CODES } from "./request-credential";
@@ -130,6 +131,33 @@ export interface IndexerSettingsField {
   minItems?: number;
 }
 
+export interface PluginUpdateChannel {
+  manifestUrl: string;
+  ed25519PublicKey: string;
+}
+
+export type PluginUpdateState = "unsupported" | "unchecked" | "current" | "available" | "custom" | "failed";
+
+export interface PluginUpdateStatus {
+  type: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  state: PluginUpdateState;
+  autoUpdate: boolean;
+  checkedAt?: string;
+  error?: string;
+}
+
+export interface PluginUpdateListResult {
+  updates: PluginUpdateStatus[];
+}
+
+export interface PluginUpdateReview extends PluginInspection {
+  currentVersion?: string;
+  sha256: string;
+  verified: true;
+}
+
 /**
  * Everything the settings form needs to render one adapter, served at runtime rather than
  * compiled into the client, so an adapter that arrived from a plugin looks like any other.
@@ -141,6 +169,8 @@ export interface IndexerAdapterDescriptor {
   builtIn: boolean;
   /** The plugin release. Omitted by built-ins and legacy plugins that do not declare one. */
   version?: string;
+  /** Whether the publisher supplied a signed update channel. */
+  updateable?: boolean;
   requiresCredential: boolean;
   credentialKind: "apiKey" | "sessionId" | null;
   mediaKinds: BookRequestMediaKind[];
@@ -171,6 +201,8 @@ export interface PluginInspection {
   label: string;
   /** The plugin release. Omitted by plugins written before versions were exposed. */
   version?: string;
+  /** Signed update channel declared by the plugin, if it supports managed updates. */
+  update?: PluginUpdateChannel;
   requiresCredential: boolean;
   credentialKind: "apiKey" | "sessionId" | null;
   mediaKinds: BookRequestMediaKind[];
@@ -407,6 +439,8 @@ export interface ReleaseCandidateItem {
   tier: number | null;
   /** The operator's own name for that tier, carried so the row need not resolve it. */
   tierName: string | null;
+  /** Why the release missed its closest tier. Null when it matched or no profile is configured. */
+  profileMismatch: ReleaseProfileMismatch | null;
   reasons: ReleaseScoreReason[];
 }
 

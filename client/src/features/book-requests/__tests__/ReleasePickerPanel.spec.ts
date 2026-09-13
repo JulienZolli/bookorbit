@@ -87,6 +87,7 @@ function release(overrides: Partial<ReleaseCandidateItem> = {}): ReleaseCandidat
     score: 89,
     tier: null,
     tierName: null,
+    profileMismatch: null,
     reasons: [{ code: 'titleMatch', points: 55 }],
     ...overrides,
   }
@@ -801,6 +802,64 @@ describe('ReleasePickerPanel', () => {
 
       expect(rows[0].text()).toContain('Tiered but weaker')
       expect(rows[1].text()).toContain('Untiered but strong')
+    })
+
+    it('explains why a high-scoring release is outside the profile and links an administrator to it', async () => {
+      const wrapper = await render({
+        ...MIXED,
+        profileActive: true,
+        releases: [
+          release({
+            score: 73,
+            indexerName: 'NZB.life',
+            format: null,
+            formats: [],
+            profileMismatch: {
+              tier: 2,
+              tierName: 'EPUB fallback',
+              failures: [{ code: 'formatUnknown', expected: ['epub'] }],
+            },
+          }),
+        ],
+        indexers: [status({ indexerName: 'NZB.life', seedsBack: false, delivery: 'usenet' })],
+      })
+
+      expect(wrapper.text()).toContain('1 release was found, but automatic download will skip it')
+      expect(wrapper.text()).toContain('Match score and profile rules are separate checks')
+      expect(wrapper.text()).toContain('Closest tier: EPUB fallback')
+      expect(wrapper.text()).toContain('NZB.life did not state a format; this tier requires EPUB')
+      expect(wrapper.text()).not.toContain('add a tier with fewer conditions')
+
+      const link = wrapper.findAllComponents(RouterLinkStub).find((item) => item.text().includes('Review E-book profile'))
+      expect(link?.props('to')).toEqual({
+        name: 'settings-admin-requests',
+        query: { tab: 'automation' },
+        hash: '#release-profile-ebook',
+      })
+    })
+
+    it('keeps the exact mismatch visible without linking a viewer who cannot manage profiles', async () => {
+      hasPermission.mockImplementation((permission: string) => permission !== Permission.ManageAppSettings)
+      const wrapper = await render({
+        ...MIXED,
+        profileActive: true,
+        releases: [
+          release({
+            profileMismatch: {
+              tier: 0,
+              tierName: 'English EPUB',
+              failures: [
+                { code: 'format', expected: ['epub'], actual: ['pdf'] },
+                { code: 'languageUnknown', expected: ['en'] },
+              ],
+            },
+          }),
+        ],
+      })
+
+      expect(wrapper.text()).toContain('Format is PDF; this tier requires EPUB')
+      expect(wrapper.text()).toContain('did not state a language; this tier requires English')
+      expect(wrapper.text()).not.toContain('Review E-book profile')
     })
   })
 })

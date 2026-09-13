@@ -158,6 +158,7 @@ function describePlugin(adapter: PluginIndexerAdapter): IndexerAdapterDescriptor
     label: plugin.label,
     builtIn: false,
     ...(plugin.version ? { version: plugin.version } : {}),
+    ...(plugin.update ? { updateable: true } : {}),
     requiresCredential: plugin.requiresCredential,
     credentialKind: plugin.credentialKind,
     mediaKinds: [...plugin.mediaKinds],

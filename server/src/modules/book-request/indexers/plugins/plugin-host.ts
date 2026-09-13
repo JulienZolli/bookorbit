@@ -14,7 +14,7 @@ import { boundedResponse } from '../../../../common/utils/bounded-response';
 import { sanitizeLogValue } from '../../../../common/utils/log-sanitize.utils';
 import { safeFetch } from '../../../../common/utils/safe-fetch';
 import { withDeadline } from '../../../../common/utils/with-deadline.utils';
-import { ensureSafeUrl } from '../../../../common/utils/ssrf.utils';
+import { ensureSafeUrl, RemoteHostResolutionException } from '../../../../common/utils/ssrf.utils';
 import { buildSearchText } from '../search-text';
 import { MAX_TORRENT_FILE_BYTES } from '../../fulfillment/torrent.utils';
 import type { IndexerCredentialStore } from '../indexer-credential-store';
@@ -130,7 +130,14 @@ export class PluginIndexerAdapter implements IndexerAdapter {
       );
       // The URL is about to be handed to a download client, so it is checked here rather than
       // trusted: this is the one value a plugin produces that reaches the network on its own.
-      await ensureSafeUrl(file.url, { allowPrivate: config.allowPrivateAddress });
+      try {
+        await ensureSafeUrl(file.url, { allowPrivate: config.allowPrivateAddress });
+      } catch (error) {
+        if (error instanceof RemoteHostResolutionException) {
+          throw new IndexerSearchException('unreachable', `${config.name}: the download host could not be resolved`);
+        }
+        throw error;
+      }
       return file;
     };
   }
@@ -227,6 +234,9 @@ export class PluginIndexerAdapter implements IndexerAdapter {
       return await run();
     } catch (error) {
       if (error instanceof IndexerSearchException) throw error;
+      if (error instanceof RemoteHostResolutionException) {
+        throw new IndexerSearchException('unreachable', `${config.name}: the source host could not be resolved`);
+      }
       if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
         throw new IndexerSearchException('timeout', `${config.name} did not answer in time`);
       }

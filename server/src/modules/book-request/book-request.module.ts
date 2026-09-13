@@ -43,6 +43,7 @@ import { IndexerOperationLock } from './indexers/indexer-operation-lock';
 import { IndexerRegistry } from './indexers/indexer-registry';
 import { PluginLoaderService } from './indexers/plugins/plugin-loader.service';
 import { PluginInstallService } from './indexers/plugins/plugin-install.service';
+import { PluginUpdateService } from './indexers/plugins/plugin-update.service';
 import { IndexerRepository } from './indexers/indexer.repository';
 import { IndexerSearchService } from './indexers/indexer-search.service';
 import { TorznabAdapter } from './indexers/adapters/torznab.adapter';
@@ -125,6 +126,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
     IndexerConfigService,
     IndexerRegistry,
     PluginInstallService,
+    PluginUpdateService,
     PluginLoaderService,
     IndexerCredentialStore,
     IndexerSearchService,

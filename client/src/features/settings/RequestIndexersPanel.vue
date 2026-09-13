@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Loader2, Plug, Plus, Server as ServerIcon, Trash2, TriangleAlert, Upload } from '@lucide/vue'
+import { Loader2, Plug, Plus, RefreshCw, Server as ServerIcon, Trash2, TriangleAlert, Upload } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { BOOK_REQUEST_MEDIA_KINDS, INDEXER_ADAPTER_TYPES } from '@bookorbit/types'
 import type { IndexerAdapterDescriptor, IndexerItem, IndexerSettingsField } from '@bookorbit/types'
@@ -13,6 +13,7 @@ import ConnectionHealth from './ConnectionHealth.vue'
 import PluginDirectoryLink from './components/PluginDirectoryLink.vue'
 import RequestSourceRow from './components/RequestSourceRow.vue'
 import PluginVersionBadge from './components/PluginVersionBadge.vue'
+import PluginUpdateControls from './components/PluginUpdateControls.vue'
 import RequestSourcesEmpty from './components/RequestSourcesEmpty.vue'
 import SettingsEditorSheet from './components/SettingsEditorSheet.vue'
 import SettingsField from './components/SettingsField.vue'
@@ -34,6 +35,7 @@ const {
   indexers,
   adapters,
   pluginFailures,
+  pluginUpdates,
   adapterFor,
   encryptionConfigured,
   loading,
@@ -46,6 +48,10 @@ const {
   inspectPlugin,
   installPlugin,
   removePlugin,
+  fetchPluginUpdates,
+  inspectPluginUpdate,
+  installPluginUpdate,
+  setPluginAutomaticUpdate,
 } = useIndexers()
 
 watch(encryptionConfigured, (configured) => emit('encryptionState', configured))
@@ -54,6 +60,8 @@ const { isSuperuser } = usePermissions()
 
 /** Installing a plugin runs its code in the server process, so only an administrator may. */
 const canInstallPlugins = isSuperuser
+const hasPluginUpdateChannels = computed(() => adapters.value.some((adapter) => !adapter.builtIn && adapter.updateable))
+const reviewedPublishedUpdate = computed(() => (pluginReview.value && 'verified' in pluginReview.value ? pluginReview.value : null))
 
 /** The row whose test is in flight, and the row whose enabled flag is; both go inert on their own. */
 const testingId = ref<number | null>(null)
@@ -105,6 +113,7 @@ const {
   pluginReview,
   pluginBusy,
   pluginRestartPending,
+  checkingPluginUpdates,
   removingPlugin,
   pluginPendingRemoval,
   pluginRows,
@@ -116,12 +125,16 @@ const {
   pluginUseCount,
   pluginUsage,
   pendingRemovalUsage,
+  updateStatusFor,
   askRemovePlugin,
   askRemovePluginType,
   cancelRemovePlugin,
   confirmRemovePlugin,
   handleRowPluginUpdate,
   handleRowPluginRemove,
+  checkPluginUpdates,
+  reviewPublishedUpdate,
+  setAutomaticUpdate,
   startPluginInstall,
   startPluginUpdate,
   handlePluginChosen,
@@ -132,17 +145,27 @@ const {
   indexers,
   adapters,
   pluginFailures,
+  pluginUpdates,
   adapterFor,
   inspectPlugin,
   installPlugin,
   removePlugin,
+  fetchPluginUpdates,
+  inspectPluginUpdate,
+  installPluginUpdate,
+  setPluginAutomaticUpdate,
   fetchIndexers,
   editingType,
   cancelEdit,
   startCreateFor,
 })
 
-onMounted(fetchIndexers)
+async function loadPanel() {
+  await fetchIndexers()
+  if (canInstallPlugins.value) await fetchPluginUpdates(false)
+}
+
+onMounted(loadPanel)
 
 /**
  * A built-in adapter has translated copy keyed on its type; a plugin can only supply untranslated
@@ -297,10 +320,23 @@ function handleTestCurrent() {
             <h2 id="request-plugins-heading" class="settings-group-label mb-0">{{ t('settings.system.requests.indexers.plugins.title') }}</h2>
             <!-- Only while the group has rows. With none, the one call to action lives in the slot
                  below rather than twice on the same line of the page. -->
-            <Button v-if="canInstallPlugins && pluginRows.length" size="sm" variant="outline" :disabled="pluginBusy" @click="startPluginInstall">
-              <Upload :size="14" aria-hidden="true" />
-              {{ t('settings.system.requests.indexers.plugins.install') }}
-            </Button>
+            <div v-if="canInstallPlugins && pluginRows.length" class="flex items-center gap-2">
+              <Button
+                v-if="hasPluginUpdateChannels"
+                size="sm"
+                variant="outline"
+                :disabled="checkingPluginUpdates || pluginBusy"
+                @click="checkPluginUpdates"
+              >
+                <Loader2 v-if="checkingPluginUpdates" class="animate-spin" aria-hidden="true" />
+                <RefreshCw v-else :size="14" aria-hidden="true" />
+                {{ t('settings.system.requests.indexers.plugins.checkUpdates') }}
+              </Button>
+              <Button size="sm" variant="outline" :disabled="pluginBusy" @click="startPluginInstall">
+                <Upload :size="14" aria-hidden="true" />
+                {{ t('settings.system.requests.indexers.plugins.install') }}
+              </Button>
+            </div>
           </div>
 
           <p class="settings-hint settings-prose mt-1.5">
@@ -369,6 +405,13 @@ function handleTestCurrent() {
                     </span>
                   </div>
                   <p class="mt-1 font-mono text-xs break-all text-muted-foreground">{{ row.adapter.type }}</p>
+                  <PluginUpdateControls
+                    :updateable="row.adapter.updateable === true"
+                    :status="updateStatusFor(row.adapter.type)"
+                    :busy="pluginBusy"
+                    @review="reviewPublishedUpdate(row.adapter.type)"
+                    @automatic="setAutomaticUpdate(row.adapter.type, $event)"
+                  />
                 </div>
               </div>
 
@@ -425,6 +468,8 @@ function handleTestCurrent() {
               :busy="togglingId === row.indexer.id"
               :available="isAvailable(row.indexer.adapterType)"
               :plugin-version="adapterFor(row.indexer.adapterType)?.version"
+              :plugin-updateable="adapterFor(row.indexer.adapterType)?.updateable"
+              :plugin-update-status="updateStatusFor(row.indexer.adapterType)"
               :manage-plugin="canInstallPlugins"
               :plugin-busy="pluginBusy || removingPlugin === row.indexer.adapterType"
               @test="handleTest(row.indexer)"
@@ -432,6 +477,8 @@ function handleTestCurrent() {
               @toggle="handleToggleEnabled(row.indexer, $event)"
               @update-plugin="handleRowPluginUpdate(row.indexer.adapterType)"
               @remove-plugin="handleRowPluginRemove(row.indexer.adapterType)"
+              @review-plugin-update="reviewPublishedUpdate(row.indexer.adapterType)"
+              @automatic-plugin-update="setAutomaticUpdate(row.indexer.adapterType, $event)"
             />
           </li>
         </ul>
@@ -889,6 +936,16 @@ function handleTestCurrent() {
                 {{ pluginReview.version ?? t('settings.system.requests.indexers.plugins.versionUnknownValue') }}
               </dd>
             </div>
+            <div v-if="reviewedPublishedUpdate">
+              <dt class="settings-hint">{{ t('settings.system.requests.indexers.plugins.installedVersion') }}</dt>
+              <dd class="text-foreground">
+                {{ reviewedPublishedUpdate.currentVersion ?? t('settings.system.requests.indexers.plugins.versionUnknownValue') }}
+              </dd>
+            </div>
+            <div v-if="pluginReview.update" class="sm:col-span-2">
+              <dt class="settings-hint">{{ t('settings.system.requests.indexers.plugins.updateChannel') }}</dt>
+              <dd class="font-mono text-xs break-all text-foreground">{{ pluginReview.update.manifestUrl }}</dd>
+            </div>
             <div>
               <dt class="settings-hint">{{ t('settings.system.requests.indexers.plugins.media') }}</dt>
               <dd class="text-foreground">{{ pluginReview.mediaKinds.join(', ') }}</dd>
@@ -907,6 +964,9 @@ function handleTestCurrent() {
 
           <p role="alert" class="settings-hint text-destructive">
             {{ t('settings.system.requests.indexers.plugins.trustWarning') }}
+          </p>
+          <p v-if="reviewedPublishedUpdate" role="status" class="settings-hint text-primary">
+            {{ t('settings.system.requests.indexers.plugins.signatureVerified') }}
           </p>
           <p v-if="pluginReview.replaces" role="status" class="settings-hint text-primary">
             {{ t('settings.system.requests.indexers.plugins.replaces', { type: pluginReview.type }) }}
