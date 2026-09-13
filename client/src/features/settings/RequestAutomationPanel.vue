@@ -412,7 +412,7 @@ function handleVerificationChange(enabled: boolean) {
         </summary>
         <div class="mt-2 space-y-2 settings-prose">
           <p class="settings-hint">{{ t('settings.system.requests.automation.autoGrabHint') }}</p>
-          <p class="settings-hint">{{ t('settings.system.requests.automation.minScoreHint') }}</p>
+          <p class="settings-hint">{{ t('settings.system.requests.automation.minScoreHintV2') }}</p>
           <p class="settings-hint">{{ t('settings.system.requests.automation.autoRetryHint') }}</p>
           <p class="settings-hint">{{ t('settings.system.requests.automation.maxAttemptsHint') }}</p>
           <p class="settings-hint">{{ t('settings.system.requests.automation.autoSearchHint') }}</p>

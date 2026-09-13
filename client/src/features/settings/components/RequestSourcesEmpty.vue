@@ -62,10 +62,10 @@ function handleAddIndexer() {
       <div class="flex flex-col rounded-lg border border-border bg-card p-4 shadow-xs">
         <div class="flex items-center gap-2 text-muted-foreground">
           <Server :size="15" aria-hidden="true" />
-          <h3 class="text-sm font-medium text-foreground">{{ t('settings.system.requests.indexers.empty.torznabTitle') }}</h3>
+          <h3 class="text-sm font-medium text-foreground">{{ t('settings.system.requests.indexers.empty.builtInTitle') }}</h3>
         </div>
         <p class="mt-1.5 flex-1 text-xs leading-relaxed text-muted-foreground">
-          {{ t('settings.system.requests.indexers.empty.torznabBody') }}
+          {{ t('settings.system.requests.indexers.empty.builtInBody') }}
         </p>
         <div class="mt-3.5">
           <Button size="sm" @click="handleAddIndexer">

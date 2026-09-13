@@ -160,11 +160,11 @@ export class RequestWatchdogService implements OnApplicationBootstrap {
    * Staging directories with no attempt behind them any more.
    *
    * Direct-download progress lives in memory, so a transfer a restart interrupted leaves bytes
-   * nothing will poll, import or remove - and each failed URL stages under its own hash, so this
+   * nothing will poll, import or remove - and each failed URL stages under its own client key, so this
    * accumulates rather than overwrites.
    */
   private async reapStagedDownloads(): Promise<void> {
-    const live = new Set(await this.downloads.findLiveDirectHashes());
+    const live = new Set(await this.downloads.findLiveDirectClientKeys());
     const reaped = await this.direct.reapStaging(live);
     if (reaped === 0) return;
 

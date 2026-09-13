@@ -166,9 +166,15 @@ export function useIndexerDraft(options: IndexerDraftOptions) {
     clearFieldErrors()
   }
 
-  /** Torznab is the only built-in, so adding an indexer is adding a Torznab one. Nothing to pick. */
+  /** Start on the first built-in; a fresh draft may switch type before any adapter-specific values are entered. */
   function startCreate() {
-    openDraft(emptyDraft('torznab'))
+    openDraft(emptyDraft(INDEXER_ADAPTER_TYPES[0]))
+  }
+
+  function handleCreateTypeChange(event: Event) {
+    if (draft.value?.id !== null) return
+    const type = (event.target as HTMLSelectElement).value
+    openDraft({ ...emptyDraft(type), name: draft.value.name })
   }
 
   /**
@@ -425,6 +431,7 @@ export function useIndexerDraft(options: IndexerDraftOptions) {
     describeFailure,
     startCreate,
     startCreateFor,
+    handleCreateTypeChange,
     startEdit,
     cancelEdit,
     handleNameInput,

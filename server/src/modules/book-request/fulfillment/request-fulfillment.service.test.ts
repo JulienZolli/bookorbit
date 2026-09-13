@@ -3,6 +3,7 @@ import { NotificationType, UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES, WORKER_WRIT
 
 import type { RequestUser } from '../../../common/types/request-user';
 import type { BookRequestDownloadRow, BookRequestRow } from '../../../db/schema';
+import { newznabClientKey } from '../indexers/adapters/newznab.adapter';
 import { IndexerSearchException } from '../indexers/indexer-adapter';
 import { RequestFulfillmentService } from './request-fulfillment.service';
 
@@ -79,9 +80,9 @@ function makeService(
     resolveConfig: vi.fn().mockResolvedValue({ id: 4, adapterType: 'qbittorrent' }),
     ...overrides.clients,
   };
-  const adapter = { add: vi.fn().mockResolvedValue({ clientHash: INFO_HASH }) };
+  const adapter = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
   const registry = { require: vi.fn().mockReturnValue(adapter) };
-  const direct = { add: vi.fn().mockResolvedValue({ clientHash: INFO_HASH }) };
+  const direct = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
   const indexers = {
     resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'tracker', adapterType: 'torznab' }),
     ...overrides.indexers,
@@ -136,7 +137,7 @@ describe('RequestFulfillmentService.grab', () => {
     await service.grab(7, { magnet: MAGNET }, user());
 
     expect(downloads.create).toHaveBeenCalledWith(
-      expect.objectContaining({ requestId: 7, source: 'magnet', clientHash: INFO_HASH, status: 'queued', releaseTitle: 'Dune' }),
+      expect.objectContaining({ requestId: 7, source: 'magnet', clientKey: INFO_HASH, status: 'queued', releaseTitle: 'Dune' }),
     );
     expect(downloads.create.mock.invocationCallOrder[0]).toBeLessThan(adapter.add.mock.invocationCallOrder[0]);
   });
@@ -158,7 +159,7 @@ describe('RequestFulfillmentService.grab', () => {
   it('hands the client the trimmed magnet the hash was derived from', async () => {
     const { service, adapter } = makeService();
     await service.grab(7, { magnet: `  ${MAGNET}\n` }, user());
-    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ magnet: MAGNET, infoHash: INFO_HASH }), expect.anything());
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ magnet: MAGNET, clientKey: INFO_HASH }), expect.anything());
   });
 
   /** The size of what the release carries; a magnet does not state one, so it stays null. */
@@ -199,9 +200,7 @@ describe('RequestFulfillmentService.grab', () => {
     vi.useFakeTimers();
     try {
       const { service, downloads, adapter } = makeService();
-      adapter.add
-        .mockRejectedValueOnce(new ServiceUnavailableException('qBittorrent is restarting'))
-        .mockResolvedValueOnce({ clientHash: INFO_HASH });
+      adapter.add.mockRejectedValueOnce(new ServiceUnavailableException('qBittorrent is restarting')).mockResolvedValueOnce({ clientKey: INFO_HASH });
 
       const grabbed = service.grab(7, { magnet: MAGNET }, null);
       await vi.advanceTimersByTimeAsync(500);
@@ -375,8 +374,33 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
 
     await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
 
-    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'magnet', clientHash: INFO_HASH }));
-    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ magnet: MAGNET, infoHash: INFO_HASH }), expect.anything());
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'magnet', clientKey: INFO_HASH }));
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ magnet: MAGNET, clientKey: INFO_HASH }), expect.anything());
+  });
+
+  it('fetches a Newznab release and hands its NZB to an NZBGet client', async () => {
+    const nzb = Buffer.from('<?xml version="1.0"?><nzb />');
+    const clientKey = newznabClientKey(9, 'r-1');
+    const { service, downloads, adapter, indexerAdapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      clients: {
+        findOne: vi.fn().mockResolvedValue({ id: 8, name: 'nzbget', adapterType: 'nzbget', enabled: true, pathMappings: [{ id: 1 }] }),
+        findPreferredEnabled: vi.fn().mockResolvedValue({ id: 8 }),
+        resolveConfig: vi.fn().mockResolvedValue({ id: 8, adapterType: 'nzbget' }),
+      },
+      indexers: { resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'usenet', adapterType: 'newznab' }) },
+      indexerAdapter: { fetchNzbFile: vi.fn().mockResolvedValue(nzb) },
+    });
+    adapter.add.mockResolvedValue({ clientKey });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(indexerAdapter.fetchNzbFile).toHaveBeenCalledWith(RELEASE, expect.objectContaining({ adapterType: 'newznab' }));
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'nzb_file', clientKey, downloadClientId: 8 }));
+    expect(adapter.add).toHaveBeenCalledWith(
+      expect.objectContaining({ nzbFile: nzb, nzbFileName: 'Dune - Frank Herbert [EPUB].nzb', clientKey }),
+      expect.anything(),
+    );
   });
 
   it('inspects the torrent without creating an attempt and reuses it for the following grab', async () => {
@@ -596,7 +620,7 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     // Recorded as a refused attempt the way any other unimportable release is, and never fetched.
     await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user())).rejects.toMatchObject({ status: 400 });
     expect(direct.add).not.toHaveBeenCalled();
-    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', clientHash: null }));
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', clientKey: null }));
   });
 
   /** A `.zip` holding an epub is an archive the importer extracts, and `book.zip.epub` is not. */
@@ -645,7 +669,7 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
 
     expect(indexerAdapter.fetchTorrentFile).not.toHaveBeenCalled();
-    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'magnet', clientHash: INFO_HASH }));
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'magnet', clientKey: INFO_HASH }));
   });
 
   /**
@@ -692,7 +716,7 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
         status: 'failed',
         // No client took it and no hash exists, which is what tells a refusal from a failed download.
         downloadClientId: null,
-        clientHash: null,
+        clientKey: null,
         releaseGuid: 'r-1',
         errorMessage: 'tracker answered 406: Download blocked: VIP torrent',
       }),

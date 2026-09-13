@@ -162,9 +162,10 @@
   --pattern-modifier: oklch(0.47 0.17 305);
   --pattern-optional: oklch(0.46 0.1 195);
   --pattern-fallback: oklch(0.48 0.13 68);
-  /* Release chips. Protocol is a fact about the release and keeps two fixed hues; the source hues
+  /* Release chips. Protocol is a fact about the release and keeps fixed hues; the source hues
      below are the operator's to assign. */
   --pill-torrent: oklch(0.52 0.2 295);
+  --pill-usenet: oklch(0.47 0.13 235);
   --pill-direct: oklch(0.5 0.11 195);
 
   --pill-source-blue: oklch(0.55 0.16 245);
@@ -382,6 +383,7 @@
   --pattern-optional: oklch(0.82 0.09 195);
   --pattern-fallback: oklch(0.82 0.12 75);
   --pill-torrent: oklch(0.74 0.17 295);
+  --pill-usenet: oklch(0.75 0.12 235);
   --pill-direct: oklch(0.78 0.11 195);
 
   --pill-source-blue: oklch(0.72 0.14 245);

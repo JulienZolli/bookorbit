@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Loader2, Plug, Plus, Server as ServerIcon, Trash2, TriangleAlert, Upload } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { BOOK_REQUEST_MEDIA_KINDS } from '@bookorbit/types'
+import { BOOK_REQUEST_MEDIA_KINDS, INDEXER_ADAPTER_TYPES } from '@bookorbit/types'
 import type { IndexerAdapterDescriptor, IndexerItem, IndexerSettingsField } from '@bookorbit/types'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -72,6 +72,7 @@ const {
   describeFailure,
   startCreate,
   startCreateFor,
+  handleCreateTypeChange,
   startEdit,
   cancelEdit,
   handleNameInput,
@@ -107,7 +108,7 @@ const {
   removingPlugin,
   pluginPendingRemoval,
   pluginRows,
-  torznabRows,
+  builtInRows,
   nothingConfigured,
   allSourcesDisabled,
   editingPluginType,
@@ -283,9 +284,8 @@ function handleTestCurrent() {
     />
 
     <!--
-      Two things, added two ways. A plugin is a file you install and then fill in; a Torznab indexer
-      is an address you already have. Everything else on this page used to be the seam between those
-      two being explained rather than shown.
+      Two things, added two ways. A plugin is a file you install and then fill in; a built-in
+      indexer is an address you already have.
     -->
     <!-- A wider gap than anything inside a group takes, so the two labels read as a boundary. -->
     <div v-else class="space-y-6">
@@ -441,7 +441,7 @@ function handleTestCurrent() {
         <div>
           <div class="flex min-h-8 items-center justify-between gap-2">
             <h2 id="request-indexers-heading" class="settings-group-label mb-0">{{ t('settings.system.requests.indexers.title') }}</h2>
-            <Button v-if="torznabRows.length" size="sm" variant="outline" @click="startCreate">
+            <Button v-if="builtInRows.length" size="sm" variant="outline" @click="startCreate">
               <Plus :size="14" aria-hidden="true" />
               {{ t('settings.system.requests.indexers.add') }}
             </Button>
@@ -450,7 +450,7 @@ function handleTestCurrent() {
           <p class="settings-hint settings-prose mt-1.5">{{ t('settings.system.requests.indexers.hint') }}</p>
         </div>
 
-        <div v-if="!torznabRows.length" class="settings-empty-state flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 text-start md:px-5">
+        <div v-if="!builtInRows.length" class="settings-empty-state flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 text-start md:px-5">
           <span class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground" aria-hidden="true">
             <ServerIcon :size="17" />
           </span>
@@ -464,7 +464,7 @@ function handleTestCurrent() {
         </div>
 
         <ul v-else class="space-y-2">
-          <li v-for="indexer in torznabRows" :key="indexer.id" class="settings-card">
+          <li v-for="indexer in builtInRows" :key="indexer.id" class="settings-card">
             <RequestSourceRow
               :indexer="indexer"
               :testing="testingId === indexer.id"
@@ -544,10 +544,22 @@ function handleTestCurrent() {
 
       <template #default>
         <SettingsSection :title="t('settings.system.requests.sections.connection')">
-          <!-- The type is settled in the picker before this form exists, and is fixed afterwards:
-               a row carries that adapter's base URL, categories and settings, so swapping it here
-               would leave every one of them describing an adapter that no longer applies. It is
-               stated in the header badge instead. -->
+          <SettingsField v-if="draft.id === null" :label="t('settings.system.requests.indexers.fields.type')" input-id="indexer-type">
+            <template #default="{ describedBy }">
+              <select
+                id="indexer-type"
+                :value="draft.adapterType"
+                class="settings-control"
+                :aria-describedby="describedBy"
+                @change="handleCreateTypeChange"
+              >
+                <option v-for="type in INDEXER_ADAPTER_TYPES" :key="type" :value="type">
+                  {{ t(`settings.system.requests.indexers.types.${type}`) }}
+                </option>
+              </select>
+            </template>
+          </SettingsField>
+
           <SettingsField :label="t('settings.system.requests.indexers.fields.name')" input-id="indexer-name" required :error="fieldErrors.name">
             <template #default="{ describedBy, invalid }">
               <input

@@ -80,8 +80,8 @@ export function useIndexerPlugins(options: IndexerPluginsOptions) {
    * the wrong list. So an installed plugin nothing uses appears in this list as the row it is on the
    * way to becoming, and finishing it is a step on that row rather than a different section.
    *
-   * Only a plugin does this. Torznab is compiled in and always offerable, so an unconfigured torznab
-   * is not an object anyone owns and would be a permanent row for a thing that does not exist.
+   * Only a plugin does this. Built-ins are always offerable, so an unconfigured adapter is not an
+   * object anyone owns and would be a permanent row for a thing that does not exist.
    */
   const pluginRows = computed<PluginRow[]>(() => {
     const configured = new Set<string>()
@@ -104,15 +104,14 @@ export function useIndexerPlugins(options: IndexerPluginsOptions) {
     return rows
   })
 
-  /** Torznab is the only built-in, so this group is exactly the Prowlarr and Jackett endpoints. */
-  const torznabRows = computed(() => indexers.value.filter((indexer) => isBuiltInAdapter(indexer.adapterType)))
+  const builtInRows = computed(() => indexers.value.filter((indexer) => isBuiltInAdapter(indexer.adapterType)))
 
   /**
    * Nothing at all, which is what a fresh install looks like and the only state that gets its own
    * panel. A plugin that failed to load counts as something: it is the one row somebody has to act
    * on, and burying it under "no sources yet" would say the opposite.
    */
-  const nothingConfigured = computed(() => pluginRows.value.length === 0 && torznabRows.value.length === 0)
+  const nothingConfigured = computed(() => pluginRows.value.length === 0 && builtInRows.value.length === 0)
 
   /**
    * Rows exist and not one of them is on, which searches exactly as far as having none: the rows
@@ -304,7 +303,7 @@ export function useIndexerPlugins(options: IndexerPluginsOptions) {
     removingPlugin,
     pluginPendingRemoval,
     pluginRows,
-    torznabRows,
+    builtInRows,
     nothingConfigured,
     allSourcesDisabled,
     editingPluginType,

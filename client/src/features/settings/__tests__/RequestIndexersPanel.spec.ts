@@ -35,6 +35,7 @@ function descriptor(overrides: Partial<IndexerAdapterDescriptor> = {}): IndexerA
     mediaKinds: ['ebook', 'audiobook', 'comic'],
     usesCategories: true,
     seedsBack: true,
+    delivery: 'torrent',
     supportsIsbnSearch: false,
     defaultCategories: { ebook: [7020], audiobook: [3030], comic: [7030] },
     settingsFields: [],
@@ -44,8 +45,8 @@ function descriptor(overrides: Partial<IndexerAdapterDescriptor> = {}): IndexerA
 
 /**
  * An open library: no credential, no categories, nothing seeded back, and an address of its own.
- * A plugin rather than a built-in, because torznab is the only built-in and it is the opposite of
- * this on every one of those.
+ * A plugin rather than a built-in because it serves files directly rather than speaking one of
+ * the built-in indexer protocols.
  */
 const OPEN_LIBRARY = descriptor({
   type: 'open-library',
@@ -55,6 +56,7 @@ const OPEN_LIBRARY = descriptor({
   mediaKinds: ['ebook'],
   usesCategories: false,
   seedsBack: false,
+  delivery: 'file',
   defaultCategories: { ebook: [], audiobook: [], comic: [] },
   defaultBaseUrl: 'https://openlibrary.example',
 })
@@ -600,18 +602,25 @@ describe('RequestIndexersPanel', () => {
     expect(torznab.findAll('button').filter((button) => button.text().includes('Add indexer'))).toHaveLength(1)
   })
 
-  /**
-   * Two groups, because there are two things. Torznab is the only built-in, so adding an indexer
-   * asks nothing about which kind it is: that question only existed because plugins shared the list.
-   */
-  it('adds a torznab indexer without asking which kind it is', async () => {
-    const wrapper = await mountPanel({ adapters: [descriptor(), OPEN_LIBRARY, PLUGIN] })
+  it('offers every built-in indexer type for a new source', async () => {
+    const newznab = descriptor({ type: 'newznab', label: 'Newznab', seedsBack: false, delivery: 'usenet' })
+    const wrapper = await mountPanel({ adapters: [descriptor(), newznab, OPEN_LIBRARY, PLUGIN] })
 
     await clickInPanel(wrapper, 'Add indexer')
 
-    expect(sheet().querySelector('input[name="indexer-adapter-type"]')).toBeNull()
+    expect([...sheet().querySelectorAll<HTMLOptionElement>('#indexer-type option')].map((option) => option.value)).toEqual(['torznab', 'newznab'])
     expect(sheet().querySelector('#indexer-name')).not.toBeNull()
     expect(sheet().textContent).toContain('torznab')
+
+    const name = sheet().querySelector<HTMLInputElement>('#indexer-name')!
+    name.value = 'My indexer'
+    name.dispatchEvent(new Event('input', { bubbles: true }))
+    const type = sheet().querySelector<HTMLSelectElement>('#indexer-type')!
+    type.value = 'newznab'
+    type.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(sheet().querySelector<HTMLInputElement>('#indexer-name')?.value).toBe('My indexer')
   })
 
   it('keeps plugins and torznab indexers in groups of their own', async () => {

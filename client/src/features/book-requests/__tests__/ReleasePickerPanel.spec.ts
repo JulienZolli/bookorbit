@@ -106,6 +106,7 @@ function status(overrides: Partial<IndexerSearchStatus> = {}): IndexerSearchStat
     filtered: 0,
     query: { kind: 'titleAuthor', value: 'Spark of the Everflame Penn Cole' },
     seedsBack: true,
+    delivery: 'torrent',
     ...overrides,
   }
 }
@@ -131,6 +132,7 @@ const MIXED = {
       indexerName: 'Library Genesis',
       query: { kind: 'isbn', value: '9781234567897' },
       seedsBack: false,
+      delivery: 'file',
     }),
   ],
   uncoveredIndexerCount: 0,
@@ -165,7 +167,7 @@ const READY_INSPECTION = {
 
 /** The release list, not the source transcript above it: both are lists, so both hold `li`. */
 function releaseRows(wrapper: VueWrapper): DOMWrapper<Element>[] {
-  return wrapper.findAll('ul[aria-label="Every other release, ranked"] > li')
+  return wrapper.findAll('ul[aria-label="Releases, ranked"] > li')
 }
 
 function changeSearch(wrapper: VueWrapper): DOMWrapper<Element> {
@@ -257,7 +259,7 @@ describe('ReleasePickerPanel', () => {
     })
 
     const panel = wrapper.get('section[aria-label="Active search"]')
-    expect(panel.text()).toContain('Nothing found for 9781234567897')
+    expect(panel.text()).toContain('Nothing found for Spark of the Everflame Penn Cole')
     expect(wrapper.get('#release-search-options').text()).toContain('9781250301697')
     // The panel is the empty state now, so nothing repeats it under the list.
     expect(wrapper.text()).not.toContain('No release matched this request.')
@@ -488,8 +490,48 @@ describe('ReleasePickerPanel', () => {
     expect(chipClass(libgen, 'Direct')).toContain('--pill-direct')
   })
 
+  it('labels a Newznab release as Usenet without showing swarm counts', async () => {
+    const search = {
+      ...MIXED,
+      indexers: [status({ seedsBack: false, delivery: 'usenet' })],
+      releases: [release({ seeders: null })],
+    }
+
+    const row = releaseRows(await render(search))[0]!
+    expect(row.text()).toContain('Usenet')
+    expect(row.text()).not.toContain('Seeders')
+    expect(
+      row
+        .findAll('span')
+        .find((span) => span.text() === 'Usenet')
+        ?.attributes('class'),
+    ).toContain('--pill-usenet')
+    expect(row.text()).toContain('About contents')
+  })
+
+  it('headlines the title and author query that actually returned a Newznab fallback', async () => {
+    const search = {
+      ...MIXED,
+      indexers: [
+        status({
+          seedsBack: false,
+          delivery: 'usenet',
+          query: { kind: 'titleAuthor' as const, value: 'Spark of the Everflame Penn Cole' },
+        }),
+      ],
+      releases: [release({ seeders: null })],
+    }
+
+    const panel = (await render(search)).get('section[aria-label="Active search"]')
+    expect(panel.text()).toContain('Searched title and authorSpark of the Everflame Penn Cole')
+    expect(panel.text()).not.toContain('Searched9781234567897')
+  })
+
   it('wears the colour the operator gave the source, and stays neutral for one with none', async () => {
-    const search = { ...MIXED, indexers: [status({ color: 'orange' }), status({ indexerId: 2, indexerName: 'Library Genesis', seedsBack: false })] }
+    const search = {
+      ...MIXED,
+      indexers: [status({ color: 'orange' }), status({ indexerId: 2, indexerName: 'Library Genesis', seedsBack: false, delivery: 'file' })],
+    }
     const rows = releaseRows(await render(search))
     const chipClass = (row: (typeof rows)[number], name: string) =>
       row
@@ -650,7 +692,7 @@ describe('ReleasePickerPanel', () => {
 
     it('filters to a single file', async () => {
       const wrapper = await render(AUDIO)
-      const chip = wrapper.findAll('[aria-pressed]').find((option) => option.text().startsWith('One book file'))
+      const chip = wrapper.findAll('[aria-pressed]').find((option) => option.text().startsWith('One listed file'))
       await chip!.trigger('click')
 
       const rows = releaseRows(wrapper).map((row) => row.text())
@@ -664,7 +706,7 @@ describe('ReleasePickerPanel', () => {
         ...AUDIO,
         releases: [...AUDIO.releases, release({ guid: 'silent', title: 'Unstated', fileCount: null })],
       })
-      const chip = wrapper.findAll('[aria-pressed]').find((option) => option.text().startsWith('Several files'))
+      const chip = wrapper.findAll('[aria-pressed]').find((option) => option.text().startsWith('Multiple listed files'))
       await chip!.trigger('click')
 
       expect(releaseRows(wrapper).some((row) => row.text().includes('Unstated'))).toBe(false)

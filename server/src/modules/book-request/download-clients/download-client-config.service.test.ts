@@ -94,16 +94,17 @@ describe('DownloadClientConfigService', () => {
   });
 
   /** An approver may pick a client without being trusted with how to reach it. */
-  it('summarises only compatible enabled clients as names and ids', async () => {
+  it('summarises enabled clients with their delivery capability', async () => {
     const { service } = makeService({
       repo: {
-        findAllEnabled: vi.fn().mockResolvedValue([clientRow()]),
+        findAllEnabled: vi.fn().mockResolvedValue([clientRow(), clientRow({ id: 5, name: 'usenet', adapterType: 'nzbget' })]),
       },
     });
 
-    await expect(service.findEnabledSummaries('torrent')).resolves.toEqual([{ id: 4, name: 'qbit', color: null }]);
-    // Direct files are fetched by BookOrbit itself, so there is never a client row to pick.
-    await expect(service.findEnabledSummaries('file')).resolves.toEqual([]);
+    await expect(service.findEnabledSummaries()).resolves.toEqual([
+      { id: 4, name: 'qbit', color: null, delivery: 'torrent' },
+      { id: 5, name: 'usenet', color: null, delivery: 'usenet' },
+    ]);
   });
 
   it('answers with nothing rather than inventing a client when none is configured', async () => {
@@ -124,6 +125,13 @@ describe('DownloadClientConfigService', () => {
     const { service, adapter } = makeService();
     await service.update(4, { priority: 9 });
     expect(adapter.forget).not.toHaveBeenCalled();
+  });
+
+  it('refuses to change the type of a saved client', async () => {
+    const { service, repo } = makeService();
+
+    await expect(service.update(4, { adapterType: 'nzbget' })).rejects.toThrow('cannot change type');
+    expect(repo.update).not.toHaveBeenCalled();
   });
 
   it('persists an assigned color without reopening the client connection', async () => {

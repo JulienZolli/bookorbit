@@ -98,6 +98,7 @@ export class IndexerSearchService {
 
     for (const { config, releases, query: indexerQuery, failure, error } of outcomes) {
       const seedsBack = this.registry.seedsBack(config.adapterType);
+      const delivery = this.registry.delivery(config.adapterType);
       if (failure) {
         statuses.push({
           indexerId: config.id,
@@ -110,6 +111,7 @@ export class IndexerSearchService {
           failure,
           error,
           seedsBack,
+          delivery,
         });
         continue;
       }
@@ -155,6 +157,7 @@ export class IndexerSearchService {
           failure: 'error',
           error: `${config.name} returned a release BookOrbit could not read: ${message}`,
           seedsBack,
+          delivery,
         });
         continue;
       }
@@ -168,6 +171,7 @@ export class IndexerSearchService {
         filtered,
         query: indexerQuery,
         seedsBack,
+        delivery,
       });
     }
 
@@ -303,9 +307,9 @@ export class IndexerSearchService {
     }
 
     // Withheld rather than flagged, so an adapter cannot search an identifier it was never given.
-    const indexerQuery: IndexerSearchQuery =
+    let indexerQuery: IndexerSearchQuery =
       this.searchesIsbn(config) && query.isbn13 ? { kind: 'isbn', value: query.isbn13 } : { kind: 'titleAuthor', value: buildSearchText(query) };
-    const indexerScopedQuery: ReleaseQuery = indexerQuery.kind === 'isbn' ? query : { ...query, isbn13: null, isbn13s: [] };
+    let indexerScopedQuery: ReleaseQuery = indexerQuery.kind === 'isbn' ? query : { ...query, isbn13: null, isbn13s: [] };
 
     const deadline = AbortSignal.timeout(PER_INDEXER_TIMEOUT_MS);
     try {
@@ -318,6 +322,15 @@ export class IndexerSearchService {
         deadline,
         () => new IndexerSearchException('timeout', `${config.name} did not answer in time`),
       );
+      if (releases.length === 0 && indexerQuery.kind === 'isbn') {
+        indexerQuery = { kind: 'titleAuthor', value: buildSearchText(query) };
+        indexerScopedQuery = { ...query, isbn13: null, isbn13s: [] };
+        releases = await withDeadline(
+          adapter.search(indexerScopedQuery, config, deadline),
+          deadline,
+          () => new IndexerSearchException('timeout', `${config.name} did not answer in time`),
+        );
+      }
       if (releases.length === 0 && indexerQuery.kind === 'titleAuthor' && query.author?.trim()) {
         const titleOnlyQuery = { ...indexerScopedQuery, author: null };
         releases = await withDeadline(

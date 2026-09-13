@@ -63,7 +63,16 @@ function release(overrides: Partial<ReleaseCandidate> = {}): ReleaseCandidate {
  */
 function makeService(
   configs: ResolvedIndexerConfig[],
-  adapters: Record<string, { search: ReturnType<typeof vi.fn>; mediaKinds?: readonly string[]; seedsBack?: boolean; supportsIsbnSearch?: boolean }>,
+  adapters: Record<
+    string,
+    {
+      search: ReturnType<typeof vi.fn>;
+      mediaKinds?: readonly string[];
+      seedsBack?: boolean;
+      supportsIsbnSearch?: boolean;
+      delivery?: 'torrent' | 'usenet' | 'file';
+    }
+  >,
 ) {
   // The rows that exist, of which `configs` is the enabled subset. Every case here builds its
   // sources enabled, so the two counts match unless a case says otherwise.
@@ -79,6 +88,7 @@ function makeService(
       return adapter ? { mediaKinds: ['ebook', 'audiobook', 'comic'], supportsIsbnSearch: false, ...adapter } : undefined;
     }),
     seedsBack: vi.fn((type: string) => adapters[type]?.seedsBack ?? true),
+    delivery: vi.fn((type: string) => adapters[type]?.delivery ?? (adapters[type]?.seedsBack === false ? 'file' : 'torrent')),
   };
   // No profile, which is the shipped default and keeps these cases about search and scoring.
   const automationSettings = { get: vi.fn(() => Promise.resolve({ profiles: emptyReleaseProfiles() })) };
@@ -207,7 +217,7 @@ describe('IndexerSearchService', () => {
   });
 
   it('searches only the recommended ISBN while retaining every distinct provider ISBN as an alternative', async () => {
-    const libgen = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const libgen = { search: vi.fn().mockResolvedValueOnce([release()]), supportsIsbnSearch: true };
     const { service } = makeService([indexer({ adapterType: pluginType('libgen') })], { libgen });
 
     const result = await service.search(
@@ -226,6 +236,51 @@ describe('IndexerSearchService', () => {
     );
     expect(result.criteria).toMatchObject({ activeIsbn: '9780441013593', isbns: ['9780441013593', '9781250301697'] });
     expect(result.indexers[0]?.query).toEqual({ kind: 'isbn', value: '9780441013593' });
+  });
+
+  it('falls back from an empty ISBN search to title and author without identifiers', async () => {
+    const libgen = {
+      search: vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([release()]),
+      supportsIsbnSearch: true,
+    };
+    const { service } = makeService([indexer({ adapterType: pluginType('libgen') })], { libgen });
+
+    const result = await service.search(request({ isbn13: '9780441172719' }));
+
+    expect(libgen.search).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ isbn13: '9780441172719', isbn13s: ['9780441172719'] }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(libgen.search).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ title: 'Dune', author: 'Frank Herbert', isbn13: null, isbn13s: [] }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(result.releases).toHaveLength(1);
+    expect(result.indexers[0]?.query).toEqual({ kind: 'titleAuthor', value: 'Dune Frank Herbert' });
+  });
+
+  it('uses the existing title-only fallback after ISBN and title-author searches are empty', async () => {
+    const libgen = {
+      search: vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([release()]),
+      supportsIsbnSearch: true,
+    };
+    const { service } = makeService([indexer({ adapterType: pluginType('libgen') })], { libgen });
+
+    const result = await service.search(request({ isbn13: '9780441172719' }));
+
+    expect(libgen.search).toHaveBeenCalledTimes(3);
+    expect(libgen.search).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ title: 'Dune', author: null, isbn13: null, isbn13s: [] }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(result.releases).toHaveLength(1);
+    expect(result.indexers[0]?.query).toEqual({ kind: 'titleAuthor', value: 'Dune Frank Herbert' });
   });
 
   it('uses explicit picker overrides instead of silently retaining request search fields', async () => {
@@ -306,7 +361,7 @@ describe('IndexerSearchService', () => {
 
   it('limits fallback passes to ISBN-capable indexers', async () => {
     const torznab = { search: vi.fn().mockResolvedValue([]) };
-    const libgen = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const libgen = { search: vi.fn().mockResolvedValue([release({ indexerId: 2 })]), supportsIsbnSearch: true };
     const { service } = makeService([indexer(), indexer({ id: 2, name: 'libgen', adapterType: pluginType('libgen') })], {
       torznab,
       libgen,
@@ -354,6 +409,7 @@ describe('IndexerSearchService', () => {
       {
         indexerId: 1,
         indexerName: 'jackett',
+        color: undefined,
         ok: false,
         count: 0,
         filtered: 0,
@@ -361,15 +417,18 @@ describe('IndexerSearchService', () => {
         failure: 'unauthorized',
         error: 'bad key',
         seedsBack: true,
+        delivery: 'torrent',
       },
       {
         indexerId: 2,
         indexerName: 'archive',
+        color: undefined,
         ok: true,
         count: 1,
         filtered: 0,
         query: { kind: 'titleAuthor', value: 'Dune Frank Herbert' },
         seedsBack: true,
+        delivery: 'torrent',
       },
     ]);
   });
@@ -455,7 +514,7 @@ describe('IndexerSearchService', () => {
   });
 
   it('keeps all-indexer and ISBN-capable search caches separate', async () => {
-    const libgen = { search: vi.fn().mockResolvedValue([]), supportsIsbnSearch: true };
+    const libgen = { search: vi.fn().mockResolvedValue([release()]), supportsIsbnSearch: true };
     const { service } = makeService([indexer({ adapterType: pluginType('libgen') })], { libgen });
     const book = request({ isbn13: '9780441172719' });
 

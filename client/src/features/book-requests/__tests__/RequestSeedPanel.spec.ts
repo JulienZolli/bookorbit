@@ -26,7 +26,7 @@ function seed(overrides: Partial<BookRequestSeedStatus> = {}): BookRequestSeedSt
     downloadId: 11,
     downloadClientId: 4,
     downloadClientName: 'qbit',
-    clientHash: 'c9e15763f722f23e98a29decdfae341b98d53056',
+    clientKey: 'c9e15763f722f23e98a29decdfae341b98d53056',
     seeding: true,
     ratio: 1.25,
     ratioGoal: 2,

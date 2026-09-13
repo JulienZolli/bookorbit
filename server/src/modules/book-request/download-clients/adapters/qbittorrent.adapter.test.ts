@@ -89,8 +89,8 @@ describe('QbittorrentAdapter', () => {
     it('posts a magnet with the configured category and returns the caller-derived hash', async () => {
       const { calls } = mockFetch();
 
-      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, infoHash: INFO_HASH }, config())).resolves.toEqual({
-        clientHash: INFO_HASH,
+      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
       });
 
       const add = calls.find((call) => call.url.includes('/api/v2/torrents/add'));
@@ -102,7 +102,7 @@ describe('QbittorrentAdapter', () => {
     it('passes seed goals through so the client, not BookOrbit, enforces them', async () => {
       const { calls } = mockFetch();
 
-      await adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, infoHash: INFO_HASH, seedRatioGoal: 2, seedTimeMinutes: 4320 }, config());
+      await adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH, seedRatioGoal: 2, seedTimeMinutes: 4320 }, config());
 
       const form = calls.find((call) => call.url.includes('/torrents/add'))?.init.body as FormData;
       expect(form.get('ratioLimit')).toBe('2');
@@ -112,7 +112,7 @@ describe('QbittorrentAdapter', () => {
     it('uploads a .torrent as a file part', async () => {
       const { calls } = mockFetch();
 
-      await adapter.add({ torrentFile: Buffer.from('d4:infod4:name4:duneee'), torrentFileName: 'dune.torrent', infoHash: INFO_HASH }, config());
+      await adapter.add({ torrentFile: Buffer.from('d4:infod4:name4:duneee'), torrentFileName: 'dune.torrent', clientKey: INFO_HASH }, config());
 
       const form = calls.find((call) => call.url.includes('/torrents/add'))?.init.body as FormData;
       expect(form.get('torrents')).toBeInstanceOf(Blob);
@@ -125,7 +125,7 @@ describe('QbittorrentAdapter', () => {
       handlers.set('/torrents/add', () => response('Fails.'));
       handlers.set('/torrents/info', () => response([]));
 
-      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, infoHash: INFO_HASH }, config())).rejects.toThrow(
+      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).rejects.toThrow(
         /could not read that torrent/,
       );
     });
@@ -140,8 +140,8 @@ describe('QbittorrentAdapter', () => {
       handlers.set('/torrents/add', () => response('Fails.'));
       handlers.set('/torrents/info', () => response([{ hash: INFO_HASH, state: 'stalledUP', progress: 1 }]));
 
-      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, infoHash: INFO_HASH }, config())).resolves.toEqual({
-        clientHash: INFO_HASH,
+      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
       });
     });
 
@@ -150,12 +150,12 @@ describe('QbittorrentAdapter', () => {
       handlers.set('/torrents/add', () => response('Fails.'));
       handlers.set('/torrents/info', () => response('Forbidden', { status: 403 }));
 
-      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, infoHash: INFO_HASH }, config())).rejects.toThrow(BadRequestException);
+      await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).rejects.toThrow(BadRequestException);
     });
 
     it('refuses a payload with neither a magnet nor a file', async () => {
       mockFetch();
-      await expect(adapter.add({ infoHash: INFO_HASH }, config())).rejects.toThrow(BadRequestException);
+      await expect(adapter.add({ clientKey: INFO_HASH }, config())).rejects.toThrow(BadRequestException);
     });
   });
 
@@ -175,7 +175,7 @@ describe('QbittorrentAdapter', () => {
       expect(calls.filter((call) => call.url.includes('/torrents/info'))).toHaveLength(1);
       expect(statuses).toEqual([
         {
-          infoHash: INFO_HASH,
+          clientKey: INFO_HASH,
           state: 'downloading',
           progressPercent: 42,
           downloadedBytes: 420,
@@ -263,14 +263,14 @@ describe('QbittorrentAdapter', () => {
     it.each([INFO_HASH, V2, PRIMARY])('reports completion under the requested identity %s', async (hash) => {
       hybridClient();
       await expect(adapter.status([hash.toUpperCase()], config())).resolves.toEqual([
-        expect.objectContaining({ infoHash: hash, state: 'completed', progressPercent: 100 }),
+        expect.objectContaining({ clientKey: hash, state: 'completed', progressPercent: 100 }),
       ]);
     });
 
     it('matches aliases even when a client returns them in the filtered response', async () => {
       const { calls, handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([{ ...hybrid, hash: PRIMARY.toUpperCase(), infohash_v1: INFO_HASH.toUpperCase() }]));
-      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ infoHash: INFO_HASH })]);
+      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ clientKey: INFO_HASH })]);
       expect(calls.filter((call) => call.url.includes('/torrents/info'))).toHaveLength(1);
     });
 
@@ -278,7 +278,7 @@ describe('QbittorrentAdapter', () => {
       const { handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([hybrid, hybrid]));
       const statuses = await adapter.status([INFO_HASH, INFO_HASH.toUpperCase(), PRIMARY, V2], config());
-      expect(statuses.map((status) => status.infoHash).sort()).toEqual([INFO_HASH, PRIMARY, V2].sort());
+      expect(statuses.map((status) => status.clientKey).sort()).toEqual([INFO_HASH, PRIMARY, V2].sort());
     });
 
     it.each([V2.slice(0, 12), V2.slice(0, 39), V2.slice(0, 41), '0'.repeat(40)])(
@@ -293,7 +293,7 @@ describe('QbittorrentAdapter', () => {
     it('ignores malformed alias fields without discarding the valid primary identity', async () => {
       const { handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([{ ...hybrid, infohash_v1: 123, infohash_v2: { hash: V2 } }]));
-      expect(await adapter.status([PRIMARY, INFO_HASH], config())).toEqual([expect.objectContaining({ infoHash: PRIMARY })]);
+      expect(await adapter.status([PRIMARY, INFO_HASH], config())).toEqual([expect.objectContaining({ clientKey: PRIMARY })]);
     });
 
     it('pages the fallback once for the batch and caches only verified primary mappings', async () => {
@@ -351,7 +351,7 @@ describe('QbittorrentAdapter', () => {
       const { calls, handlers } = hybridClient();
       await adapter.status([INFO_HASH], config());
       handlers.set('/torrents/info', (url) => response(url.searchParams.has('hashes') ? [] : [{ ...hybrid, hash: INFO_HASH }]));
-      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ infoHash: INFO_HASH, state: 'completed' })]);
+      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ clientKey: INFO_HASH, state: 'completed' })]);
       calls.length = 0;
       await adapter.status([INFO_HASH], config());
       expect(calls[0].url).toContain(`hashes=${INFO_HASH}`);
@@ -405,8 +405,8 @@ describe('QbittorrentAdapter', () => {
     it.each([200, 409])('adopts an existing hybrid on an add rejection with HTTP %i', async (status) => {
       const { handlers } = hybridClient();
       handlers.set('/torrents/add', () => response(status === 409 ? 'Conflict' : 'Fails.', { status }));
-      expect(await adapter.add({ infoHash: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}&xt=urn:btmh:1220${V2}` }, config())).toEqual({
-        clientHash: INFO_HASH,
+      expect(await adapter.add({ clientKey: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}&xt=urn:btmh:1220${V2}` }, config())).toEqual({
+        clientKey: INFO_HASH,
       });
     });
 
@@ -414,7 +414,7 @@ describe('QbittorrentAdapter', () => {
       const { handlers } = mockFetch();
       handlers.set('/torrents/add', () => response('Conflict', { status: 409 }));
       handlers.set('/torrents/info', () => response([], { status }));
-      await expect(adapter.add({ infoHash: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}` }, config())).rejects.toThrow(
+      await expect(adapter.add({ clientKey: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}` }, config())).rejects.toThrow(
         'qBittorrent answered 409 for /api/v2/torrents/add',
       );
     });
@@ -422,7 +422,7 @@ describe('QbittorrentAdapter', () => {
     it('does not adopt after an unrelated server failure', async () => {
       const { calls, handlers } = hybridClient();
       handlers.set('/torrents/add', () => response('Unavailable', { status: 503 }));
-      await expect(adapter.add({ infoHash: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}` }, config())).rejects.toThrow(
+      await expect(adapter.add({ clientKey: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}` }, config())).rejects.toThrow(
         'qBittorrent answered 503',
       );
       expect(calls.some((call) => call.url.includes('/torrents/info'))).toBe(false);
@@ -432,7 +432,7 @@ describe('QbittorrentAdapter', () => {
       const { calls, handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([{ ...hybrid, state: 'metaDL', downloaded: 0, progress: 0 }]));
       handlers.set('/torrents/trackers', () => response([{ url: 'https://tracker.example/announce', status: 4, msg: 'Denied' }]));
-      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ infoHash: INFO_HASH, trackerError: 'Denied' })]);
+      expect(await adapter.status([INFO_HASH], config())).toEqual([expect.objectContaining({ clientKey: INFO_HASH, trackerError: 'Denied' })]);
       expect(calls.find((call) => call.url.includes('/torrents/trackers'))?.url).toContain(`hash=${PRIMARY}`);
     });
 
@@ -469,7 +469,7 @@ describe('QbittorrentAdapter', () => {
     it('resolves full and truncated v2 aliases even when v1 is primary', async () => {
       const { handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([{ ...hybrid, hash: INFO_HASH, infohash_v2: V2.toUpperCase() }]));
-      expect((await adapter.status([V2, PRIMARY], config())).map((status) => status.infoHash).sort()).toEqual([V2, PRIMARY].sort());
+      expect((await adapter.status([V2, PRIMARY], config())).map((status) => status.clientKey).sort()).toEqual([V2, PRIMARY].sort());
     });
 
     it('evicts old aliases when the bounded cache fills without losing the ability to rediscover them', async () => {
@@ -519,7 +519,7 @@ describe('QbittorrentAdapter', () => {
       const { calls, handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([hybrid, { hash: 'f'.repeat(40), infohash_v1: '0'.repeat(40) }]));
       const inventory = await adapter.listOwned(config());
-      expect(inventory.items.map((item) => item.infoHash)).toEqual([INFO_HASH, 'f'.repeat(40)]);
+      expect(inventory.items.map((item) => item.clientKey)).toEqual([INFO_HASH, 'f'.repeat(40)]);
       expect(new URL(calls.at(-1)!.url).searchParams.get('limit')).toBe('1001');
     });
   });

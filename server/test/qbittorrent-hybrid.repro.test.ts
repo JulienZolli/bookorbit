@@ -116,7 +116,7 @@ describe.skipIf(process.env.BO_REPRO_1318 !== '1')('issue 1318 against real qBit
     await vi.waitFor(async () => expect(await (await api('app/version')).text()).toBe('v5.2.3'), { timeout: 30_000, interval: 250 });
 
     expect(infoHashFromMagnet(MAGNET)).toBe(V1);
-    expect(await adapter.add({ magnet: MAGNET, infoHash: infoHashFromMagnet(MAGNET) }, config)).toEqual({ clientHash: V1 });
+    expect(await adapter.add({ magnet: MAGNET, clientKey: infoHashFromMagnet(MAGNET) }, config)).toEqual({ clientKey: V1 });
     await vi.waitFor(
       async () => {
         expect(await (await api(`torrents/info?hashes=${PRIMARY}`)).json()).toEqual([
@@ -162,9 +162,9 @@ describe.skipIf(process.env.BO_REPRO_1318 !== '1')('issue 1318 against real qBit
   });
 
   it('finds completion under both the stored hash and the primary hash', async () => {
-    expect(await adapter.status([V1], config)).toEqual([expect.objectContaining({ infoHash: V1, state: 'completed', progressPercent: 100 })]);
+    expect(await adapter.status([V1], config)).toEqual([expect.objectContaining({ clientKey: V1, state: 'completed', progressPercent: 100 })]);
     expect(await adapter.status([PRIMARY], config)).toEqual([
-      expect.objectContaining({ infoHash: PRIMARY, state: 'completed', progressPercent: 100 }),
+      expect.objectContaining({ clientKey: PRIMARY, state: 'completed', progressPercent: 100 }),
     ]);
   });
 
@@ -174,7 +174,7 @@ describe.skipIf(process.env.BO_REPRO_1318 !== '1')('issue 1318 against real qBit
       id: 11,
       requestId: 7,
       downloadClientId: config.id,
-      clientHash: V1,
+      clientKey: V1,
       source: 'magnet',
       status: 'downloading',
       bookDockFileId: null,
@@ -229,11 +229,11 @@ describe.skipIf(process.env.BO_REPRO_1318 !== '1')('issue 1318 against real qBit
   });
 
   it('adopts a retry after qBittorrent rejects the duplicate with 409', async () => {
-    await expect(adapter.add({ magnet: MAGNET, infoHash: V1 }, config)).resolves.toEqual({ clientHash: V1 });
+    await expect(adapter.add({ magnet: MAGNET, clientKey: V1 }, config)).resolves.toEqual({ clientKey: V1 });
     expect(await adapter.status([PRIMARY], config)).toEqual([expect.objectContaining({ state: 'completed', progressPercent: 100 })]);
   });
   it('lists the hybrid under the tracked v1 identity and removes it without deleting its file', async () => {
-    expect((await adapter.listOwned(config)).items).toEqual([expect.objectContaining({ infoHash: V1, state: 'completed' })]);
+    expect((await adapter.listOwned(config)).items).toEqual([expect.objectContaining({ clientKey: V1, state: 'completed' })]);
     await adapter.remove(V1, config, { deleteFiles: false });
     await vi.waitFor(async () => expect(await (await api('torrents/info')).json()).toEqual([]), { timeout: 10_000, interval: 100 });
     expect(await readFile(join(root, 'downloads', FILE_NAME))).toEqual(CONTENT);

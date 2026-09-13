@@ -8,7 +8,6 @@ import type {
   DownloadClientSummary,
   DownloadClientTestResult,
   DownloadClientType,
-  DownloadDelivery,
   PathMappingHardlinkTestResult,
 } from '@bookorbit/types';
 import { DOWNLOAD_CLIENT_DELIVERY } from '@bookorbit/types';
@@ -56,11 +55,14 @@ export class DownloadClientConfigService {
    * one answers to `ManageBookRequests`, and a base URL or a `hasPassword` flag is not something
    * moderating a queue should carry with it.
    */
-  async findEnabledSummaries(delivery: DownloadDelivery): Promise<DownloadClientSummary[]> {
+  async findEnabledSummaries(): Promise<DownloadClientSummary[]> {
     const rows = await this.repo.findAllEnabled();
-    return rows
-      .filter((row) => DOWNLOAD_CLIENT_DELIVERY[row.adapterType as DownloadClientType] === delivery)
-      .map((row) => ({ id: row.id, name: row.name, color: row.color ?? null }));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color ?? null,
+      delivery: DOWNLOAD_CLIENT_DELIVERY[row.adapterType as DownloadClientType],
+    }));
   }
 
   async findOne(id: number): Promise<DownloadClientItem> {
@@ -103,6 +105,9 @@ export class DownloadClientConfigService {
 
   async update(id: number, dto: UpdateDownloadClientDto): Promise<DownloadClientItem> {
     const existing = await this.requireClient(id);
+    if (dto.adapterType !== undefined && dto.adapterType !== existing.client.adapterType) {
+      throw new BadRequestException('A saved download client cannot change type. Create a separate client instead.');
+    }
 
     const baseUrl = dto.baseUrl?.trim() ?? existing.client.baseUrl;
     const allowPrivate = dto.allowPrivateAddress ?? existing.client.allowPrivateAddress;
@@ -240,7 +245,6 @@ export class DownloadClientConfigService {
   }
 
   /**
-
    * Clients usually live on the LAN, so `allowPrivate` is a per-row opt-in with the implication
    * stated in the UI rather than a blanket relaxation.
    */

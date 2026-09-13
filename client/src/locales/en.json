@@ -2831,8 +2831,8 @@
         "deleteClient": "Delete {name}",
         "clientsEmpty": {
           "title": "No download client yet",
-          "body": "A direct HTTP download needs no client. Connect one so BookOrbit can fetch what a tracker offers as a torrent too.",
-          "note": "qBittorrent, Transmission and Deluge are supported."
+          "body": "A direct HTTP download needs no client. Connect one so BookOrbit can fetch releases delivered by torrent or Usenet too.",
+          "note": "qBittorrent, Transmission, Deluge and NZBGet are supported."
         },
         "summary": "{type} - category {category}, priority {priority}",
         "disabled": "Disabled",
@@ -2847,7 +2847,8 @@
         "clientTypes": {
           "qbittorrent": "qBittorrent",
           "transmission": "Transmission",
-          "deluge": "Deluge"
+          "deluge": "Deluge",
+          "nzbget": "NZBGet"
         },
         "color": {
           "label": "Color",
@@ -2865,14 +2866,14 @@
           "passwordKeepAction": "Keep",
           "passwordWillClear": "The stored password is removed when you save",
           "category": "Category",
-          "categoryHint": "Tags the torrents BookOrbit adds, so it only ever acts on its own.",
+          "categoryHint": "Tags the downloads BookOrbit adds, so it only ever acts on its own.",
           "priority": "Priority",
           "enabled": "Enabled",
           "useHardlinks": "Use hardlinks",
           "allowPrivateAddress": "Allow private addresses",
           "allowPrivateAddressHint": "Needed when the client runs on your local network or the same machine.",
           "passwordBrief": "Stored encrypted.",
-          "useHardlinksBrief": "Seeds without using the disk twice. Falls back to a copy across filesystems."
+          "useHardlinksBrief": "Imports without using the disk twice. Falls back to a copy across filesystems."
         },
         "mappings": {
           "title": "Path mappings",
@@ -2934,8 +2935,8 @@
           "confirm": "Remove client"
         },
         "indexers": {
-          "title": "Torrent indexers",
-          "hint": "Your own Prowlarr, Jackett or NZBHydra, over Torznab. Add one per Torznab feed you want searched.",
+          "title": "Built-in indexers",
+          "hint": "Connect a Torznab feed for torrents or a Newznab feed for Usenet releases.",
           "allDisabled": "Every source below is switched off, so no request search will find anything. Switch at least one back on.",
           "loading": "Loading indexers...",
           "empty": {
@@ -2946,7 +2947,9 @@
             "pluginTitle": "Install a plugin",
             "pluginBody": "One file that teaches BookOrbit to search a specific site. You supply it, then fill in its settings.",
             "torznabTitle": "Add a Torznab indexer",
-            "torznabBody": "Point at a Prowlarr, Jackett or NZBHydra feed you already run. One per feed."
+            "torznabBody": "Point at a Prowlarr, Jackett or NZBHydra feed you already run. One per feed.",
+            "builtInTitle": "Add an indexer",
+            "builtInBody": "Point at a Torznab or Newznab feed you already use. One configuration per feed."
           },
           "add": "Add indexer",
           "edit": "Edit indexer",
@@ -2976,14 +2979,16 @@
             "proxyBrief": "An http or https proxy for this source. SOCKS is not supported."
           },
           "types": {
-            "torznab": "Torznab (Jackett, Prowlarr, NZBHydra)"
+            "torznab": "Torznab (Jackett, Prowlarr, NZBHydra)",
+            "newznab": "Newznab"
           },
           "fields": {
             "name": "Name",
             "type": "Indexer type",
             "baseUrl": "Base URL",
             "baseUrlHint": {
-              "torznab": "The torznab feed URL, without the query string. Jackett shows it on each indexer as \"Torznab Feed\"."
+              "torznab": "The Torznab feed URL, without the query string. Jackett shows it on each indexer as \"Torznab Feed\".",
+              "newznab": "The Newznab site URL or API endpoint, without a search query."
             },
             "credential": {
               "apiKey": "API key",
@@ -2996,13 +3001,13 @@
             "enabled": "Enabled",
             "allowPrivateAddress": "Allow private addresses",
             "credentialBrief": "Stored encrypted.",
-            "allowPrivateAddressBrief": "Off by default. Only needed for a proxy such as Jackett on your local network.",
+            "allowPrivateAddressBrief": "Off by default. Only needed when the source is on your local network.",
             "searchByIsbn": "Search by ISBN",
             "searchByIsbnBrief": "On by default. Turn it off if this source returns the wrong book for an exact ISBN, and it will be searched by title and author instead."
           },
           "color": {
             "label": "Color",
-            "hint": "Marks this source on every release it returns, so you can tell where a result came from before reading its name. Torrent and direct download keep their own two colors, which is why neither is offered here.",
+            "hint": "Marks this source on every release it returns, so you can tell where a result came from before reading its name. Delivery protocols keep their own colors, which is why those colors are not offered here.",
             "none": "No color",
             "options": {
               "blue": "Blue",
@@ -3055,13 +3060,14 @@
           "builtIn": "Built in",
           "plugin": "Plugin",
           "typeDescriptions": {
-            "torznab": "Your own Jackett, Prowlarr or NZBHydra. Uses categories and seed goals."
+            "torznab": "Your own Jackett, Prowlarr or NZBHydra. Uses categories and seed goals.",
+            "newznab": "A Newznab-compatible Usenet indexer. Uses categories and requires an API key."
           },
           "plugins": {
             "title": "Plugins",
             "hint": "A site BookOrbit can search, added as a single plugin file. Install one, then fill in its settings.",
             "directoryLink": "Browse open library plugins",
-            "none": "No plugin installed. Install one to search a site Torznab does not cover.",
+            "none": "No plugin installed. Install one to search a site the built-in protocols do not cover.",
             "install": "Install plugin",
             "installed": "Installed {label}.",
             "installFailed": "That plugin could not be installed.",
@@ -3133,6 +3139,7 @@
           "autoGrabDisabled": "Automatic downloads are off",
           "minScore": "Minimum release score",
           "minScoreHint": "A release scoring below this is never downloaded automatically. Scores run to 100, and how well the title and author match makes up most of one, with format, file size, seeders and source priority behind it. If nothing scores high enough, the request waits for someone to pick a release by hand and says why it stopped.",
+          "minScoreHintV2": "A release scoring below this is never downloaded automatically. Scores run to 100. Title and author relevance contributes most, followed by format and plausible file size, with swarm health and freeleech used when a source provides them. If nothing scores high enough, the request waits for someone to pick a release by hand and says why it stopped.",
           "autoRetry": "Try the next release after a failure",
           "autoRetryHint": "When an automatic download fails, the next-best release is tried instead of giving up. This covers a source refusing to hand the file over and a download that dies partway through. It only applies to releases BookOrbit chose itself: one an approver picked by hand stays failed and waits for them.",
           "maxAttempts": "Attempts per request",
@@ -3223,11 +3230,12 @@
         "external": "External",
         "editorDescription": "Settings for this download client.",
         "chooseClientType": "Choose a client type",
-        "chooseClientTypeHint": "Pick which program BookOrbit hands torrents to.",
+        "chooseClientTypeHint": "Pick which program BookOrbit hands downloads to.",
         "clientTypeDescriptions": {
           "qbittorrent": "Your own qBittorrent. Needs an address and an account.",
           "transmission": "Your own Transmission. It has no categories, so the category becomes a subfolder of its download directory.",
-          "deluge": "Your own Deluge. Sign in with the Web UI password; the category needs the Label plugin switched on."
+          "deluge": "Your own Deluge. Sign in with the Web UI password; the category needs the Label plugin switched on.",
+          "nzbget": "Your own NZBGet. BookOrbit sends NZB files over its JSON-RPC API."
         },
         "searchHealth": {
           "failingOnce": "Last search failed",
@@ -6653,7 +6661,10 @@
       "grab": "Download release",
       "viewFiles": "View files",
       "hideFiles": "Hide files",
+      "viewDetails": "About contents",
+      "hideDetails": "Hide details",
       "inspectingFiles": "Reading the release file list...",
+      "inspectingNzb": "Fetching and validating the NZB...",
       "inspectingShort": "Checking files...",
       "inspectionFailed": "This release's file list could not be read.",
       "manifest": {
@@ -6663,6 +6674,7 @@
         "multipleBooks": "This release contains {count} separate books. After it downloads you will be asked which one to import.",
         "multiPartBook": "{count, plural, one {This release is one book made of # file.} other {This release is one book made of # files, imported together as a single book.}}",
         "metadataUnavailable": "This is a magnet link. Its file list is unavailable until a torrent client fetches the metadata from the swarm.",
+        "usenetMetadataUnavailable": "This is a Usenet release. Its final file list is unavailable until NZBGet downloads and post-processes it.",
         "bookFile": "Book file",
         "extraFile": "Extra",
         "truncated": "Showing {shown} of {total} files.",
@@ -6677,6 +6689,7 @@
         }
       },
       "manual": "Paste a link instead",
+      "manualTorrent": "Use magnet or .torrent instead",
       "indexer": "Indexer",
       "size": "Size",
       "seeders": "Seeders",
@@ -6686,8 +6699,8 @@
       "format": "Format",
       "files": "Files",
       "fileLayout": {
-        "single": "One book file",
-        "multi": "Several files"
+        "single": "One listed file",
+        "multi": "Multiple listed files"
       },
       "fileCount": "{count, plural, one {# file} other {# files}}",
       "audio": "Audio",
@@ -6739,10 +6752,11 @@
       "score": "Score",
       "release": "Release",
       "send": "Send",
-      "tableCaption": "Every other release, ranked",
+      "tableCaption": "Releases, ranked",
       "onlyBestMatch": "That is the only release that matched.",
       "tiedWithBest": "{count, plural, one {# other release scored the same} other {# other releases scored the same}}",
       "inspectionFailedHint": "It was not sent to a download client. Try again, or use Paste a link instead.",
+      "inspectionFailedHintGeneric": "It was not sent to a download client. Try again, or choose another release.",
       "mediumUncovered": "No source carries this kind of book.",
       "mediumUncoveredHint": "None of your enabled indexers cover it. Add one that does, or paste a link yourself.",
       "noSourcesConfigured": "No search sources are set up yet.",
@@ -6754,6 +6768,7 @@
       "reviewSources": "Review sources",
       "protocol": {
         "torrent": "Torrent",
+        "usenet": "Usenet",
         "direct": "Direct download",
         "directPill": "Direct"
       }
@@ -6833,7 +6848,7 @@
     },
     "confirm": {
       "cancelDownloadTitle": "Cancel this download?",
-      "cancelDownloadDescription": "The active transfer stops and the request stays open so another release can be chosen. Torrent data is kept; partial direct-download staging is deleted.",
+      "cancelDownloadDescription": "The active transfer stops and the request stays open so another release can be chosen. Client-managed data is kept; partial direct-download staging is deleted.",
       "cancelTitle": "Stop this request?",
       "cancelDescription": "It moves to cancelled. Nobody waiting on it will get the book.",
       "cancelDescriptionWithDownload": "The active transfer is stopped. Data in the download client is kept; partial direct-download staging is deleted.",

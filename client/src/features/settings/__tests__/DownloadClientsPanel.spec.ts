@@ -128,6 +128,7 @@ describe('DownloadClientsPanel', () => {
       'qbittorrent',
       'transmission',
       'deluge',
+      'nzbget',
     ])
     expect(sheet().querySelector('#download-client-name')).toBeNull()
 

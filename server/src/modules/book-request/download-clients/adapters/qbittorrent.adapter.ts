@@ -83,7 +83,7 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
   private readonly sessions = new Map<number, { cookie: string; expiresAt: number }>();
   private readonly hashAliases = new Map<string, { primary: string; expiresAt: number }>();
 
-  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientHash: string }> {
+  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientKey: string }> {
     const form = new FormData();
     if (release.torrentFile) {
       form.append('torrents', new Blob([new Uint8Array(release.torrentFile)]), release.torrentFileName ?? 'upload.torrent');
@@ -104,28 +104,28 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
     // a torrent the client already holds, and one it could not read. Only the client can tell them
     // apart, so ask rather than hand the operator both guesses at once.
     if (response.status === 409 || body.toLowerCase().startsWith('fail')) {
-      if (await this.holds(release.infoHash, config)) {
+      if (await this.holds(release.clientKey, config)) {
         // An earlier attempt on this release leaves its torrent behind when the import fails, and
         // without this every retry of that release is rejected by the client forever. The torrent
         // we asked for being present is the outcome we wanted, not a failure.
         this.logger.log(
-          `[download_client.add] [end] clientId=${config.id} hash=${release.infoHash.toLowerCase()} adopted=true - the client already held this torrent`,
+          `[download_client.add] [end] clientId=${config.id} hash=${release.clientKey.toLowerCase()} adopted=true - the client already held this torrent`,
         );
-        return { clientHash: release.infoHash.toLowerCase() };
+        return { clientKey: release.clientKey.toLowerCase() };
       }
       if (response.status === 409) throw new BadRequestException('qBittorrent answered 409 for /api/v2/torrents/add');
       throw new BadRequestException('qBittorrent could not read that torrent. The file may be corrupt, or the magnet link invalid.');
     }
 
-    return { clientHash: release.infoHash.toLowerCase() };
+    return { clientKey: release.clientKey.toLowerCase() };
   }
 
   /**
    * Whether the client is already holding this exact infohash. Any failure to find out answers
    * "no", so an unreachable client surfaces the add failure rather than a false success.
    */
-  private async holds(infoHash: string, config: ResolvedClientConfig): Promise<boolean> {
-    const hash = infoHash.toLowerCase();
+  private async holds(clientKey: string, config: ResolvedClientConfig): Promise<boolean> {
+    const hash = clientKey.toLowerCase();
     try {
       return (await this.findTorrents([hash], config)).has(hash);
     } catch {
@@ -239,7 +239,7 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
         // the torrent keeps its state and the watchdog remains the backstop.
         const detail = error instanceof Error ? error.message : String(error);
         this.logger.warn(
-          `[download_client.trackers] [fail] clientId=${config.id} hash=${status.infoHash} error="${sanitizeLogValue(detail)}" - could not read tracker status`,
+          `[download_client.trackers] [fail] clientId=${config.id} hash=${status.clientKey} error="${sanitizeLogValue(detail)}" - could not read tracker status`,
         );
       }
     }
@@ -344,7 +344,7 @@ function toDownloadStatus(hash: string, entry: QbTorrentInfo): DownloadStatus {
   const totalBytes = entry.total_size ?? entry.size ?? null;
   const state = mapState(entry.state);
   return {
-    infoHash: hash,
+    clientKey: hash,
     state,
     progressPercent: Math.max(0, Math.min(100, Math.round((entry.progress ?? 0) * 100))),
     downloadedBytes: entry.downloaded ?? 0,

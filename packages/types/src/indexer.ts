@@ -1,5 +1,5 @@
 import type { BookRequestMediaKind } from "./book-request";
-import type { BookRequestDownloadSource } from "./download-client";
+import type { BookRequestDownloadSource, DownloadDelivery } from "./download-client";
 import type { NetworkProfile } from "./network-profile";
 import { REQUEST_CREDENTIAL_ERROR_CODES } from "./request-credential";
 
@@ -8,10 +8,10 @@ import { REQUEST_CREDENTIAL_ERROR_CODES } from "./request-credential";
  * tracker-specific beyond the type name: BookOrbit ships adapter code, never a tracker, never a
  * credential, and no indexer is preconfigured or enabled by default.
  *
- * Only the generic protocol is built in. Every named source, open library or otherwise, is a
+ * Only generic protocols are built in. Every named source, open library or otherwise, is a
  * plugin loaded from disk and maintained outside this repository.
  */
-export const INDEXER_ADAPTER_TYPES = ["torznab"] as const;
+export const INDEXER_ADAPTER_TYPES = ["torznab", "newznab"] as const;
 export type IndexerAdapterType = (typeof INDEXER_ADAPTER_TYPES)[number];
 
 /** Maximum size of an opaque release identifier accepted from an indexer feed and grab request. */
@@ -53,16 +53,19 @@ export type IndexerCategoryMap = Record<BookRequestMediaKind, number[]>;
  */
 export const DEFAULT_INDEXER_CATEGORIES: Record<IndexerAdapterType, IndexerCategoryMap> = {
   torznab: { ebook: [7020], audiobook: [3030], comic: [7030] },
+  newznab: { ebook: [7020], audiobook: [3030], comic: [7030] },
 };
 
 /** What the credential field holds. Null where the source needs none, as an open library does. */
 export const INDEXER_CREDENTIAL_KINDS: Record<IndexerAdapterType, "apiKey" | "sessionId" | null> = {
   torznab: "apiKey",
+  newznab: "apiKey",
 };
 
 /** Whether the adapter searches by numeric category at all, which decides if the editor shows. */
 export const INDEXER_USES_CATEGORIES: Record<IndexerAdapterType, boolean> = {
   torznab: true,
+  newznab: true,
 };
 
 /**
@@ -72,6 +75,13 @@ export const INDEXER_USES_CATEGORIES: Record<IndexerAdapterType, boolean> = {
  */
 export const INDEXER_SEEDS_BACK: Record<IndexerAdapterType, boolean> = {
   torznab: true,
+  newznab: false,
+};
+
+/** How a selected release from each built-in reaches BookOrbit. */
+export const INDEXER_DELIVERY: Record<IndexerAdapterType, DownloadDelivery> = {
+  torznab: "torrent",
+  newznab: "usenet",
 };
 
 /**
@@ -80,6 +90,7 @@ export const INDEXER_SEEDS_BACK: Record<IndexerAdapterType, boolean> = {
  */
 export const INDEXER_MEDIA_KINDS: Record<IndexerAdapterType, readonly BookRequestMediaKind[]> = {
   torznab: ["ebook", "audiobook", "comic"],
+  newznab: ["ebook", "audiobook", "comic"],
 };
 
 /**
@@ -135,6 +146,8 @@ export interface IndexerAdapterDescriptor {
   mediaKinds: BookRequestMediaKind[];
   usesCategories: boolean;
   seedsBack: boolean;
+  /** Which kind of downloader can accept a release from this source. */
+  delivery: DownloadDelivery;
   /**
    * Whether this adapter can search an ISBN at all. The operator decides per source whether it
    * should, because a catalogue that answers an ISBN badly is worse than one that cannot.
@@ -432,6 +445,8 @@ export interface IndexerSearchStatus {
    * are the same silence and completely different facts.
    */
   seedsBack: boolean;
+  /** Which downloader capability a selected release from this source requires. */
+  delivery: DownloadDelivery;
 }
 
 /** Request metadata used across indexer retrieval, hard filters, and release scoring. */

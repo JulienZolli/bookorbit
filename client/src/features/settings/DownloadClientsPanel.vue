@@ -11,6 +11,7 @@ import type {
   DownloadClientReconciliationItem,
   DownloadClientType,
   IndexerColor,
+  UpdateDownloadClientPayload,
 } from '@bookorbit/types'
 import { Button } from '@/components/ui/button'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
@@ -87,7 +88,7 @@ const testingId = ref<number | null>(null)
 const passwordVisible = ref(false)
 const hardlinkResults = reactive<Record<string, string>>({})
 const fieldErrors = reactive<Partial<Record<FieldKey, string>>>({})
-const pendingOrphanRemoval = ref<{ clientId: number; infoHash: string; name: string } | null>(null)
+const pendingOrphanRemoval = ref<{ clientId: number; clientKey: string; name: string } | null>(null)
 
 /**
  * Server codes carry the copy; the English `message` is a last resort for anything unmapped, which
@@ -264,11 +265,10 @@ function filledMappings(current: ClientDraft): MappingDraft[] {
     .map((mapping) => ({ remotePath: mapping.remotePath.trim(), localPath: mapping.localPath.trim() }))
 }
 
-function toPayload(current: ClientDraft): CreateDownloadClientPayload {
-  return {
+function toPayload(current: ClientDraft): CreateDownloadClientPayload | UpdateDownloadClientPayload {
+  const payload: UpdateDownloadClientPayload = {
     name: current.name.trim(),
     color: current.color,
-    adapterType: current.adapterType,
     baseUrl: current.baseUrl.trim(),
     username: current.username.trim(),
     ...(current.passwordCleared ? { password: '' } : current.passwordTouched ? { password: current.password } : {}),
@@ -279,6 +279,7 @@ function toPayload(current: ClientDraft): CreateDownloadClientPayload {
     allowPrivateAddress: current.allowPrivateAddress,
     pathMappings: filledMappings(current),
   }
+  return current.id === null ? { ...payload, adapterType: current.adapterType } : payload
 }
 
 const editingClient = computed(() => (draft.value?.id === null ? null : (clients.value.find((row) => row.id === draft.value?.id) ?? null)))
@@ -378,13 +379,13 @@ async function handleReconcile(client: DownloadClientItem) {
 }
 
 async function handleAdopt(client: DownloadClientItem, item: DownloadClientReconciliationItem, attempt: DownloadClientReconciliationAttempt) {
-  const failure = await adopt(client.id, item.infoHash, attempt.downloadId)
+  const failure = await adopt(client.id, item.clientKey, attempt.downloadId)
   if (failure) toast.error(describeFailure(failure))
   else toast.success(t('settings.system.requests.reconciliation.adopted', { title: attempt.requestTitle }))
 }
 
 function requestOrphanRemoval(client: DownloadClientItem, item: DownloadClientReconciliationItem) {
-  pendingOrphanRemoval.value = { clientId: client.id, infoHash: item.infoHash, name: item.name }
+  pendingOrphanRemoval.value = { clientId: client.id, clientKey: item.clientKey, name: item.name }
 }
 
 function cancelOrphanRemoval() {
@@ -394,7 +395,7 @@ function cancelOrphanRemoval() {
 async function confirmOrphanRemoval() {
   const pending = pendingOrphanRemoval.value
   if (!pending) return
-  const failure = await removeOrphan(pending.clientId, pending.infoHash)
+  const failure = await removeOrphan(pending.clientId, pending.clientKey)
   if (failure) toast.error(describeFailure(failure))
   else {
     toast.success(t('settings.system.requests.reconciliation.removed'))
@@ -534,11 +535,11 @@ async function confirmOrphanRemoval() {
                   {{ t('settings.system.requests.reconciliation.clean') }}
                 </p>
                 <ul v-else class="space-y-2">
-                  <li v-for="item in reconciliationIssues(client.id)" :key="item.infoHash" class="rounded-lg border border-border p-3">
+                  <li v-for="item in reconciliationIssues(client.id)" :key="item.clientKey" class="rounded-lg border border-border p-3">
                     <div class="flex flex-wrap items-start justify-between gap-3">
                       <div class="min-w-0">
                         <p class="text-sm font-medium text-foreground">{{ item.name }}</p>
-                        <p class="mt-0.5 break-all font-mono text-xs text-muted-foreground">{{ item.infoHash }}</p>
+                        <p class="mt-0.5 break-all font-mono text-xs text-muted-foreground">{{ item.clientKey }}</p>
                         <p class="mt-1 text-xs text-muted-foreground">
                           {{
                             item.trackedAttempt
@@ -669,7 +670,11 @@ async function confirmOrphanRemoval() {
               </template>
             </SettingsField>
 
-            <SettingsField v-if="hasTypeChoice" :label="t('settings.system.requests.fields.type')" input-id="download-client-type">
+            <SettingsField
+              v-if="hasTypeChoice && draft.id === null"
+              :label="t('settings.system.requests.fields.type')"
+              input-id="download-client-type"
+            >
               <select id="download-client-type" v-model="draft.adapterType" class="settings-control">
                 <option v-for="type in DOWNLOAD_CLIENT_TYPES" :key="type" :value="type">
                   {{ t(`settings.system.requests.clientTypes.${type}`) }}

@@ -10,9 +10,9 @@ install has no sources, no download clients and no automation.
 ## What BookOrbit ships
 
 **BookOrbit ships no sources.** There is no bundled tracker, no default indexer, and no list of
-sites to pick from. One adapter type is compiled in, `torznab`, and it is a protocol rather than a
-source: it needs an address you supply, usually a Prowlarr or Jackett instance you run. Everything
-else is an indexer plugin you install yourself.
+sites to pick from. Two protocol adapters are compiled in: `torznab` for torrent indexers and
+`newznab` for Usenet indexers. Both need an address and API key you supply. Everything else is an
+indexer plugin you install yourself.
 
 Which sources you point BookOrbit at, and what you search for and download through them, is your
 decision and your responsibility. BookOrbit does not provide or endorse indexer sources. Its URL,
@@ -54,10 +54,13 @@ discover the loss during a download.
 
 Settings > System > Requests > Sources.
 
-Two kinds of row, added two ways, identical once they exist:
+Three kinds of row, added two ways, identical once they exist:
 
 - **Torznab**: an address plus an API key. This is how you attach a Prowlarr or Jackett instance,
   and one such instance can expose many trackers behind one row per tracker.
+- **Newznab**: an address plus an API key. BookOrbit uses generic searches, including an ISBN as
+  the query when enabled, and fetches the selected NZB without exposing the key to the download
+  client.
 - **Plugins**: a single `.mjs` file installed through the page, loaded at boot from
   `<APP_DATA_PATH>/plugins/indexers/<name>/index.mjs`. Plugins live in their own repositories and
   are not distributed with BookOrbit.
@@ -79,8 +82,14 @@ Two health facts are shown per row, and they answer different questions:
 
 ## Download clients
 
-Settings > System > Requests > Download clients. qBittorrent, Transmission and Deluge are
-supported.
+Settings > System > Requests > Download clients. qBittorrent, Transmission and Deluge accept
+torrents; NZBGet accepts NZBs. A Newznab source therefore needs an enabled NZBGet client, while a
+Torznab source needs an enabled torrent client. Direct HTTP sources need no external client.
+
+BookOrbit does not connect to an NNTP article server. Configure the article-server account in
+NZBGet, then give BookOrbit a separate NZBGet API account. BookOrbit fetches the credentialed NZB,
+sends its bytes to NZBGet, and monitors the item by a stable ownership key rather than a transient
+NZBGet queue ID.
 
 Each client needs at least one **path mapping**, including when BookOrbit and the client run on the
 same host. A mapping translates the download directory the client reports into a path BookOrbit can
@@ -88,10 +97,10 @@ open, and it is also the root the import is allowed to read out of. On a single 
 is an identity, `/downloads -> /downloads`; it still has to be stated, because "the same path" and
 "no path stated" are different things and only one of them is safe to import from.
 
-Hardlinking from the download directory into the library is what keeps a torrent seeding after the
-book is filed. The mapping form can test whether a hardlink actually works between the two paths,
-which is worth doing before the first grab: a mapping across filesystems copies instead, silently
-doubling the space every book takes.
+Hardlinking from the download directory into the library avoids storing the imported bytes twice
+and keeps a torrent seeding after the book is filed. The mapping form can test whether a hardlink
+actually works between the two paths, which is worth doing before the first grab: a mapping across
+filesystems copies instead, silently doubling the space every book takes.
 
 The same mount is necessary but is not sufficient. On Linux, `fs.protected_hardlinks=1` normally
 requires the BookOrbit process user to own the completed source file or be able to write it. The
@@ -101,7 +110,7 @@ file, so it proves that the paths and mount permit hardlinks but cannot prove th
 owned by a different user will be linkable. If the real file cannot be linked, BookOrbit falls back
 to copying it and the book uses space twice while the original keeps seeding.
 
-BookOrbit never stops a seed on its own. Removing a torrent from its client is an explicit action
+BookOrbit never stops a seed on its own. Removing a client-managed download is an explicit action
 with its own confirmation, and removing one that is still working also fails the request.
 
 ## Automation
@@ -160,8 +169,8 @@ resolved outside the one it has. Add or widen the mapping under Settings > Syste
 **Credentials will not save**: `BOOK_REQUEST_ENCRYPTION_KEY` is unset or is not 64 hex characters.
 
 **A source shows "Searches failing" but tests fine**: the address answers a capabilities call and
-refuses searches. Usually a rate limit, an expired session, or categories that do not exist on that
-tracker.
+refuses searches. Usually a rate limit, an expired credential, or categories that do not exist on
+that indexer.
 
 ## Related
 
