@@ -3034,6 +3034,29 @@
           "settings": {
             "restoreDefault": "Restore defaults"
           },
+          "seeding": {
+            "applyTracker": "Apply tracker seed goals",
+            "applyTrackerBrief": "When a manual value is blank, use a valid goal reported by the tracker. When this is off, blank values use the download client's defaults. Manual values still apply.",
+            "ratio": "Seed ratio",
+            "ratioBrief": "A positive decimal. Blank inherits from the tracker or client.",
+            "time": "Seed time (minutes)",
+            "timeBrief": "A positive whole number. Blank inherits from the tracker or client.",
+            "clientSupport": "qBittorrent accepts ratio and total seed time. Deluge and Transmission accept ratio only. Client global rules and whichever limit is reached first can stop seeding, so these values do not guarantee that every tracker minimum is met.",
+            "futureGrabs": "Changes apply to future grabs. Existing or adopted torrents can retain client-specific limits. Turning tracker fallback off leaves client defaults active; it does not mean unlimited seeding.",
+            "reset": "Reset seeding settings",
+            "summary": {
+              "title": "Policy summary",
+              "ratio": "Ratio",
+              "time": "Seed time",
+              "manual": "Manual: {value}",
+              "tracker": "Tracker fallback",
+              "client": "Client default"
+            },
+            "errors": {
+              "ratio": "Enter a finite number greater than zero, or leave this blank.",
+              "minutes": "Enter a whole number from 1 through 2,147,483,647, or leave this blank."
+            }
+          },
           "confirmDelete": {
             "title": "Delete this source?",
             "description": "{name}'s address, settings and stored credential are deleted. Turn it off instead to stop searching it without losing them.",
@@ -3249,6 +3272,7 @@
           "connection": "Connection",
           "search": "What to search",
           "access": "Access",
+          "seeding": "Seeding",
           "availability": "Availability",
           "behaviour": "Behaviour"
         },

@@ -10,6 +10,14 @@ import { requestIndexers, type NewRequestIndexerRow, type RequestIndexerRow } fr
 
 type Db = NodePgDatabase<typeof schema>;
 
+export interface IndexerSeedPolicyRow {
+  id: number;
+  adapterType: string;
+  applyTrackerSeedGoals: boolean;
+  seedRatioGoal: number | null;
+  seedTimeMinutes: number | null;
+}
+
 @Injectable()
 export class IndexerRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
@@ -25,6 +33,21 @@ export class IndexerRepository {
 
   async findById(id: number): Promise<RequestIndexerRow | undefined> {
     const [row] = await this.db.select().from(requestIndexers).where(eq(requestIndexers.id, id)).limit(1);
+    return row;
+  }
+
+  async findSeedPolicyById(id: number): Promise<IndexerSeedPolicyRow | undefined> {
+    const [row] = await this.db
+      .select({
+        id: requestIndexers.id,
+        adapterType: requestIndexers.adapterType,
+        applyTrackerSeedGoals: requestIndexers.applyTrackerSeedGoals,
+        seedRatioGoal: requestIndexers.seedRatioGoal,
+        seedTimeMinutes: requestIndexers.seedTimeMinutes,
+      })
+      .from(requestIndexers)
+      .where(eq(requestIndexers.id, id))
+      .limit(1);
     return row;
   }
 

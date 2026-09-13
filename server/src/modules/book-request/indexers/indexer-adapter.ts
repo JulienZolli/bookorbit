@@ -29,6 +29,9 @@ export interface ResolvedIndexerConfig {
    */
   credentialError: string | null;
   allowPrivateAddress: boolean;
+  applyTrackerSeedGoals: boolean;
+  seedRatioGoal: number | null;
+  seedTimeMinutes: number | null;
   categories: IndexerCategoryMap;
   /** Media the operator took this source out of, on top of what its adapter declares it carries. */
   disabledMediaKinds: readonly BookRequestMediaKind[];
@@ -41,6 +44,16 @@ export interface ResolvedIndexerConfig {
   settings: IndexerSettings | null;
   /** How to reach this source, applied by the host rather than chosen by the adapter. */
   networkProfile: NetworkProfile | null;
+}
+
+/** Non-secret host policy read immediately before a configured-indexer torrent is added. */
+export interface ResolvedIndexerSeedPolicy {
+  id: number;
+  adapterType: IndexerAdapterType;
+  seedsBack: boolean;
+  applyTrackerSeedGoals: boolean;
+  seedRatioGoal: number | null;
+  seedTimeMinutes: number | null;
 }
 
 export interface ReleaseQuery {

@@ -76,6 +76,7 @@ import { newznabClientKey } from '../indexers/adapters/newznab.adapter';
 import type { InspectBookRequestReleaseDto } from '../dto/inspect-book-request-release.dto';
 import type { GrabBookRequestDto } from '../dto/grab-book-request.dto';
 import type { SearchBookRequestReleasesDto } from '../dto/search-book-request-releases.dto';
+import { resolveEffectiveSeedGoals } from './indexer-seed-policy';
 
 /** One metadata lookup against the source, spent only on the release an approver actually picked. */
 const RESOLVE_FILE_TIMEOUT_MS = 20_000;
@@ -551,10 +552,10 @@ export class RequestFulfillmentService {
 
     if (!named[0]) return parseGrabPayload(dto);
 
-    return this.resolvePickedRelease(requestId, dto.indexerId!, dto.releaseGuid!.trim());
+    return this.resolvePickedRelease(requestId, dto.indexerId!, dto.releaseGuid!.trim(), true);
   }
 
-  private async resolvePickedRelease(requestId: number, indexerId: number, releaseGuid: string): Promise<ResolvedGrab> {
+  private async resolvePickedRelease(requestId: number, indexerId: number, releaseGuid: string, applyCurrentPolicy = false): Promise<ResolvedGrab> {
     const release = this.releases.find(requestId, indexerId, releaseGuid);
     if (!release) {
       throw grabError('GRAB_RELEASE_REFUSED', 'That release is no longer in the search results. Search again and pick one.');
@@ -562,11 +563,38 @@ export class RequestFulfillmentService {
 
     const key = `${requestId}:${indexerId}:${releaseGuid}`;
     const cached = this.resolvedReleases.get(key);
-    if (cached && cached.candidate === release && cached.expiresAt > Date.now()) return cached.grab;
+    let grab: ResolvedGrab;
+    if (cached && cached.candidate === release && cached.expiresAt > Date.now()) grab = cached.grab;
+    else {
+      grab = await this.resolveRelease(requestId, release);
+      this.rememberResolvedRelease(key, release, grab);
+    }
+    return applyCurrentPolicy ? this.applyCurrentSeedPolicy(grab) : grab;
+  }
 
-    const grab = await this.resolveRelease(requestId, release);
-    this.rememberResolvedRelease(key, release, grab);
-    return grab;
+  private async applyCurrentSeedPolicy(grab: ResolvedGrab): Promise<ResolvedGrab> {
+    if (grab.indexerId === undefined || (grab.source !== 'magnet' && grab.source !== 'torrent_file')) return withoutSeedGoals(grab);
+
+    let policy;
+    try {
+      policy = await this.indexers.resolveSeedPolicy(grab.indexerId);
+    } catch (error) {
+      if (error instanceof NotFoundException || error instanceof BadRequestException) {
+        throw grabError('GRAB_RELEASE_REFUSED', 'That release source is no longer available. Search again and pick a release.');
+      }
+      throw error;
+    }
+    if (policy.adapterType !== grab.indexerAdapterType) {
+      throw grabError('GRAB_RELEASE_REFUSED', 'That release source has changed. Search again and pick a release.');
+    }
+    if (!policy.seedsBack) return withoutSeedGoals(grab);
+
+    const goals = resolveEffectiveSeedGoals(policy, grab);
+    return {
+      ...withoutSeedGoals(grab),
+      ...(goals.seedRatioGoal !== undefined ? { seedRatioGoal: goals.seedRatioGoal } : {}),
+      ...(goals.seedTimeMinutes !== undefined ? { seedTimeMinutes: goals.seedTimeMinutes } : {}),
+    };
   }
 
   private async resolveRelease(requestId: number, release: ReleaseCandidate): Promise<ResolvedGrab> {
@@ -589,6 +617,7 @@ export class RequestFulfillmentService {
     const snapshot = {
       indexerId: release.indexerId,
       indexerName: indexer.name,
+      indexerAdapterType: indexer.adapterType,
       releaseGuid: release.guid,
       releaseTitle: release.title.slice(0, 500),
       releaseSizeBytes: release.sizeBytes,
@@ -597,9 +626,8 @@ export class RequestFulfillmentService {
       // release name, which is what the picker showed the approver.
       releaseFormat: resolveFormat(release)?.slice(0, 20) ?? null,
       freeleech: release.freeleech ?? false,
-      // Both come from the tracker itself, via torznab's `minimumratio` and `minimumseedtime`.
-      // There is no per-source override for either: the download client's own defaults are the
-      // fallback where a feed states nothing.
+      // Raw tracker metadata is cached with the transport. Current host policy is applied later,
+      // once per grab attempt, so a settings edit does not require another credentialed fetch.
       seedRatioGoal: release.seedRatioGoal ?? null,
       seedTimeMinutes: release.seedTimeMinutes ?? null,
     };
@@ -898,6 +926,7 @@ interface ParsedGrab {
 interface ResolvedGrab extends ParsedGrab {
   indexerId?: number;
   indexerName?: string;
+  indexerAdapterType?: string;
   releaseGuid?: string;
   releaseSeeders?: number | null;
   releaseFormat?: string | null;
@@ -976,6 +1005,13 @@ function torrentInspection(metadata: TorrentFileMetadata): ReleaseFileInspection
     truncated: displayed.length < allFiles.length,
     ...unitFields(plan),
   };
+}
+
+function withoutSeedGoals(grab: ResolvedGrab): ResolvedGrab {
+  const copy = { ...grab };
+  delete copy.seedRatioGoal;
+  delete copy.seedTimeMinutes;
+  return copy;
 }
 
 /**

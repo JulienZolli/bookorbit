@@ -14,11 +14,21 @@ function indexerRow(overrides: Partial<RequestIndexerRow> = {}): RequestIndexerR
     baseUrl: 'http://203.0.113.10:9117',
     credentialsEnc: 'cipher',
     allowPrivateAddress: false,
+    applyTrackerSeedGoals: true,
+    seedRatioGoal: null,
+    seedTimeMinutes: null,
     categories: null,
+    disabledMediaKinds: [],
+    isbnSearchDisabled: false,
     settings: null,
+    networkProfile: null,
     lastTestedAt: null,
     lastTestOk: null,
     lastErrorMessage: null,
+    lastSearchAt: null,
+    lastSearchOk: null,
+    lastSearchError: null,
+    searchFailureStreak: 0,
     createdAt: new Date('2026-08-18T00:00:00Z'),
     updatedAt: new Date('2026-08-18T00:00:00Z'),
     ...overrides,
@@ -37,6 +47,13 @@ function makeService(
     findAll: vi.fn().mockResolvedValue([indexerRow()]),
     findAssignedColors: vi.fn().mockResolvedValue([null]),
     findById: vi.fn().mockResolvedValue(indexerRow()),
+    findSeedPolicyById: vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    }),
     findAllEnabled: vi.fn().mockResolvedValue([indexerRow()]),
     create: vi.fn().mockResolvedValue(indexerRow()),
     update: vi.fn().mockResolvedValue(indexerRow()),
@@ -61,6 +78,7 @@ function makeService(
     require: vi.fn().mockReturnValue(adapter),
     find: vi.fn().mockReturnValue(adapter),
     defaultCategories: vi.fn().mockReturnValue(DEFAULT_INDEXER_CATEGORIES.torznab),
+    seedsBack: vi.fn().mockReturnValue(true),
     ...overrides.registry,
   };
   return {
@@ -91,6 +109,97 @@ describe('IndexerConfigService', () => {
 
     expect(credentials.encrypt).toHaveBeenCalledWith('api-key');
     expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ credentialsEnc: 'cipher' }));
+  });
+
+  it('creates explicit seed policy and defaults unset policy safely', async () => {
+    const { service, repo } = makeService();
+
+    await service.create({
+      ...createDto,
+      applyTrackerSeedGoals: false,
+      seedRatioGoal: 1.25,
+      seedTimeMinutes: 60,
+    });
+    expect(repo.create).toHaveBeenLastCalledWith(expect.objectContaining({ applyTrackerSeedGoals: false, seedRatioGoal: 1.25, seedTimeMinutes: 60 }));
+
+    await service.create(createDto);
+    expect(repo.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ applyTrackerSeedGoals: true, seedRatioGoal: null, seedTimeMinutes: null }),
+    );
+  });
+
+  it('patches and clears each seed dimension independently', async () => {
+    const { service, repo } = makeService();
+
+    await service.update(9, { seedRatioGoal: 2 });
+    expect(repo.update).toHaveBeenLastCalledWith(9, { seedRatioGoal: 2 });
+
+    await service.update(9, { seedRatioGoal: null, seedTimeMinutes: null });
+    expect(repo.update).toHaveBeenLastCalledWith(9, { seedRatioGoal: null, seedTimeMinutes: null });
+  });
+
+  it.each([{ seedTimeMinutes: 60 }, { applyTrackerSeedGoals: false }])(
+    'rejects non-default seed policy for a non-seeding adapter before writing',
+    async (policy) => {
+      const { service, repo } = makeService({ registry: { seedsBack: vi.fn().mockReturnValue(false) } });
+
+      await expect(service.update(9, policy)).rejects.toMatchObject({
+        response: expect.objectContaining({ errorCode: 'INDEXER_SETTINGS_INVALID' }),
+      });
+      expect(repo.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('clears inert policy on a successful save to a loaded non-seeding adapter', async () => {
+    const { service, repo } = makeService({ registry: { seedsBack: vi.fn().mockReturnValue(false) } });
+
+    await service.update(9, { enabled: false });
+
+    expect(repo.update).toHaveBeenCalledWith(9, {
+      enabled: false,
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+  });
+
+  it('refuses saves without clearing policy while a plugin adapter is unavailable', async () => {
+    const { service, repo } = makeService({
+      registry: {
+        require: vi.fn().mockImplementation(() => {
+          throw new BadRequestException('Unknown indexer type: missing-plugin');
+        }),
+        seedsBack: vi.fn().mockReturnValue(false),
+      },
+    });
+
+    await expect(service.update(9, { enabled: false })).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('preserves host seed policy across a seeding-to-seeding adapter change when omitted', async () => {
+    const { service, repo } = makeService();
+
+    await service.update(9, { adapterType: 'other-torrent' });
+
+    const patch = repo.update.mock.calls.at(-1)?.[1];
+    expect(patch).not.toHaveProperty('seedRatioGoal');
+    expect(patch).not.toHaveProperty('seedTimeMinutes');
+  });
+
+  it('reads current seed policy without decrypting credentials', async () => {
+    const { service, repo, credentials } = makeService();
+
+    await expect(service.resolveSeedPolicy(9)).resolves.toEqual({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+    expect(repo.findSeedPolicyById).toHaveBeenCalledWith(9);
+    expect(credentials.decrypt).not.toHaveBeenCalled();
   });
 
   it('assigns a random unused color when a new indexer does not name one', async () => {

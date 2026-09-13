@@ -79,6 +79,9 @@ export const INDEXER_SEEDS_BACK: Record<IndexerAdapterType, boolean> = {
   newznab: false,
 };
 
+/** Largest whole-minute seed goal that can be stored in PostgreSQL's integer type. */
+export const MAX_INDEXER_SEED_TIME_MINUTES = 2_147_483_647;
+
 /** How a selected release from each built-in reaches BookOrbit. */
 export const INDEXER_DELIVERY: Record<IndexerAdapterType, DownloadDelivery> = {
   torznab: "torrent",
@@ -260,6 +263,12 @@ export interface IndexerItem {
    * exception, so it is an explicit per-row opt-in rather than a blanket relaxation.
    */
   allowPrivateAddress: boolean;
+  /** Whether valid tracker-provided goals fill manual dimensions that are left unset. */
+  applyTrackerSeedGoals: boolean;
+  /** Null explicitly leaves this manual dimension unset. */
+  seedRatioGoal: number | null;
+  /** Null explicitly leaves manual torrent seed time unset. */
+  seedTimeMinutes: number | null;
   categories: IndexerCategoryMap;
   /**
    * Media this source is not to be searched for, on the operator's say-so rather than the
@@ -324,6 +333,12 @@ export interface CreateIndexerPayload {
   credential?: string | null;
   enabled?: boolean;
   allowPrivateAddress?: boolean;
+  /** Controls tracker fallback only; configured manual values still apply when false. */
+  applyTrackerSeedGoals?: boolean;
+  /** Null explicitly clears the manual ratio. */
+  seedRatioGoal?: number | null;
+  /** Null explicitly clears the manual seed time. */
+  seedTimeMinutes?: number | null;
   categories?: Partial<IndexerCategoryMap>;
   disabledMediaKinds?: BookRequestMediaKind[];
   isbnSearchDisabled?: boolean;

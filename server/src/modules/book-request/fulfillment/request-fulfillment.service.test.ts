@@ -85,6 +85,14 @@ function makeService(
   const direct = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
   const indexers = {
     resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'tracker', adapterType: 'torznab' }),
+    resolveSeedPolicy: vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    }),
     ...overrides.indexers,
   };
   const indexerAdapter = { fetchTorrentFile: vi.fn(), ...overrides.indexerAdapter };
@@ -649,6 +657,178 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
 
     expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ seedRatioGoal: 2, seedTimeMinutes: 4320 }), expect.anything());
+  });
+
+  it('applies manual dimensions independently over tracker fallback', async () => {
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: {
+        resolveSeedPolicy: vi.fn().mockResolvedValue({
+          id: 9,
+          adapterType: 'torznab',
+          seedsBack: true,
+          applyTrackerSeedGoals: true,
+          seedRatioGoal: 1.25,
+          seedTimeMinutes: null,
+        }),
+      },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ seedRatioGoal: 1.25, seedTimeMinutes: 4320 }), expect.anything());
+  });
+
+  it('disables tracker fallback without disabling manual values', async () => {
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: {
+        resolveSeedPolicy: vi.fn().mockResolvedValue({
+          id: 9,
+          adapterType: 'torznab',
+          seedsBack: true,
+          applyTrackerSeedGoals: false,
+          seedRatioGoal: null,
+          seedTimeMinutes: 90,
+        }),
+      },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    const payload = adapter.add.mock.calls[0]?.[0];
+    expect(payload).not.toHaveProperty('seedRatioGoal');
+    expect(payload).toHaveProperty('seedTimeMinutes', 90);
+  });
+
+  it('uses current policy after an inspection cache hit without fetching bytes again', async () => {
+    const fetchTorrentFile = vi.fn().mockResolvedValue(torrentBytes());
+    const resolveSeedPolicy = vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: false,
+      seedRatioGoal: 3,
+      seedTimeMinutes: 45,
+    });
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveSeedPolicy },
+      indexerAdapter: { fetchTorrentFile },
+    });
+
+    await service.inspectRelease(7, { indexerId: 9, releaseGuid: 'r-1' });
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(fetchTorrentFile).toHaveBeenCalledTimes(1);
+    expect(resolveSeedPolicy).toHaveBeenCalledTimes(1);
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ seedRatioGoal: 3, seedTimeMinutes: 45 }), expect.anything());
+  });
+
+  it.each([
+    ['deleted', new NotFoundException('Indexer not found')],
+    ['unavailable', new BadRequestException('Unknown indexer type: demo-tracker')],
+  ])('refuses a cached release when its source is %s', async (_state, sourceError) => {
+    const fetchTorrentFile = vi.fn().mockResolvedValue(torrentBytes());
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveSeedPolicy: vi.fn().mockRejectedValue(sourceError) },
+      indexerAdapter: { fetchTorrentFile },
+    });
+
+    await service.inspectRelease(7, { indexerId: 9, releaseGuid: 'r-1' });
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user())).rejects.toMatchObject({
+      status: 400,
+      response: { errorCode: 'GRAB_RELEASE_REFUSED' },
+    });
+
+    expect(fetchTorrentFile).toHaveBeenCalledTimes(1);
+    expect(adapter.add).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cached release when its configured adapter type changed', async () => {
+    const fetchTorrentFile = vi.fn().mockResolvedValue(torrentBytes());
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: {
+        resolveSeedPolicy: vi.fn().mockResolvedValue({
+          id: 9,
+          adapterType: 'other-torrent',
+          seedsBack: true,
+          applyTrackerSeedGoals: true,
+          seedRatioGoal: null,
+          seedTimeMinutes: null,
+        }),
+      },
+      indexerAdapter: { fetchTorrentFile },
+    });
+
+    await service.inspectRelease(7, { indexerId: 9, releaseGuid: 'r-1' });
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user())).rejects.toMatchObject({
+      status: 400,
+      response: { errorCode: 'GRAB_RELEASE_REFUSED' },
+    });
+
+    expect(fetchTorrentFile).toHaveBeenCalledTimes(1);
+    expect(adapter.add).not.toHaveBeenCalled();
+  });
+
+  it('propagates a transient policy read failure without misreporting the source as unavailable', async () => {
+    const policyError = new Error('database unavailable');
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveSeedPolicy: vi.fn().mockRejectedValue(policyError) },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user())).rejects.toBe(policyError);
+    expect(adapter.add).not.toHaveBeenCalled();
+  });
+
+  it('keeps one policy snapshot across a transient client retry', async () => {
+    const resolveSeedPolicy = vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: false,
+      seedRatioGoal: 3,
+      seedTimeMinutes: null,
+    });
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveSeedPolicy },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+    adapter.add.mockRejectedValueOnce(new ServiceUnavailableException('restarting')).mockResolvedValueOnce({ clientKey: INFO_HASH });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, null);
+
+    expect(resolveSeedPolicy).toHaveBeenCalledTimes(1);
+    expect(adapter.add).toHaveBeenCalledTimes(2);
+    expect(adapter.add.mock.calls[0]?.[0]).toHaveProperty('seedRatioGoal', 3);
+    expect(adapter.add.mock.calls[1]?.[0]).toHaveProperty('seedRatioGoal', 3);
+  });
+
+  it('uses manual time for a configured-indexer magnet', async () => {
+    const { service, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue({ ...RELEASE, magnet: MAGNET }) },
+      indexers: {
+        resolveSeedPolicy: vi.fn().mockResolvedValue({
+          id: 9,
+          adapterType: 'torznab',
+          seedsBack: true,
+          applyTrackerSeedGoals: false,
+          seedRatioGoal: null,
+          seedTimeMinutes: 30,
+        }),
+      },
+    });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ seedTimeMinutes: 30 }), expect.anything());
   });
 
   /** Torznab states no format, so what the approver saw came off the release name. Record that. */

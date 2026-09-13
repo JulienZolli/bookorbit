@@ -30,9 +30,16 @@ function config(overrides: Partial<ResolvedIndexerConfig> = {}): ResolvedIndexer
     adapterType: 'torznab',
     baseUrl: 'https://tracker.example.com',
     credential: 'a-key',
+    credentialError: null,
     allowPrivateAddress: false,
+    applyTrackerSeedGoals: true,
+    seedRatioGoal: null,
+    seedTimeMinutes: null,
     categories: { ebook: [7020], audiobook: [3030], comic: [7030] },
+    disabledMediaKinds: [],
+    isbnSearchDisabled: false,
     settings: null,
+    networkProfile: null,
     ...overrides,
   };
 }
@@ -144,6 +151,39 @@ describe('PluginIndexerAdapter', () => {
       expect(release.sizeBytes).toBe(2_000_000);
       expect(release.seeders).toBe(0);
       expect(release.leechers).toBeNull();
+    });
+
+    it('normalizes seed goals without coercing plugin values or converting minutes twice', async () => {
+      const releases = await searched([
+        { guid: 'valid', title: 'Dune', seedRatioGoal: 1.5, seedTimeMinutes: 60.2 },
+        { guid: 'string', title: 'Dune', seedRatioGoal: '2', seedTimeMinutes: '120' },
+        { guid: 'zero', title: 'Dune', seedRatioGoal: 0, seedTimeMinutes: 0 },
+        { guid: 'oversized', title: 'Dune', seedRatioGoal: 2, seedTimeMinutes: 2_147_483_648 },
+      ]);
+
+      expect(releases[0]).toMatchObject({ seedRatioGoal: 1.5, seedTimeMinutes: 61 });
+      expect(releases[1]).not.toHaveProperty('seedRatioGoal');
+      expect(releases[1]).not.toHaveProperty('seedTimeMinutes');
+      expect(releases[2]).not.toHaveProperty('seedRatioGoal');
+      expect(releases[2]).not.toHaveProperty('seedTimeMinutes');
+      expect(releases[3]).toHaveProperty('seedRatioGoal', 2);
+      expect(releases[3]).not.toHaveProperty('seedTimeMinutes');
+    });
+
+    it('does not expose host seed policy to a plugin', async () => {
+      let seen: Record<string, unknown> | undefined;
+      const { adapter } = makeAdapter({
+        search: (_query, given) => {
+          seen = given as unknown as Record<string, unknown>;
+          return Promise.resolve([]);
+        },
+      });
+
+      await adapter.search(query(), config({ applyTrackerSeedGoals: false, seedRatioGoal: 3, seedTimeMinutes: 60 }), AbortSignal.timeout(1000));
+
+      expect(seen).not.toHaveProperty('applyTrackerSeedGoals');
+      expect(seen).not.toHaveProperty('seedRatioGoal');
+      expect(seen).not.toHaveProperty('seedTimeMinutes');
     });
 
     it('reads a flag as the boolean it is meant to be', async () => {

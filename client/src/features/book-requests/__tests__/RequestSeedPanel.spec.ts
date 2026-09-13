@@ -80,6 +80,33 @@ describe('RequestSeedPanel', () => {
     expect(wrapper.text()).toContain('1.25 of 2')
   })
 
+  it('shows an active transfer as downloading rather than stopped', async () => {
+    apiMock.mockResolvedValue(response(JSON.stringify(seed({ seeding: false, ratio: 0, seedingTimeSeconds: 0, uploadedBytes: 0 }))))
+
+    const wrapper = await mountPanel({
+      request: request({ download: { ...request().download!, status: 'downloading' } }),
+    })
+
+    expect(wrapper.text()).toContain('Downloading')
+    expect(wrapper.text()).not.toContain('Stopped')
+  })
+
+  it('re-reads the seed state when the download advances', async () => {
+    apiMock
+      .mockResolvedValueOnce(response(JSON.stringify(seed({ seeding: false, ratio: 0, seedingTimeSeconds: 0, uploadedBytes: 0 }))))
+      .mockResolvedValueOnce(response(JSON.stringify(seed())))
+    const wrapper = await mountPanel({
+      request: request({ download: { ...request().download!, status: 'downloading' } }),
+    })
+
+    await wrapper.setProps({ request: request() })
+    await flushPromises()
+
+    expect(apiMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('Seeding')
+    expect(wrapper.text()).not.toContain('Stopped')
+  })
+
   it('shows the ratio and the time against the goals the client was given', async () => {
     const wrapper = await mountPanel()
 

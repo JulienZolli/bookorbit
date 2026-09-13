@@ -207,6 +207,15 @@ describe('DelugeAdapter', () => {
       });
     });
 
+    it('does not synthesize a ratio from an unsupported seed-time goal', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('core.add_torrent_magnet', () => result(INFO_HASH));
+
+      await adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH, seedTimeMinutes: 4320 }, config());
+
+      expect(calls.find((call) => call.method === 'core.add_torrent_magnet')?.params[1]).toEqual({ add_paused: false });
+    });
+
     /**
      * An earlier attempt on this release leaves its torrent behind when the import fails. Deluge
      * refuses it outright rather than adopting it, so without this every retry of that release

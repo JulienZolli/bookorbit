@@ -631,6 +631,13 @@
       "when": 1789273281909,
       "tag": "0089_add_newznab_nzbget",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1789316739511,
+      "tag": "0090_add_indexer_seed_goals",
+      "breakpoints": true
     }
   ]
 }

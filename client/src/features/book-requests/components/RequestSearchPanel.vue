@@ -601,7 +601,7 @@ function mediaIconFor(kind: BookRequestMediaKind) {
               :key="kind"
               type="button"
               class="inline-flex h-full items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
-              :class="mediaKind === kind ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+              :class="mediaKind === kind ? 'bg-primary text-primary-foreground shadow-sm' : 'text-foreground hover:bg-accent'"
               :aria-pressed="mediaKind === kind"
               @click="selectMediaKind(kind)"
             >
@@ -618,7 +618,7 @@ function mediaIconFor(kind: BookRequestMediaKind) {
             <button
               type="button"
               class="inline-flex h-full flex-1 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none sm:flex-none"
-              :class="fulfillmentMode === 'automatic' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+              :class="fulfillmentMode === 'automatic' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-foreground hover:bg-accent'"
               :aria-pressed="fulfillmentMode === 'automatic'"
               @click="selectAutomaticFulfillment"
             >
@@ -627,9 +627,7 @@ function mediaIconFor(kind: BookRequestMediaKind) {
             <button
               type="button"
               class="inline-flex h-full flex-1 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none sm:flex-none"
-              :class="
-                fulfillmentMode === 'choose_release' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'
-              "
+              :class="fulfillmentMode === 'choose_release' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-foreground hover:bg-accent'"
               :aria-pressed="fulfillmentMode === 'choose_release'"
               @click="selectReleaseFulfillment"
             >

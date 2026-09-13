@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Loader2, Plug, Plus, RefreshCw, Server as ServerIcon, Trash2, TriangleAlert, Upload } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { BOOK_REQUEST_MEDIA_KINDS, INDEXER_ADAPTER_TYPES } from '@bookorbit/types'
+import { BOOK_REQUEST_MEDIA_KINDS, INDEXER_ADAPTER_TYPES, MAX_INDEXER_SEED_TIME_MINUTES } from '@bookorbit/types'
 import type { IndexerAdapterDescriptor, IndexerItem, IndexerSettingsField } from '@bookorbit/types'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -85,6 +85,12 @@ const {
   cancelEdit,
   handleNameInput,
   handleBaseUrlInput,
+  handleSeedRatioInput,
+  handleSeedTimeInput,
+  seedingAtDefaults,
+  resetSeedingSettings,
+  ratioSeedSummary,
+  timeSeedSummary,
   markCredentialTouched,
   canClearCredential,
   toggleClearCredential,
@@ -739,6 +745,83 @@ function handleTestCurrent() {
               </template>
             </SettingsField>
           </div>
+        </SettingsSection>
+
+        <SettingsSection v-if="currentAdapter?.seedsBack" :title="t('settings.system.requests.sections.seeding')">
+          <SettingsToggleField
+            v-model="draft.applyTrackerSeedGoals"
+            :label="t('settings.system.requests.indexers.seeding.applyTracker')"
+            input-id="indexer-apply-tracker-seed-goals"
+            :brief="t('settings.system.requests.indexers.seeding.applyTrackerBrief')"
+          />
+
+          <div class="grid gap-4 sm:grid-cols-2">
+            <SettingsField
+              :label="t('settings.system.requests.indexers.seeding.ratio')"
+              input-id="indexer-seed-ratio"
+              :brief="t('settings.system.requests.indexers.seeding.ratioBrief')"
+              :error="fieldErrors.seedRatioGoal"
+            >
+              <template #default="{ describedBy, invalid }">
+                <input
+                  id="indexer-seed-ratio"
+                  :value="draft.seedRatioGoal"
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputmode="decimal"
+                  class="settings-control"
+                  :aria-describedby="describedBy"
+                  :aria-invalid="invalid || undefined"
+                  @input="handleSeedRatioInput"
+                />
+              </template>
+            </SettingsField>
+
+            <SettingsField
+              :label="t('settings.system.requests.indexers.seeding.time')"
+              input-id="indexer-seed-time"
+              :brief="t('settings.system.requests.indexers.seeding.timeBrief')"
+              :error="fieldErrors.seedTimeMinutes"
+            >
+              <template #default="{ describedBy, invalid }">
+                <input
+                  id="indexer-seed-time"
+                  :value="draft.seedTimeMinutes"
+                  type="number"
+                  min="1"
+                  :max="MAX_INDEXER_SEED_TIME_MINUTES"
+                  step="1"
+                  inputmode="numeric"
+                  class="settings-control"
+                  :aria-describedby="describedBy"
+                  :aria-invalid="invalid || undefined"
+                  @input="handleSeedTimeInput"
+                />
+              </template>
+            </SettingsField>
+          </div>
+
+          <p class="settings-hint">{{ t('settings.system.requests.indexers.seeding.clientSupport') }}</p>
+          <p class="settings-hint">{{ t('settings.system.requests.indexers.seeding.futureGrabs') }}</p>
+
+          <div class="rounded-md border border-border bg-muted/30 p-3">
+            <p class="settings-label">{{ t('settings.system.requests.indexers.seeding.summary.title') }}</p>
+            <dl class="mt-2 grid gap-2 text-xs sm:grid-cols-2">
+              <div>
+                <dt class="text-muted-foreground">{{ t('settings.system.requests.indexers.seeding.summary.ratio') }}</dt>
+                <dd class="text-foreground">{{ ratioSeedSummary }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted-foreground">{{ t('settings.system.requests.indexers.seeding.summary.time') }}</dt>
+                <dd class="text-foreground">{{ timeSeedSummary }}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <Button type="button" size="sm" variant="outline" :disabled="seedingAtDefaults" @click="resetSeedingSettings">
+            {{ t('settings.system.requests.indexers.seeding.reset') }}
+          </Button>
         </SettingsSection>
 
         <SettingsSection v-if="currentAdapter?.settingsFields.length" :title="t('settings.system.requests.sections.access')">

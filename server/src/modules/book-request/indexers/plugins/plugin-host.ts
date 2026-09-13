@@ -26,6 +26,7 @@ import {
   type ReleaseQuery,
   type ResolvedIndexerConfig,
 } from '../indexer-adapter';
+import { normalizeProviderSeedRatio, normalizeProviderSeedTimeMinutes } from '../seed-goal.utils';
 
 /**
  * A ceiling on any one request a plugin makes, and one it cannot opt out of.
@@ -323,8 +324,8 @@ function sanitizeCandidate(raw: PluginReleaseCandidate, indexerId: number): Rele
     vipOnly: raw.vipOnly === true,
     ...optionalNumber('primaryFileCount', raw.primaryFileCount),
     ...optionalNumber('fileCount', raw.fileCount),
-    ...optionalNumber('seedRatioGoal', raw.seedRatioGoal),
-    ...optionalNumber('seedTimeMinutes', raw.seedTimeMinutes),
+    ...optionalNormalizedNumber('seedRatioGoal', normalizeProviderSeedRatio(raw.seedRatioGoal)),
+    ...optionalNormalizedNumber('seedTimeMinutes', normalizeProviderSeedTimeMinutes(raw.seedTimeMinutes)),
     ...(raw.audio && typeof raw.audio === 'object' ? { audio: sanitizeAudio(raw.audio) } : {}),
   };
 }
@@ -364,6 +365,10 @@ function optional<K extends string>(key: K, value: string | null): Record<K, str
 function optionalNumber<K extends string>(key: K, value: unknown): Record<K, number> | Record<string, never> {
   const parsed = finite(value);
   return parsed === null ? {} : ({ [key]: parsed } as Record<K, number>);
+}
+
+function optionalNormalizedNumber<K extends string>(key: K, value: number | undefined): Record<K, number> | Record<string, never> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, number>);
 }
 
 function toPluginQuery(query: ReleaseQuery): PluginReleaseQuery {

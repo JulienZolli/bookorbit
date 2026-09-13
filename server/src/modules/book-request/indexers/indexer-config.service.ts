@@ -18,7 +18,7 @@ import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import { PrivateAddressException, ensureSafeUrl } from '../../../common/utils/ssrf.utils';
 import type { RequestIndexerRow } from '../../../db/schema';
 import { RequestCredentialService } from '../request-credential.service';
-import type { ResolvedIndexerConfig } from './indexer-adapter';
+import type { ResolvedIndexerConfig, ResolvedIndexerSeedPolicy } from './indexer-adapter';
 import { IndexerRegistry } from './indexer-registry';
 import { IndexerRepository } from './indexer.repository';
 import type { CreateIndexerDto, UpdateIndexerDto } from './dto/indexer.dto';
@@ -65,6 +65,8 @@ export class IndexerConfigService {
     // not leave a half-made indexer behind whose name the operator then cannot save over.
     await this.assertReachableUrl(dto.baseUrl, dto.allowPrivateAddress ?? false);
     this.assertCredentialPresent(dto.adapterType, Boolean(dto.credential?.trim()));
+    const seedsBack = this.registry.seedsBack(dto.adapterType);
+    this.assertSeedPolicyCompatible(seedsBack, dto);
     const credentialsEnc = dto.credential ? this.credentials.encrypt(dto.credential) : null;
     const color = dto.color === undefined ? pickUnusedIndexerColor(await this.repo.findAssignedColors()) : dto.color;
 
@@ -77,6 +79,9 @@ export class IndexerConfigService {
         credentialsEnc,
         enabled: dto.enabled ?? true,
         allowPrivateAddress: dto.allowPrivateAddress ?? false,
+        applyTrackerSeedGoals: seedsBack ? (dto.applyTrackerSeedGoals ?? true) : true,
+        seedRatioGoal: seedsBack ? (dto.seedRatioGoal ?? null) : null,
+        seedTimeMinutes: seedsBack ? (dto.seedTimeMinutes ?? null) : null,
         categories: mergeCategories(this.registry.defaultCategories(dto.adapterType), dto.categories),
         disabledMediaKinds: normalizeDisabledMediaKinds(dto.disabledMediaKinds),
         isbnSearchDisabled: dto.isbnSearchDisabled ?? false,
@@ -107,6 +112,8 @@ export class IndexerConfigService {
     const changesAdapter = adapterType !== existing.adapterType;
     const keepsCredential = dto.credential === undefined ? !changesAdapter && existing.credentialsEnc !== null : Boolean(dto.credential.trim());
     this.assertCredentialPresent(adapterType, keepsCredential);
+    const seedsBack = this.registry.seedsBack(adapterType);
+    this.assertSeedPolicyCompatible(seedsBack, dto);
 
     const patch: Partial<RequestIndexerRow> = {};
     if (dto.name !== undefined) patch.name = dto.name.trim();
@@ -115,6 +122,15 @@ export class IndexerConfigService {
     if (dto.baseUrl !== undefined) patch.baseUrl = baseUrl;
     if (dto.enabled !== undefined) patch.enabled = dto.enabled;
     if (dto.allowPrivateAddress !== undefined) patch.allowPrivateAddress = dto.allowPrivateAddress;
+    if (seedsBack) {
+      if (dto.applyTrackerSeedGoals !== undefined) patch.applyTrackerSeedGoals = dto.applyTrackerSeedGoals;
+      if (dto.seedRatioGoal !== undefined) patch.seedRatioGoal = dto.seedRatioGoal;
+      if (dto.seedTimeMinutes !== undefined) patch.seedTimeMinutes = dto.seedTimeMinutes;
+    } else {
+      patch.applyTrackerSeedGoals = true;
+      patch.seedRatioGoal = null;
+      patch.seedTimeMinutes = null;
+    }
     if (dto.categories !== undefined) patch.categories = mergeCategories(this.registry.defaultCategories(adapterType), dto.categories);
     if (dto.disabledMediaKinds !== undefined) patch.disabledMediaKinds = normalizeDisabledMediaKinds(dto.disabledMediaKinds);
     if (dto.isbnSearchDisabled !== undefined) patch.isbnSearchDisabled = dto.isbnSearchDisabled;
@@ -219,6 +235,17 @@ export class IndexerConfigService {
     return this.toConfig(await this.requireIndexer(id));
   }
 
+  async resolveSeedPolicy(id: number): Promise<ResolvedIndexerSeedPolicy> {
+    const row = await this.repo.findSeedPolicyById(id);
+    if (!row) throw new NotFoundException('Indexer not found');
+    this.registry.require(row.adapterType);
+    return {
+      ...row,
+      adapterType: row.adapterType as IndexerAdapterType,
+      seedsBack: this.registry.seedsBack(row.adapterType),
+    };
+  }
+
   private toConfig(row: RequestIndexerRow): ResolvedIndexerConfig {
     return {
       id: row.id,
@@ -229,6 +256,9 @@ export class IndexerConfigService {
       credential: row.credentialsEnc ? this.credentials.decrypt(row.credentialsEnc) : null,
       credentialError: null,
       allowPrivateAddress: row.allowPrivateAddress,
+      applyTrackerSeedGoals: row.applyTrackerSeedGoals,
+      seedRatioGoal: row.seedRatioGoal,
+      seedTimeMinutes: row.seedTimeMinutes,
       categories: this.resolveCategories(row),
       disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
       isbnSearchDisabled: row.isbnSearchDisabled,
@@ -315,6 +345,13 @@ export class IndexerConfigService {
     }
   }
 
+  private assertSeedPolicyCompatible(seedsBack: boolean, dto: CreateIndexerDto | UpdateIndexerDto): void {
+    if (seedsBack) return;
+    if (dto.applyTrackerSeedGoals === false || dto.seedRatioGoal != null || dto.seedTimeMinutes != null) {
+      throw indexerError('INDEXER_SETTINGS_INVALID', 'Seed goals can only be configured for an indexer that returns torrents');
+    }
+  }
+
   /**
    * Unlike a download client this defaults to off: a public tracker has no business resolving to
    * a private address, and a self-hosted torznab proxy is the one case worth opting into.
@@ -378,6 +415,9 @@ function toItem(row: RequestIndexerRow, categories: IndexerCategoryMap): Indexer
     baseUrl: row.baseUrl,
     hasCredential: row.credentialsEnc !== null,
     allowPrivateAddress: row.allowPrivateAddress,
+    applyTrackerSeedGoals: row.applyTrackerSeedGoals,
+    seedRatioGoal: row.seedRatioGoal,
+    seedTimeMinutes: row.seedTimeMinutes,
     categories,
     disabledMediaKinds: normalizeDisabledMediaKinds(row.disabledMediaKinds),
     isbnSearchDisabled: row.isbnSearchDisabled,

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, check, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
+import { boolean, check, doublePrecision, index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 import type { BookRequestMediaKind, IndexerCategoryMap, IndexerColor, IndexerSettings, NetworkProfile } from '@bookorbit/types';
 
 /**
@@ -29,6 +29,9 @@ export const requestIndexers = pgTable(
      * is an explicit per-row opt-in with the implication stated in the UI.
      */
     allowPrivateAddress: boolean('allow_private_address').notNull().default(false),
+    applyTrackerSeedGoals: boolean('apply_tracker_seed_goals').notNull().default(true),
+    seedRatioGoal: doublePrecision('seed_ratio_goal'),
+    seedTimeMinutes: integer('seed_time_minutes'),
 
     /** Which of this indexer's own categories to search per requested medium. */
     categories: jsonb('categories').$type<IndexerCategoryMap>(),
@@ -90,6 +93,11 @@ export const requestIndexers = pgTable(
     // externally loaded adapters name themselves. `IndexerRegistry.require()` is what actually
     // rejects an unknown type, loudly, at search and grab time.
     check('request_indexers_adapter_type_chk', sql`${t.adapterType} ~ '^[a-z0-9][a-z0-9-]{0,29}$'`),
+    check(
+      'request_indexers_seed_ratio_goal_chk',
+      sql`${t.seedRatioGoal} is null or (${t.seedRatioGoal} > 0 and ${t.seedRatioGoal} < 'Infinity'::double precision)`,
+    ),
+    check('request_indexers_seed_time_minutes_chk', sql`${t.seedTimeMinutes} is null or ${t.seedTimeMinutes} > 0`),
   ],
 );
 

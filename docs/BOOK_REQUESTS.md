@@ -86,6 +86,24 @@ Two health facts are shown per row, and they answer different questions:
   refuse every search, and the badge counts consecutive failures so one blip reads differently
   from a source that has been broken for a week.
 
+### Per-indexer seed goals
+
+Torrent sources can set a manual seed ratio and total seed time. Each manual field is independent.
+Leaving one blank means inheritance; zero and negative values are not special modes. **Apply tracker
+seed goals** controls only whether a valid goal reported by Torznab or a torrent plugin fills a
+blank manual field. Turning it off does not disable manual values and does not request unlimited
+seeding.
+
+For ratio, BookOrbit uses the manual source value, then the tracker value when tracker fallback is
+enabled, then omits the value so the download client uses its own default. Seed time follows the
+same order: manual source value, tracker value when tracker fallback is enabled, then the download
+client's default.
+
+The policy is read when a new grab attempt starts, so a saved edit applies even when BookOrbit is
+reusing recently inspected torrent bytes. It applies only to releases selected from that configured
+source. A pasted magnet or uploaded torrent file has no indexer policy. Changes do not reconfigure
+torrents already in a client.
+
 ## Download clients
 
 Settings > System > Requests > Download clients. qBittorrent, Transmission and Deluge accept
@@ -118,6 +136,19 @@ to copying it and the book uses space twice while the original keeps seeding.
 
 BookOrbit never stops a seed on its own. Removing a client-managed download is an explicit action
 with its own confirmation, and removing one that is still working also fails the request.
+
+qBittorrent accepts a per-torrent ratio and total seeding-time limit through fields documented
+since Web API 2.8.1. When both exist, its own stop rules can act when either limit is reached; the
+pair is not an AND condition and does not guarantee both tracker minimums. Deluge accepts the ratio
+with stop-at-ratio enabled and removal disabled.
+Transmission accepts the ratio in a best-effort call after adding the torrent; its idle-time option
+is not used as total seed time. A failure in that Transmission policy update leaves the tracked
+torrent in place and is logged as a warning.
+
+Client-wide ratio, time, idle, and completion settings still apply. qBittorrent and Deluge can
+adopt a duplicate torrent without replacing its existing limits; Transmission attempts to apply
+an explicit ratio to an adopted torrent. BookOrbit does not delete and re-add an adopted torrent,
+reconcile limits across clients, or run a background seed stopper.
 
 ## Automation
 

@@ -347,6 +347,24 @@ describe('RequestSearchPanel provider sources', () => {
     expect(document.body.textContent).toContain('Recommended')
   })
 
+  it('makes the selected media kind visually distinct', async () => {
+    const wrapper = await render()
+    const ebook = wrapper.findAll('button').find((button) => button.text() === 'E-book')!
+    const audiobook = wrapper.findAll('button').find((button) => button.text() === 'Audiobook')!
+
+    expect(ebook.attributes('aria-pressed')).toBe('true')
+    expect(ebook.classes()).toEqual(expect.arrayContaining(['bg-primary', 'text-primary-foreground']))
+    expect(audiobook.attributes('aria-pressed')).toBe('false')
+    expect(audiobook.classes()).toEqual(expect.arrayContaining(['text-foreground', 'hover:bg-accent']))
+
+    await audiobook.trigger('click')
+
+    expect(ebook.attributes('aria-pressed')).toBe('false')
+    expect(ebook.classes()).toEqual(expect.arrayContaining(['text-foreground', 'hover:bg-accent']))
+    expect(audiobook.attributes('aria-pressed')).toBe('true')
+    expect(audiobook.classes()).toEqual(expect.arrayContaining(['bg-primary', 'text-primary-foreground']))
+  })
+
   it('defaults a user with both fulfillment permissions to automation', async () => {
     state.hasPermission.mockImplementation(
       (permission: string) => permission === Permission.BookRequestAutoApprove || permission === Permission.BookRequestSelfFulfill,
@@ -358,7 +376,9 @@ describe('RequestSearchPanel provider sources', () => {
     const automatic = wrapper.findAll('button').find((button) => button.text() === 'Automatic')!
     const choose = wrapper.findAll('button').find((button) => button.text() === 'Choose a release')!
     expect(automatic.attributes('aria-pressed')).toBe('true')
+    expect(automatic.classes()).toEqual(expect.arrayContaining(['bg-primary', 'text-primary-foreground']))
     expect(choose.attributes('aria-pressed')).toBe('false')
+    expect(choose.classes()).toEqual(expect.arrayContaining(['text-foreground', 'hover:bg-accent']))
     expect(wrapper.find('button[aria-label="How BookOrbit chooses the recommended ISBN"]').exists()).toBe(false)
 
     await wrapper
@@ -385,12 +405,12 @@ describe('RequestSearchPanel provider sources', () => {
       .find((button) => button.text() === 'Choose a release')!
       .trigger('click')
 
-    expect(
-      wrapper
-        .findAll('button')
-        .find((button) => button.text() === 'Choose a release')!
-        .attributes('aria-pressed'),
-    ).toBe('true')
+    const automatic = wrapper.findAll('button').find((button) => button.text() === 'Automatic')!
+    const choose = wrapper.findAll('button').find((button) => button.text() === 'Choose a release')!
+    expect(automatic.attributes('aria-pressed')).toBe('false')
+    expect(automatic.classes()).toEqual(expect.arrayContaining(['text-foreground', 'hover:bg-accent']))
+    expect(choose.attributes('aria-pressed')).toBe('true')
+    expect(choose.classes()).toEqual(expect.arrayContaining(['bg-primary', 'text-primary-foreground']))
     expect(wrapper.find('button[aria-label="How BookOrbit chooses the recommended ISBN"]').exists()).toBe(true)
 
     await wrapper

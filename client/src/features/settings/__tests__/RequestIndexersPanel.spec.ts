@@ -95,6 +95,9 @@ function indexer(overrides: Partial<IndexerItem> = {}): IndexerItem {
     baseUrl: 'http://127.0.0.1:9696/1',
     hasCredential: true,
     allowPrivateAddress: true,
+    applyTrackerSeedGoals: true,
+    seedRatioGoal: null,
+    seedTimeMinutes: null,
     categories: { ebook: [7020], audiobook: [3030], comic: [7030] },
     disabledMediaKinds: [],
     isbnSearchDisabled: false,
@@ -768,6 +771,155 @@ describe('RequestIndexersPanel', () => {
     await openCreate(wrapper)
 
     expect(sheet().querySelector('#indexer-categories-ebook')).not.toBeNull()
+  })
+
+  describe('seeding policy', () => {
+    it('shows controls for torrent adapters but not non-seeding sources', async () => {
+      const torrent = await mountPanel({ adapters: [descriptor()] })
+      await openCreate(torrent)
+      expect(sheet().querySelector('#indexer-seed-ratio')).not.toBeNull()
+      torrent.unmount()
+      document.body.innerHTML = ''
+
+      const plugin = await mountPanel({ adapters: [PLUGIN] })
+      await openCreate(plugin, 'demo-tracker')
+      expect(sheet().querySelector('#indexer-seed-time')).not.toBeNull()
+      plugin.unmount()
+      document.body.innerHTML = ''
+
+      const direct = await mountPanel({ adapters: [OPEN_LIBRARY] })
+      await openCreate(direct, 'open-library')
+      expect(sheet().querySelector('#indexer-seed-ratio')).toBeNull()
+    })
+
+    it('starts enabled with blank manual values and sends exact DTO field names', async () => {
+      const wrapper = await mountPanel({ adapters: [descriptor()] })
+      await openCreate(wrapper)
+      expect(sheet().querySelector('#indexer-apply-tracker-seed-goals')?.getAttribute('aria-checked')).toBe('true')
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-ratio')?.value).toBe('')
+      typeInto('#indexer-name', 'MAM')
+      typeInto('#indexer-url', 'https://tracker.example')
+      typeInto('#indexer-seed-ratio', '1.5')
+      typeInto('#indexer-seed-time', '60')
+
+      clickInSheet('Save')
+      await flushPromises()
+
+      const post = apiMock.mock.calls.find(([, init]) => init?.method === 'POST')!
+      expect(JSON.parse(String((post[1] as RequestInit).body))).toMatchObject({
+        applyTrackerSeedGoals: true,
+        seedRatioGoal: 1.5,
+        seedTimeMinutes: 60,
+      })
+    })
+
+    it('populates values and serializes a clear as null rather than zero', async () => {
+      const wrapper = await mountPanel({
+        adapters: [descriptor()],
+        indexers: [indexer({ applyTrackerSeedGoals: false, seedRatioGoal: 2.5, seedTimeMinutes: 90 })],
+      })
+      await clickInPanel(wrapper, 'Edit My Prowlarr')
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-ratio')?.value).toBe('2.5')
+      expect(sheet().querySelector('#indexer-apply-tracker-seed-goals')?.getAttribute('aria-checked')).toBe('false')
+      typeInto('#indexer-seed-ratio', '')
+
+      clickInSheet('Save')
+      await flushPromises()
+
+      const put = apiMock.mock.calls.find(([, init]) => init?.method === 'PUT')!
+      expect(JSON.parse(String((put[1] as RequestInit).body))).toMatchObject({ seedRatioGoal: null, seedTimeMinutes: 90 })
+    })
+
+    it('keeps manual inputs usable when tracker fallback is off', async () => {
+      const wrapper = await mountPanel({ adapters: [descriptor()] })
+      await openCreate(wrapper)
+      sheet().querySelector<HTMLButtonElement>('#indexer-apply-tracker-seed-goals')!.click()
+      await flushPromises()
+
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-time')?.disabled).toBe(false)
+      expect(sheet().textContent).toContain('Client default')
+    })
+
+    it('associates invalid values, blocks saving, and focuses the first invalid field', async () => {
+      const wrapper = await mountPanel({ adapters: [descriptor()] })
+      await openCreate(wrapper)
+      typeInto('#indexer-name', 'MAM')
+      typeInto('#indexer-url', 'https://tracker.example')
+      typeInto('#indexer-seed-ratio', '0')
+      typeInto('#indexer-seed-time', '1.5')
+      apiMock.mockClear()
+
+      clickInSheet('Save')
+      await flushPromises()
+
+      expect(sheet().querySelector('#indexer-seed-ratio-error')).not.toBeNull()
+      expect(sheet().querySelector('#indexer-seed-time-error')).not.toBeNull()
+      expect(sheet().querySelector('#indexer-seed-ratio')?.getAttribute('aria-describedby')).toBe('indexer-seed-ratio-error')
+      expect(document.activeElement?.id).toBe('indexer-seed-ratio')
+      expect(apiMock).not.toHaveBeenCalled()
+    })
+
+    it('resets only the draft and updates the summaries', async () => {
+      const wrapper = await mountPanel({
+        adapters: [descriptor()],
+        indexers: [indexer({ applyTrackerSeedGoals: false, seedRatioGoal: 2, seedTimeMinutes: 90 })],
+      })
+      await clickInPanel(wrapper, 'Edit My Prowlarr')
+      expect(sheet().textContent).toContain('Manual: 90')
+
+      clickInSheet('Reset seeding settings')
+      await flushPromises()
+
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-time')?.value).toBe('')
+      expect(sheet().textContent).toContain('Tracker fallback')
+      expect(apiMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(false)
+    })
+
+    it('does not serialize hidden fields when a saved plugin descriptor is missing', async () => {
+      const wrapper = await mountPanel({
+        adapters: [descriptor()],
+        indexers: [indexer({ adapterType: 'missing-plugin', seedRatioGoal: 2, seedTimeMinutes: 90 })],
+      })
+      await clickInPanel(wrapper, 'Edit My Prowlarr')
+      expect(sheet().querySelector('#indexer-seed-ratio')).toBeNull()
+
+      clickInSheet('Save')
+      await flushPromises()
+
+      const put = apiMock.mock.calls.find(([, init]) => init?.method === 'PUT')!
+      const body = JSON.parse(String((put[1] as RequestInit).body))
+      expect(body).not.toHaveProperty('seedRatioGoal')
+      expect(body).not.toHaveProperty('seedTimeMinutes')
+    })
+
+    it('retains a changed seed draft after save failure and restores persisted values after cancel', async () => {
+      const stored = indexer({ seedRatioGoal: 2 })
+      const wrapper = await mountPanel({ adapters: [descriptor()], indexers: [stored] })
+      await clickInPanel(wrapper, 'Edit My Prowlarr')
+      typeInto('#indexer-seed-ratio', '3')
+      await flushPromises()
+
+      expect(sheet().querySelector('button[aria-label="Test connection"]')).toBeNull()
+      apiMock.mockImplementation((url: string, init?: RequestInit) =>
+        Promise.resolve(
+          init?.method === 'PUT'
+            ? response({ errorCode: 'INDEXER_SETTINGS_INVALID', message: 'invalid policy' }, false)
+            : url.endsWith('/adapters')
+              ? response({ adapters: [descriptor()], pluginFailures: [] })
+              : response({ indexers: [stored], encryptionConfigured: true }),
+        ),
+      )
+
+      clickInSheet('Save')
+      await flushPromises()
+
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-ratio')?.value).toBe('3')
+      expect(toastMock.error).toHaveBeenCalledWith('One or more source settings are invalid. Review the available choices.')
+
+      clickInSheet('Cancel')
+      await clickInPanel(wrapper, 'Edit My Prowlarr')
+      expect(sheet().querySelector<HTMLInputElement>('#indexer-seed-ratio')?.value).toBe('2')
+    })
   })
 
   /** A plugin declares its own fields, and the form has never heard of them at build time. */
