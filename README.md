@@ -85,6 +85,26 @@ JWT_SECRET=                # signs login tokens          - openssl rand -hex 32
 SETUP_BOOTSTRAP_TOKEN=     # one-time setup wizard token - openssl rand -hex 16
 ```
 
+Sensitive values can instead be supplied through mounted files by setting the corresponding `_FILE` variable, such as `JWT_SECRET_FILE=/run/secrets/bookorbit_jwt_secret`. Leave the direct variable blank, mount the file into every service that uses it, and restart. Keep the blank assignment rather than deleting the line: the bundled `docker-compose.yml` marks `POSTGRES_PASSWORD`, `JWT_SECRET`, and `SETUP_BOOTSTRAP_TOKEN` as required, so removing them entirely fails before the container starts. BookOrbit rejects configurations where both forms are non-empty, and rejects a file that is missing, unreadable, or empty. This convention is supported for database credentials, application encryption keys, `GITHUB_RELEASES_TOKEN`, `JWT_SECRET`, and `SETUP_BOOTSTRAP_TOKEN`.
+
+For example, a Compose override can mount one database password file into both containers:
+
+```yaml
+services:
+  app:
+    secrets: [bookorbit_postgres_password]
+  postgres:
+    environment:
+      POSTGRES_PASSWORD_FILE: ${POSTGRES_PASSWORD_FILE?required}
+    secrets: [bookorbit_postgres_password]
+
+secrets:
+  bookorbit_postgres_password:
+    file: ./secrets/postgres_password
+```
+
+Set `POSTGRES_PASSWORD=` and `POSTGRES_PASSWORD_FILE=/run/secrets/bookorbit_postgres_password` in `.env`. The override passes the file path to PostgreSQL while the app receives it from the existing `.env` import. Other container platforms may mount secret files directly without a Compose override.
+
 On a NAS, or any host where your book folder is owned by a user other than UID 1000, also set `PUID` and `PGID` to match that owner. Run `id -u` and `id -g` as the owning user to find them. Getting these wrong is the most common cause of permission errors on first scan.
 
 Optionally set `LIBRARY_BROWSE_ROOT=/books` to start the library folder picker at `/books` instead of `/`.
