@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { CronExpression } from '@nestjs/schedule';
 import {
   AUTO_SEARCH_BACKOFF_WEEK_MS,
   compareByTier,
@@ -20,6 +20,7 @@ import type {
   ReleaseCandidateItem,
 } from '@bookorbit/types';
 
+import { SystemCron } from '../../../common/decorators/system-cron.decorator';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import type { BookRequestRow } from '../../../db/schema';
 import { BOOK_REQUEST_DOWNLOAD_FAILED, BookRequestEventsService } from '../book-request-events.service';
@@ -133,7 +134,7 @@ export class RequestAutomationService implements OnModuleInit {
    * conditionally and is safe to re-enter, so a request an approver acts on mid-sweep is left
    * alone by the pass that reaches it.
    */
-  @Cron(CronExpression.EVERY_HOUR)
+  @SystemCron(CronExpression.EVERY_HOUR)
   async sweepUnfulfilled(): Promise<void> {
     if (this.sweeping) return;
     const startedAt = Date.now();

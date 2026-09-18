@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
 import { sql } from 'drizzle-orm';
 import { eq, isNotNull, lt, or } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import { SystemCron } from '../../common/decorators/system-cron.decorator';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import { getSanitizedErrorInfo } from './seed-log.util';
@@ -38,7 +38,7 @@ export class CleanupService implements OnApplicationBootstrap {
     return result.rows.length === 3;
   }
 
-  @Cron('0 3 * * *')
+  @SystemCron('0 3 * * *')
   async cleanup() {
     const startedAt = Date.now();
     const event = 'seed.cleanup_auth_state';

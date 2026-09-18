@@ -1,8 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
 import { ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES } from '@bookorbit/types';
 import type { BookRequestDownloadStatus, BookRequestStatus } from '@bookorbit/types';
 
+import { SystemCron } from '../../../common/decorators/system-cron.decorator';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import type { BookRequestDownloadRow } from '../../../db/schema';
 import { BookRequestGateway } from '../book-request.gateway';
@@ -94,7 +94,7 @@ export class DownloadMonitorService implements OnModuleDestroy {
   }
 
   /** Direct transfers report once a second; external torrent clients are polled every five. */
-  @Cron('* * * * * *')
+  @SystemCron('* * * * * *')
   async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
