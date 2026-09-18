@@ -66,6 +66,7 @@ import StorygraphBookSyncGridItem from '@/features/storygraph/components/Storygr
 import BookEditionsCard from '@/features/book/components/detail/details/BookEditionsCard.vue'
 import BookReadingActivityCard from '@/features/book/components/detail/details/BookReadingActivityCard.vue'
 import { useBookReadingLog } from '@/features/book/composables/useBookReadingLog'
+import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
 
 type FileProgress = {
   percentage: number
@@ -113,6 +114,7 @@ function togglePersonalReview() {
 }
 
 const { weights: scoreWeights, fetchWeights } = useMetadataScoreWeights()
+const { settings: providerLinkSettings, loadSettings: loadProviderLinkSettings } = useProviderLinkSettings()
 const {
   bookProgress: koreaderBookProgress,
   fetchBookProgress: fetchKoreaderProgress,
@@ -122,6 +124,7 @@ const {
 onMounted(() => {
   void fetchWeights()
   void reloadReadingLog()
+  void loadProviderLinkSettings()
 })
 
 const {
@@ -715,7 +718,7 @@ const supplementalLoading = ref(false)
 const resettingFileIds = ref<number[]>([])
 const providerIconErrors = ref<Record<string, boolean>>({})
 
-const providerLinks = computed(() => createBookProviderLinks(props.book.providerIds))
+const providerLinks = computed(() => createBookProviderLinks(props.book.providerIds, providerLinkSettings.value))
 
 const communityRatingBadges = computed(() => {
   const linkByKey = new Map(providerLinks.value.map((link) => [link.key, link]))

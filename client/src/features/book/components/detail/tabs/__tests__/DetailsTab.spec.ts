@@ -5,6 +5,7 @@ import type { BookDetail } from '@bookorbit/types'
 import DetailsTab from '../DetailsTab.vue'
 import BookReadingActivityCard from '../../details/BookReadingActivityCard.vue'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
+import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(),
@@ -154,9 +155,11 @@ describe('DetailsTab cover surface', () => {
     mocks.hasPermission.mockReset()
     mocks.hasPermission.mockReturnValue(true)
     mocks.user.value.settings.timezone = 'UTC'
+    useProviderLinkSettings().settings.value = { amazonDomain: 'amazon.com' }
 
     mocks.api.mockImplementation(async (input) => {
       const url = String(input)
+      if (url.includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.com' })
       if (url.includes('/metadata-score/weights')) return response({})
       if (url.includes('/playback-state')) return response(null)
       if (url.includes('/collections/membership')) return response([])
@@ -539,6 +542,19 @@ describe('DetailsTab cover surface', () => {
     const tooltips = titledEls.map((el) => el.attributes('title') ?? '')
     expect(tooltips.some((t) => t.includes('4.8 / 5') && t.includes('104,451'))).toBe(true)
     expect(tooltips.some((t) => t.includes('4.3 / 5') && t.includes('12,345'))).toBe(true)
+  })
+
+  it('uses the configured Amazon domain for the book provider link', async () => {
+    const defaultImplementation = mocks.api.getMockImplementation()!
+    mocks.api.mockImplementation(async (input, init) => {
+      if (String(input).includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.de' })
+      return defaultImplementation(input, init)
+    })
+
+    const wrapper = mountDetails(makeBook({ providerIds: { amazon: 'B012345678' } }))
+    await flushPromises()
+
+    expect(wrapper.find('a[href="https://www.amazon.de/dp/B012345678"]').exists()).toBe(true)
   })
 
   it('places the sync grid items with the current book id', async () => {

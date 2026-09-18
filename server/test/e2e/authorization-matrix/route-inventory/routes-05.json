@@ -156,6 +156,18 @@
     "useGuards": []
   },
   {
+    "file": "server/src/modules/metadata-preferences/provider-link-settings.controller.ts",
+    "className": "ProviderLinkSettingsController",
+    "methodName": "getSettings",
+    "httpMethod": "GET",
+    "path": "/metadata-preferences/provider-links",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
     "file": "server/src/modules/metadata-score/metadata-score.controller.ts",
     "className": "MetadataScoreController",
     "methodName": "getWeights",
