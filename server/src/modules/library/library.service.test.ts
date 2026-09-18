@@ -42,7 +42,7 @@ describe('LibraryService', () => {
     findFoldersByLibrary: vi.fn(),
     findByName: vi.fn(),
     insert: vi.fn(),
-    insertFolder: vi.fn(),
+    insertFolders: vi.fn(),
     update: vi.fn(),
     deleteFolder: vi.fn(),
     findBookIdsByLibrary: vi.fn(),
@@ -169,7 +169,10 @@ describe('LibraryService', () => {
   it('create applies defaults, inserts folders, and starts an async scan', async () => {
     libraryRepo.findByName.mockResolvedValue([]);
     libraryRepo.insert.mockResolvedValue([{ id: 5, name: 'Sci-Fi', icon: 'BookOpen' }]);
-    libraryRepo.insertFolder.mockResolvedValueOnce([{ id: 11, path: '/a' }]).mockResolvedValueOnce([{ id: 12, path: '/b' }]);
+    libraryRepo.insertFolders.mockResolvedValue([
+      { id: 11, path: '/a' },
+      { id: 12, path: '/b' },
+    ]);
 
     const result = await service.create({ name: 'Sci-Fi', icon: 'BookOpen', folders: ['/a', '/b'] } as any);
 
@@ -187,6 +190,10 @@ describe('LibraryService', () => {
     );
     expect(scannerService.startScanAsync).toHaveBeenCalledWith(5);
     expect(fileWatcherService.startWatcher).not.toHaveBeenCalled();
+    expect(libraryRepo.insertFolders).toHaveBeenCalledWith([
+      { libraryId: 5, path: '/a' },
+      { libraryId: 5, path: '/b' },
+    ]);
     expect(result.folders).toEqual([
       { id: 11, path: '/a' },
       { id: 12, path: '/b' },
@@ -196,7 +203,7 @@ describe('LibraryService', () => {
   it('create passes file write defaults to insert', async () => {
     libraryRepo.findByName.mockResolvedValue([]);
     libraryRepo.insert.mockResolvedValue([{ id: 5, name: 'Sci-Fi', icon: 'BookOpen' }]);
-    libraryRepo.insertFolder.mockResolvedValueOnce([{ id: 11, path: '/a' }]);
+    libraryRepo.insertFolders.mockResolvedValue([{ id: 11, path: '/a' }]);
 
     await service.create({ name: 'Sci-Fi', icon: 'BookOpen', folders: ['/a'] } as any);
 
@@ -220,7 +227,10 @@ describe('LibraryService', () => {
   it('create starts watcher immediately when watch is enabled', async () => {
     libraryRepo.findByName.mockResolvedValue([]);
     libraryRepo.insert.mockResolvedValue([{ id: 6, name: 'Watched', icon: 'BookOpen', watch: true }]);
-    libraryRepo.insertFolder.mockResolvedValueOnce([{ id: 21, path: '/watch-a' }]).mockResolvedValueOnce([{ id: 22, path: '/watch-b' }]);
+    libraryRepo.insertFolders.mockResolvedValue([
+      { id: 21, path: '/watch-a' },
+      { id: 22, path: '/watch-b' },
+    ]);
 
     await service.create({ name: 'Watched', icon: 'BookOpen', folders: ['/watch-a', '/watch-b'], watch: true } as any);
 
@@ -231,7 +241,7 @@ describe('LibraryService', () => {
   it('create registers the configured scan schedule', async () => {
     libraryRepo.findByName.mockResolvedValue([]);
     libraryRepo.insert.mockResolvedValue([{ id: 6, name: 'Scheduled', icon: 'BookOpen', watch: false }]);
-    libraryRepo.insertFolder.mockResolvedValueOnce([{ id: 21, path: '/scheduled' }]);
+    libraryRepo.insertFolders.mockResolvedValue([{ id: 21, path: '/scheduled' }]);
 
     await service.create({
       name: 'Scheduled',
@@ -256,7 +266,7 @@ describe('LibraryService', () => {
     await expect(service.create({ name: 'Sci-Fi', icon: 'BookOpen', folders: ['/outside'] } as any)).rejects.toBeInstanceOf(ForbiddenException);
 
     expect(libraryRepo.insert).not.toHaveBeenCalled();
-    expect(libraryRepo.insertFolder).not.toHaveBeenCalled();
+    expect(libraryRepo.insertFolders).not.toHaveBeenCalled();
   });
 
   it('create rejects missing icons', async () => {
@@ -282,7 +292,7 @@ describe('LibraryService', () => {
     await service.update(3, { folders: ['/keep', '/add'] } as any);
 
     expect(libraryRepo.deleteFolder).toHaveBeenCalledWith(2);
-    expect(libraryRepo.insertFolder).toHaveBeenCalledWith({ libraryId: 3, path: '/add' });
+    expect(libraryRepo.insertFolders).toHaveBeenCalledWith([{ libraryId: 3, path: '/add' }]);
     expect(fileWatcherService.startWatcher).not.toHaveBeenCalled();
     expect(fileWatcherService.stopWatcher).not.toHaveBeenCalled();
   });
@@ -294,7 +304,7 @@ describe('LibraryService', () => {
     await expect(service.update(3, { folders: ['/outside'] } as any)).rejects.toBeInstanceOf(ForbiddenException);
 
     expect(libraryRepo.update).not.toHaveBeenCalled();
-    expect(libraryRepo.insertFolder).not.toHaveBeenCalled();
+    expect(libraryRepo.insertFolders).not.toHaveBeenCalled();
     expect(libraryRepo.deleteFolder).not.toHaveBeenCalled();
   });
 

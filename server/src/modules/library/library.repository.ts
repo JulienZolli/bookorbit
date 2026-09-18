@@ -89,23 +89,28 @@ export class LibraryRepository {
   }
 
   findFoldersByLibrary(libraryId: number) {
-    return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+    return this.db.select().from(libraryFolders).where(eq(libraryFolders.libraryId, libraryId)).orderBy(libraryFolders.createdAt, libraryFolders.id);
   }
 
   findAllFolders() {
-    return this.db.select().from(libraryFolders);
+    return this.db.select().from(libraryFolders).orderBy(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
   }
 
   findFoldersByLibraryIds(libraryIds: number[]) {
     if (libraryIds.length === 0) return Promise.resolve([]);
-    return this.db.select().from(libraryFolders).where(inArray(libraryFolders.libraryId, libraryIds));
+    return this.db
+      .select()
+      .from(libraryFolders)
+      .where(inArray(libraryFolders.libraryId, libraryIds))
+      .orderBy(libraryFolders.libraryId, libraryFolders.createdAt, libraryFolders.id);
   }
 
   findAllFolderPaths() {
     return this.db
       .select({ libraryId: libraryFolders.libraryId, path: libraryFolders.path, libraryName: libraries.name })
       .from(libraryFolders)
-      .innerJoin(libraries, eq(libraries.id, libraryFolders.libraryId));
+      .innerJoin(libraries, eq(libraries.id, libraryFolders.libraryId))
+      .orderBy(libraries.displayOrder, libraries.name, libraryFolders.createdAt, libraryFolders.id);
   }
 
   insert(data: typeof libraries.$inferInsert) {
@@ -120,7 +125,7 @@ export class LibraryRepository {
       .returning();
   }
 
-  insertFolder(data: typeof libraryFolders.$inferInsert) {
+  insertFolders(data: (typeof libraryFolders.$inferInsert)[]) {
     return this.db.insert(libraryFolders).values(data).returning();
   }
 

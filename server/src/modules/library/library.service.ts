@@ -161,19 +161,19 @@ export class LibraryService {
       fileRenameEnabled: dto.fileRenameEnabled ?? false,
     });
 
-    const folders = await Promise.all(folderPaths.map((path) => this.libraryRepo.insertFolder({ libraryId: library.id, path })));
+    const folders = await this.libraryRepo.insertFolders(folderPaths.map((path) => ({ libraryId: library.id, path })));
 
     if (library.watch) {
       await this.fileWatcherService.startWatcher(
         library.id,
-        folders.map(([f]) => f.path),
+        folders.map((folder) => folder.path),
       );
     }
 
     this.scanScheduler.syncSchedule(library.id, dto.autoScanCronExpression ?? null);
     this.scannerService.startScanAsync(library.id);
 
-    return { ...normalizeLibraryOrganizationMode(library), folders: folders.map(([f]) => f) };
+    return { ...normalizeLibraryOrganizationMode(library), folders };
   }
 
   async update(id: number, dto: UpdateLibraryDto) {
@@ -213,7 +213,9 @@ export class LibraryService {
       await Promise.all(toRemove.map((f) => this.libraryRepo.deleteFolder(f.id)));
 
       const toAdd = folderPaths.filter((p) => !existingByPath.has(p));
-      await Promise.all(toAdd.map((path) => this.libraryRepo.insertFolder({ libraryId: id, path })));
+      if (toAdd.length > 0) {
+        await this.libraryRepo.insertFolders(toAdd.map((path) => ({ libraryId: id, path })));
+      }
     }
 
     const folders = await this.libraryRepo.findFoldersByLibrary(id);
