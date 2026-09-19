@@ -45,7 +45,7 @@ export interface CfiToXPointerOutcome extends Record<string, unknown> {
 }
 
 export interface FragmentToPositionsOutcome extends Record<string, unknown> {
-  status: 'exact' | 'failed';
+  status: 'exact' | 'repaired' | 'failed';
   cfi?: string;
   koreaderProgress?: string | null;
   chapterIndex?: number;
@@ -53,7 +53,7 @@ export interface FragmentToPositionsOutcome extends Record<string, unknown> {
 }
 
 export interface NearestFragmentOutcome extends Record<string, unknown> {
-  status: 'exact' | 'failed';
+  status: 'exact' | 'repaired' | 'failed';
   fragment?: string;
   chapterIndex?: number;
   reason?: string;
@@ -130,7 +130,12 @@ export class PositionConverterService {
     return { status: result.status, pos0: result.pos0, pos1: result.pos1, chapterIndex };
   }
 
-  async fragmentToPositions(params: { bookFileId: number; chapterIndex: number; fragment: string }): Promise<FragmentToPositionsOutcome> {
+  async fragmentToPositions(params: {
+    bookFileId: number;
+    chapterIndex: number;
+    fragment: string;
+    sourceBookFileId?: number;
+  }): Promise<FragmentToPositionsOutcome> {
     const fragment = params.fragment.replace(/^#/, '').trim();
     if (!fragment) return { status: 'failed', reason: 'missing_fragment' };
     if (params.chapterIndex < 0) return { status: 'failed', reason: 'invalid_chapter_index' };
@@ -138,19 +143,35 @@ export class PositionConverterService {
     const doc = await this.epubDom.getChapter(params.bookFileId, params.chapterIndex);
     if (!doc) return { status: 'failed', reason: 'chapter_unavailable', chapterIndex: params.chapterIndex };
 
-    const element = findElementById(doc.root, fragment);
-    if (!element) return { status: 'failed', reason: 'fragment_not_found', chapterIndex: params.chapterIndex };
+    let cp: number | null;
+    let status: 'exact' | 'repaired' = 'exact';
+    if (params.sourceBookFileId != null && params.sourceBookFileId !== params.bookFileId) {
+      const sourceDoc = await this.epubDom.getChapter(params.sourceBookFileId, params.chapterIndex);
+      const sourceElement = sourceDoc ? findElementById(sourceDoc.root, fragment) : null;
+      const sourceRun = sourceElement && sourceDoc ? sourceDoc.index.firstRunWithin(sourceElement) : null;
+      if (!sourceDoc || !sourceRun || sourceRun.collapsedLength <= 0) {
+        return { status: 'failed', reason: 'source_fragment_not_found', chapterIndex: params.chapterIndex };
+      }
+      cp = this.mapEquivalentChapterPoint(sourceDoc, doc, sourceRun.collapsedStart);
+      if (cp == null) return { status: 'failed', reason: 'chapter_text_mismatch', chapterIndex: params.chapterIndex };
+      status = 'repaired';
+    } else {
+      const element = findElementById(doc.root, fragment);
+      const run = element ? doc.index.firstRunWithin(element) : null;
+      if (element && (!run || run.collapsedLength <= 0)) {
+        return { status: 'failed', reason: 'fragment_has_no_text', chapterIndex: params.chapterIndex };
+      }
+      cp = run?.collapsedStart ?? null;
+    }
+    if (cp == null) return { status: 'failed', reason: 'fragment_not_found', chapterIndex: params.chapterIndex };
 
-    const run = doc.index.firstRunWithin(element);
-    if (!run || run.collapsedLength <= 0) return { status: 'failed', reason: 'fragment_has_no_text', chapterIndex: params.chapterIndex };
-
-    const cfi = collapsedPointToCfi(doc, params.chapterIndex, run.collapsedStart);
+    const cfi = collapsedPointToCfi(doc, params.chapterIndex, cp);
     if (!cfi) return { status: 'failed', reason: 'cfi_generation_failed', chapterIndex: params.chapterIndex };
 
     return {
-      status: 'exact',
+      status,
       cfi,
-      koreaderProgress: collapsedPointToXPointer(doc, params.chapterIndex, run.collapsedStart),
+      koreaderProgress: collapsedPointToXPointer(doc, params.chapterIndex, cp),
       chapterIndex: params.chapterIndex,
     };
   }
@@ -160,6 +181,7 @@ export class PositionConverterService {
     cfi?: string | null;
     xpointer?: string | null;
     candidates: Array<{ chapterIndex: number; fragment: string }>;
+    sourceBookFileId?: number;
   }): Promise<NearestFragmentOutcome> {
     const resolved = await this.resolvePositionCp(params.bookFileId, params.cfi ?? null, params.xpointer ?? null);
     if (resolved.status === 'failed') return resolved;
@@ -167,14 +189,27 @@ export class PositionConverterService {
     const candidates = params.candidates.filter((candidate) => candidate.chapterIndex === resolved.chapterIndex);
     if (candidates.length === 0) return { status: 'failed', reason: 'no_candidate_fragments', chapterIndex: resolved.chapterIndex };
 
+    let candidateDoc = resolved.doc;
+    let candidateCp = resolved.cp;
+    let status: 'exact' | 'repaired' = 'exact';
+    if (params.sourceBookFileId != null && params.sourceBookFileId !== params.bookFileId) {
+      const sourceDoc = await this.epubDom.getChapter(params.sourceBookFileId, resolved.chapterIndex);
+      if (!sourceDoc) return { status: 'failed', reason: 'source_chapter_unavailable', chapterIndex: resolved.chapterIndex };
+      const mappedCp = this.mapEquivalentChapterPoint(resolved.doc, sourceDoc, resolved.cp);
+      if (mappedCp == null) return { status: 'failed', reason: 'chapter_text_mismatch', chapterIndex: resolved.chapterIndex };
+      candidateDoc = sourceDoc;
+      candidateCp = mappedCp;
+      status = 'repaired';
+    }
+
     let bestBefore: { fragment: string; distance: number } | null = null;
     let bestAfter: { fragment: string; distance: number } | null = null;
     for (const candidate of candidates) {
-      const element = findElementById(resolved.doc.root, candidate.fragment);
+      const element = findElementById(candidateDoc.root, candidate.fragment);
       if (!element) continue;
-      const run = resolved.doc.index.firstRunWithin(element);
+      const run = candidateDoc.index.firstRunWithin(element);
       if (!run || run.collapsedLength <= 0) continue;
-      const distance = resolved.cp - run.collapsedStart;
+      const distance = candidateCp - run.collapsedStart;
       if (distance >= 0) {
         if (!bestBefore || distance < bestBefore.distance) bestBefore = { fragment: candidate.fragment, distance };
       } else {
@@ -185,7 +220,12 @@ export class PositionConverterService {
 
     const best = bestBefore ?? bestAfter;
     if (!best) return { status: 'failed', reason: 'candidate_fragment_not_found', chapterIndex: resolved.chapterIndex };
-    return { status: 'exact', fragment: best.fragment, chapterIndex: resolved.chapterIndex };
+    return { status, fragment: best.fragment, chapterIndex: resolved.chapterIndex };
+  }
+
+  private mapEquivalentChapterPoint(source: ChapterDocument, target: ChapterDocument, sourceCp: number): number | null {
+    if (source.index.collapsed !== target.index.collapsed) return null;
+    return Math.max(0, Math.min(sourceCp, target.index.collapsedCpLength));
   }
 
   private async resolvePositionCp(

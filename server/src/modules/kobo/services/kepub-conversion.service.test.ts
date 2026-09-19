@@ -71,7 +71,7 @@ describe('KepubConversionService', () => {
     // Same book and same file hash as the full archive; only the audioless flag separates them.
     await expect(
       service.getKepubPath({ sourcePath: '/tmp/kobo-epub/book.epub', fileHash: 'abc', bookId: 44, hyphenate: true, audioless: true }),
-    ).resolves.toBe('/app-data/.kepub-cache/44/abc-noaudio-hyph.kepub.epub');
+    ).resolves.toBe('/app-data/.kepub-cache/44/abc-noaudio-v1-hyph.kepub.epub');
   });
 
   it('uses a stable nohash cache key when file hash is unavailable', async () => {

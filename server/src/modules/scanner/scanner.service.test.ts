@@ -1542,6 +1542,54 @@ describe('format priority', () => {
     // epub comes before mobi in DEFAULT_FORMAT_PRIORITY
     expect(repo.updateBookPrimaryFile).toHaveBeenCalledWith(expect.any(Number), 11);
   });
+
+  it('prefers a detected read-aloud EPUB over a plain EPUB on a full rescan', async () => {
+    const plain = makeFileStat({ absolutePath: '/library/Book/plain.epub', relPath: 'Book/plain.epub', ino: 11n });
+    const readAlong = makeFileStat({ absolutePath: '/library/Book/read-along.epub', relPath: 'Book/read-along.epub', ino: 12n });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Book', [plain, readAlong])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi.fn().mockResolvedValue([
+        {
+          id: 1,
+          status: 'present',
+          folderPath: '/library/Book',
+          primaryFileId: 11,
+        },
+      ]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({
+          id: 11,
+          absolutePath: plain.absolutePath,
+          relPath: plain.relPath,
+          ino: plain.ino,
+          mediaOverlayAvailable: false,
+          mediaOverlayCheckedAt: new Date('2024-01-01'),
+        }),
+        makeBookFile({
+          id: 12,
+          absolutePath: readAlong.absolutePath,
+          relPath: readAlong.relPath,
+          ino: readAlong.ino,
+          sortOrder: 1,
+          mediaOverlayAvailable: true,
+          mediaOverlayCheckedAt: new Date('2024-01-01'),
+        }),
+      ]),
+    });
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookPrimaryFile).toHaveBeenCalledWith(1, 12);
+  });
 });
 
 // ── allowedFormats filtering ──────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
-import { SQL, and, asc, count, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { SQL, and, asc, count, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { SUPPORTED_BOOK_FORMATS } from '../upload/upload-validator.service';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
@@ -1593,6 +1593,9 @@ export class BookRepository {
       .select({
         id: bookFiles.id,
         role: bookFiles.role,
+        format: bookFiles.format,
+        sizeBytes: bookFiles.sizeBytes,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
       })
       .from(bookFiles)
       .where(eq(bookFiles.bookId, bookId));
@@ -1681,14 +1684,41 @@ export class BookRepository {
     return row ?? null;
   }
 
-  async upsertAudioProgress(userId: number, bookId: number, currentFileId: number, positionSeconds: number, percentage: number) {
+  async upsertAudioProgress(
+    userId: number,
+    bookId: number,
+    currentFileId: number,
+    positionSeconds: number,
+    percentage: number,
+    sourceUpdatedAt = new Date(),
+  ) {
     const now = new Date();
     const [row] = await this.db
       .insert(audiobookProgress)
-      .values({ userId, bookId, currentFileId, positionSeconds, percentage, updatedAt: now })
+      .values({
+        userId,
+        bookId,
+        currentFileId,
+        positionSeconds,
+        percentage,
+        capturedAt: sourceUpdatedAt,
+        operationId: null,
+        manifestRevision: null,
+        updatedAt: now,
+      })
       .onConflictDoUpdate({
         target: [audiobookProgress.userId, audiobookProgress.bookId],
-        set: { currentFileId, positionSeconds, percentage, updatedAt: now },
+        set: {
+          currentFileId,
+          positionSeconds,
+          percentage,
+          revision: sql`${audiobookProgress.revision} + 1`,
+          capturedAt: sourceUpdatedAt,
+          operationId: null,
+          manifestRevision: null,
+          updatedAt: now,
+        },
+        setWhere: lte(audiobookProgress.capturedAt, sourceUpdatedAt),
       })
       .returning();
     return row;
@@ -2331,6 +2361,58 @@ export class BookRepository {
     // the way out for a device that never pulls and would otherwise have every push held
     // back indefinitely.
     await this.db.delete(koreaderProgressResets).where(and(eq(koreaderProgressResets.userId, userId), eq(koreaderProgressResets.bookFileId, fileId)));
+  }
+
+  async upsertSyncedEpubProgressIfNewer(params: {
+    userId: number;
+    fileId: number;
+    cfi: string;
+    percentage: number;
+    positionSeconds: number;
+    mediaOverlayFragment: string;
+    mediaOverlaySectionIndex: number;
+    koreaderProgress: string | null;
+    sourceUpdatedAt: Date;
+  }): Promise<boolean> {
+    const rows = await this.db
+      .insert(readingProgress)
+      .values({
+        userId: params.userId,
+        bookFileId: params.fileId,
+        cfi: params.cfi,
+        pageNumber: null,
+        percentage: params.percentage,
+        positionSeconds: params.positionSeconds,
+        mediaOverlayFragment: params.mediaOverlayFragment,
+        mediaOverlaySectionIndex: params.mediaOverlaySectionIndex,
+        koreaderProgress: this.normalizeKoreaderProgress(params.koreaderProgress),
+        updatedAt: params.sourceUpdatedAt,
+        lastReadAt: params.sourceUpdatedAt,
+        textUpdatedAt: params.sourceUpdatedAt,
+      })
+      .onConflictDoUpdate({
+        target: [readingProgress.bookFileId, readingProgress.userId],
+        set: {
+          cfi: params.cfi,
+          pageNumber: null,
+          percentage: params.percentage,
+          positionSeconds: params.positionSeconds,
+          mediaOverlayFragment: params.mediaOverlayFragment,
+          mediaOverlaySectionIndex: params.mediaOverlaySectionIndex,
+          koreaderProgress: this.normalizeKoreaderProgress(params.koreaderProgress),
+          updatedAt: params.sourceUpdatedAt,
+          lastReadAt: params.sourceUpdatedAt,
+          textUpdatedAt: params.sourceUpdatedAt,
+        },
+        setWhere: lte(readingProgress.updatedAt, params.sourceUpdatedAt),
+      })
+      .returning({ fileId: readingProgress.bookFileId });
+
+    if (rows.length === 0) return false;
+    await this.db
+      .delete(koreaderProgressResets)
+      .where(and(eq(koreaderProgressResets.userId, params.userId), eq(koreaderProgressResets.bookFileId, params.fileId)));
+    return true;
   }
 
   async syncKoboReadingStateFromProgress(

@@ -114,6 +114,15 @@ describe('KOReader plugin update source wiring', () => {
     expect(detail).toContain('if section_focus.is_grid then');
   });
 
+  it('labels derived read-along EPUB downloads without showing an original archive size', async () => {
+    const detail = await readPluginFile('bookorbit_catalog_detail.lua');
+
+    expect(detail).toContain('file.downloadVariant == "audioless_epub"');
+    expect(detail).toContain('_("Read Along (audio removed)")');
+    expect(detail).toContain('local label = fileFormatLabel(file)');
+    expect(detail).toContain('local format_label = fileFormatLabel(file)');
+  });
+
   it('reconciles remote progress before manual book sync uploads progress', async () => {
     const main = await readPluginFile('main.lua');
     const menu = await readPluginFile('bookorbit_main_menu.lua');

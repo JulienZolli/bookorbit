@@ -5142,6 +5142,26 @@
         "untitled": "Untitled",
         "metadataScore": "Metadata Score",
         "primaryFormat": "Primary format",
+        "readAloudSync": {
+          "title": "Read-aloud progress sync",
+          "state": {
+            "enabled": "Enabled",
+            "disabled": "Disabled",
+            "unavailable": "Unavailable"
+          },
+          "enabledDescription": "Audiobook, web reader, Kobo, and KOReader positions stay in sync.",
+          "disabledDescription": "Each format keeps its own reading position.",
+          "reason": {
+            "no_media_overlay_epub": "A read-along EPUB with media overlays is required.",
+            "no_audio_files": "Matching standalone audiobook files are required.",
+            "missing_duration": "Audio duration metadata is incomplete.",
+            "durationMismatch": "Durations do not match closely enough: audiobook {audio}, read-along EPUB {overlay}."
+          },
+          "enable": "Enable",
+          "disable": "Disable",
+          "saving": "Saving...",
+          "saveFailed": "Could not update read-aloud progress sync."
+        },
         "openIn": "Open in {provider}",
         "showLess": "Show less",
         "showMore": "Show more",

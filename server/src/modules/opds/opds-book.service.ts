@@ -110,6 +110,7 @@ export interface OpdsBookEntry {
 export interface OpdsManifestFileRow {
   id: number;
   format: string;
+  mediaOverlayAvailable: boolean;
   sizeBytes: number | null;
   fileHash: string | null;
   filename: string | null;
@@ -331,6 +332,7 @@ export class OpdsBookService {
           bookId: books.id,
           id: bookFiles.id,
           format: bookFiles.format,
+          mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
           sizeBytes: bookFiles.sizeBytes,
           fileHash: bookFiles.fileHash,
           absolutePath: bookFiles.absolutePath,
@@ -355,6 +357,7 @@ export class OpdsBookService {
       list.push({
         id: row.id,
         format: row.format ?? 'unknown',
+        mediaOverlayAvailable: row.mediaOverlayAvailable,
         sizeBytes: row.sizeBytes,
         fileHash: row.fileHash,
         // Only the basename leaves the server; the stored absolute path never does.

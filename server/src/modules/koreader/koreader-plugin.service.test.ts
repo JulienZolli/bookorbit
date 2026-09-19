@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED, type AchievementEventsService } from '../achievement/achievement-events.service';
+import type { BookService } from '../book/book.service';
 import type { UserBookNoteService } from '../user-book-note/user-book-note.service';
 import type { UserBookStatusService } from '../user-book-status/user-book-status.service';
 import type { BookStatesUploadDto, BulkProgressDto, MatchCheckDto, SweepCompleteDto } from './dto';
@@ -30,6 +31,7 @@ describe('KoreaderPluginService', () => {
     upsertUnmatchedBooks: ReturnType<typeof vi.fn>;
     clearUnmatchedBooks: ReturnType<typeof vi.fn>;
     restoreDevice: ReturnType<typeof vi.fn>;
+    upsertBookHashLink: ReturnType<typeof vi.fn>;
   };
   let pluginRepo: {
     getRatings: ReturnType<typeof vi.fn>;
@@ -52,6 +54,7 @@ describe('KoreaderPluginService', () => {
     normalizeNote: (value: string | null | undefined) => string | null;
   };
   let achievementEvents: { emit: ReturnType<typeof vi.fn> };
+  let bookService: { verifyFileAccess: ReturnType<typeof vi.fn> };
   let service: KoreaderPluginService;
 
   beforeEach(() => {
@@ -65,6 +68,7 @@ describe('KoreaderPluginService', () => {
       upsertUnmatchedBooks: vi.fn().mockResolvedValue(undefined),
       clearUnmatchedBooks: vi.fn().mockResolvedValue(undefined),
       restoreDevice: vi.fn().mockResolvedValue(undefined),
+      upsertBookHashLink: vi.fn().mockResolvedValue(undefined),
     };
     pluginRepo = {
       getRatings: vi.fn().mockResolvedValue(new Map()),
@@ -90,6 +94,7 @@ describe('KoreaderPluginService', () => {
       },
     };
     achievementEvents = { emit: vi.fn() };
+    bookService = { verifyFileAccess: vi.fn() };
     service = new KoreaderPluginService(
       koreaderRepo as unknown as KoreaderRepository,
       pluginRepo as unknown as KoreaderPluginRepository,
@@ -97,6 +102,7 @@ describe('KoreaderPluginService', () => {
       userBookStatusService as unknown as UserBookStatusService,
       userBookNoteService as unknown as UserBookNoteService,
       achievementEvents as unknown as AchievementEventsService,
+      bookService as unknown as BookService,
     );
   });
 
@@ -111,6 +117,38 @@ describe('KoreaderPluginService', () => {
       expect(koreaderRepo.upsertUnmatchedBooks).toHaveBeenCalledWith(7, [{ hash: HASH_B, source: 'statistics' }], DEVICE_ID);
       expect(result.matches).toEqual([{ hash: HASH_A, bookId: 20, bookFileId: 10 }]);
       expect(result.libraryVersion).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it('links an explicitly downloaded catalog file when its hash resolved to another file', async () => {
+      bookService.verifyFileAccess.mockResolvedValue({ id: 11, bookId: 20, libraryId: 1, format: 'epub', role: 'content' });
+      const dto = {
+        ...deviceFields(),
+        hashes: [HASH_A],
+        books: [{ hash: HASH_A, source: 'file', bookFileId: 11, title: 'Read-along edition' }],
+      } as MatchCheckDto;
+
+      const result = await service.matchCheck(makeUser(), dto);
+
+      expect(bookService.verifyFileAccess).toHaveBeenCalledWith(11, makeUser());
+      expect(koreaderRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_A, 11, {
+        title: 'Read-along edition',
+        authors: null,
+        lastOpen: null,
+      });
+      expect(result.matches).toEqual([{ hash: HASH_A, bookId: 20, bookFileId: 11 }]);
+    });
+
+    it('does not rewrite an existing link when the explicit catalog file already resolves', async () => {
+      const dto = {
+        ...deviceFields(),
+        hashes: [HASH_A],
+        books: [{ hash: HASH_A, source: 'file', bookFileId: 10 }],
+      } as MatchCheckDto;
+
+      await service.matchCheck(makeUser(), dto);
+
+      expect(bookService.verifyFileAccess).not.toHaveBeenCalled();
+      expect(koreaderRepo.upsertBookHashLink).not.toHaveBeenCalled();
     });
 
     it('persists unmatched candidate metadata from the device statistics database', async () => {

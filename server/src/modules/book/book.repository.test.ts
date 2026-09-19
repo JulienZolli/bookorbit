@@ -658,12 +658,10 @@ describe('BookRepository', () => {
   });
 
   it('reads and upserts audiobook progress', async () => {
+    const returning = vi.fn().mockResolvedValue([{ bookId: 10, percentage: 33 }]);
+    const onConflictDoUpdate = vi.fn().mockReturnValue({ returning });
     const audioInsert = {
-      values: vi.fn().mockReturnValue({
-        onConflictDoUpdate: vi.fn().mockReturnValue({
-          returning: vi.fn().mockResolvedValue([{ bookId: 10, percentage: 33 }]),
-        }),
-      }),
+      values: vi.fn().mockReturnValue({ onConflictDoUpdate }),
     };
     const db = {
       select: vi
@@ -678,6 +676,106 @@ describe('BookRepository', () => {
     await expect(repo.findAudioProgress(1, 11)).resolves.toBeNull();
     await expect(repo.upsertAudioProgress(1, 10, 4, 120, 33)).resolves.toEqual({ bookId: 10, percentage: 33 });
     expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(audioInsert.values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 1,
+        bookId: 10,
+        currentFileId: 4,
+        positionSeconds: 120,
+        percentage: 33,
+        capturedAt: expect.any(Date),
+        operationId: null,
+        manifestRevision: null,
+        updatedAt: expect.any(Date),
+      }),
+    );
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        set: expect.objectContaining({
+          currentFileId: 4,
+          positionSeconds: 120,
+          percentage: 33,
+          revision: expect.anything(),
+          capturedAt: expect.any(Date),
+          operationId: null,
+          manifestRevision: null,
+          updatedAt: expect.any(Date),
+        }),
+        setWhere: expect.anything(),
+      }),
+    );
+  });
+
+  it('writes bridged EPUB progress only when the source is not older', async () => {
+    const returning = vi.fn().mockResolvedValue([{ fileId: 20 }]);
+    const onConflictDoUpdate = vi.fn().mockReturnValue({ returning });
+    const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
+    const resetWhere = vi.fn().mockResolvedValue(undefined);
+    const db = {
+      insert: vi.fn().mockReturnValue({ values }),
+      delete: vi.fn().mockReturnValue({ where: resetWhere }),
+    };
+    const repo = new BookRepository(db as never);
+    const sourceUpdatedAt = new Date('2026-09-19T12:00:00.000Z');
+
+    await expect(
+      repo.upsertSyncedEpubProgressIfNewer({
+        userId: 7,
+        fileId: 20,
+        cfi: 'epubcfi(/6/4)',
+        percentage: 42,
+        positionSeconds: 120,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#p2',
+        mediaOverlaySectionIndex: 1,
+        koreaderProgress: '/body/p[2]',
+        sourceUpdatedAt,
+      }),
+    ).resolves.toBe(true);
+
+    expect(values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 7,
+        bookFileId: 20,
+        percentage: 42,
+        updatedAt: sourceUpdatedAt,
+        lastReadAt: sourceUpdatedAt,
+        textUpdatedAt: sourceUpdatedAt,
+      }),
+    );
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        set: expect.objectContaining({ percentage: 42, updatedAt: sourceUpdatedAt }),
+        setWhere: expect.anything(),
+      }),
+    );
+    expect(resetWhere).toHaveBeenCalledOnce();
+  });
+
+  it('does not clear reset protection when a newer EPUB row rejects the bridge', async () => {
+    const returning = vi.fn().mockResolvedValue([]);
+    const db = {
+      insert: vi.fn().mockReturnValue({
+        values: vi.fn().mockReturnValue({ onConflictDoUpdate: vi.fn().mockReturnValue({ returning }) }),
+      }),
+      delete: vi.fn(),
+    };
+    const repo = new BookRepository(db as never);
+
+    await expect(
+      repo.upsertSyncedEpubProgressIfNewer({
+        userId: 7,
+        fileId: 20,
+        cfi: 'epubcfi(/6/4)',
+        percentage: 42,
+        positionSeconds: 120,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#p2',
+        mediaOverlaySectionIndex: 1,
+        koreaderProgress: null,
+        sourceUpdatedAt: new Date('2026-09-19T12:00:00.000Z'),
+      }),
+    ).resolves.toBe(false);
+
+    expect(db.delete).not.toHaveBeenCalled();
   });
 
   it('maps hasCover from coverSource and aggregates authors per book in recommendation rows', async () => {

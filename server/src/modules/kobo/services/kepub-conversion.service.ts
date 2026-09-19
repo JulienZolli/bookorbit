@@ -10,6 +10,7 @@ import { KepubifyBinaryService } from './kepubify-binary.service';
 
 const execFileAsync = promisify(execFile);
 const KEPUBIFY_TIMEOUT_MS = 60_000;
+const AUDIOLESS_EPUB_CACHE_VERSION = 1;
 
 interface KepubConversionInput {
   sourcePath: string;
@@ -38,7 +39,7 @@ export class KepubConversionService {
     const cacheDir = join(this.kepubCachePath, String(input.bookId));
     const fileHash = input.fileHash ?? 'nohash';
     // Keep the original two key shapes byte for byte so existing cache entries still hit.
-    const cacheKey = `${fileHash}${input.audioless ? '-noaudio' : ''}${input.hyphenate ? '-hyph' : ''}`;
+    const cacheKey = `${fileHash}${input.audioless ? `-noaudio-v${AUDIOLESS_EPUB_CACHE_VERSION}` : ''}${input.hyphenate ? '-hyph' : ''}`;
     const cachedPath = join(cacheDir, `${cacheKey}.kepub.epub`);
 
     try {

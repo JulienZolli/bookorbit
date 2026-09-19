@@ -258,6 +258,24 @@ describe('handleUnlink', () => {
     expect(result).toEqual({ type: 'book-restored', libraryId: 5, bookIds: [12] });
   });
 
+  it('prefers the remaining read-aloud EPUB when the selected file is deleted', async () => {
+    mockRepo.findBookFileByAbsolutePath.mockResolvedValue({
+      file: { id: 99, bookId: 12, role: 'content' },
+      libraryId: 5,
+      primaryFileId: 99,
+    } as any);
+    mockRepo.findBookFilesByBookId.mockResolvedValue([
+      { id: 99, bookId: 12, role: 'content', format: 'epub', sizeBytes: 1000, mediaOverlayAvailable: false },
+      { id: 100, bookId: 12, role: 'content', format: 'epub', sizeBytes: 1000, mediaOverlayAvailable: false },
+      { id: 101, bookId: 12, role: 'content', format: 'epub', sizeBytes: 2000, mediaOverlayAvailable: true },
+    ] as any);
+    mockRepo.findLibrarySettings.mockResolvedValue({ formatPriority: ['epub'] } as any);
+
+    await makeService().handleUnlink('/books/Solo/selected.epub');
+
+    expect(mockRepo.updateBookPrimaryFile).toHaveBeenCalledWith(12, 101);
+  });
+
   it('falls back to DEFAULT_FORMAT_PRIORITY when library settings are null', async () => {
     mockRepo.findBookFileByAbsolutePath.mockResolvedValue({
       file: { id: 99, bookId: 12, role: 'content' },

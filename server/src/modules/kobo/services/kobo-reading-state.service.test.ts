@@ -65,6 +65,7 @@ describe('KoboReadingStateService', () => {
   const achievementEvents = { emit: vi.fn() };
   const analyticsResolver = { resolveBookFileId: vi.fn() };
   const readingSessions = { recordCumulativeSyncedSession: vi.fn() };
+  const bookService = { syncAudioProgressForExternalEbookProgress: vi.fn() };
 
   function makeService(db: ReturnType<typeof makeDb>) {
     return new KoboReadingStateService(
@@ -77,6 +78,7 @@ describe('KoboReadingStateService', () => {
       achievementEvents as never,
       analyticsResolver as never,
       readingSessions as never,
+      bookService as never,
     );
   }
 
@@ -89,6 +91,7 @@ describe('KoboReadingStateService', () => {
     settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: false });
     analyticsResolver.resolveBookFileId.mockResolvedValue({ kind: 'resolved', bookFileId: 53 });
     readingSessions.recordCumulativeSyncedSession.mockResolvedValue({ kind: 'baseline' });
+    bookService.syncAudioProgressForExternalEbookProgress.mockResolvedValue(undefined);
     bookIdentityService.ensureForBook.mockImplementation((_userId: number, bookId: number) => ({
       bookId,
       entitlementId: `entitlement-${bookId}`,
@@ -353,6 +356,11 @@ describe('KoboReadingStateService', () => {
       }),
     );
     expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(bookService.syncAudioProgressForExternalEbookProgress).toHaveBeenCalledWith(1, 5, 55, 42.5, {
+      cfi: null,
+      koreaderProgress: null,
+      sourceUpdatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
   });
 
   it('does not treat ContentSourceProgressPercent as whole-book progress', async () => {
@@ -474,6 +482,7 @@ describe('KoboReadingStateService', () => {
     await makeService(db).upsertState(1, 6, { CurrentBookmark: { LastModified: '2026-01-01T00:00:00.000Z', ProgressPercent: 60 } }, 1, 99, true, 77);
 
     expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(bookService.syncAudioProgressForExternalEbookProgress).not.toHaveBeenCalled();
   });
 
   it('does not call autoUpdate when bookmark has no percent', async () => {

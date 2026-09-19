@@ -17,6 +17,7 @@ import { bookCoverDirPath, bookThumbnailPath, findPreferredBookCoverFileName } f
 import { MAX_BOOK_QUERY_OFFSET_ROWS, isBookQueryOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { resolveIsAudiobook } from '../../common/utils/book-media.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 import { normalizeMetadataText, normalizeMetadataTextKey } from '../../common/utils/metadata-text-normalize.utils';
 import { naturalCompare } from '../../common/utils/natural-sort.utils';
 import { normalizePublishedDate, publishedYearFromDateKey } from '../../common/utils/published-date.utils';
@@ -36,6 +37,7 @@ import { tmpdir } from 'os';
 import {
   BOOK_METADATA_LOCK_FIELDS,
   DEFAULT_DOWNLOAD_PATTERN,
+  DEFAULT_FORMAT_PRIORITY,
   MetadataProviderKey,
   Permission,
   customSortFieldIds,
@@ -1587,8 +1589,10 @@ export class BookService {
         // mark book as missing if no files left
         await this.bookRepo.updateBookPrimaryFile(file.bookId, null);
       } else if (wasPrimary) {
-        // pick the first remaining content file or just the first remaining
-        const newPrimary = remaining.find((f) => f.role === 'content') || remaining[0];
+        const contentFiles = remaining.filter((candidate) => candidate.role === 'content');
+        const library = await this.libraryService.findOne(file.libraryId);
+        const newPrimary =
+          selectPrimaryFile(contentFiles, library.formatPriority ?? DEFAULT_FORMAT_PRIORITY, { allowZeroByteFallback: true }) ?? remaining[0];
         await this.bookRepo.updateBookPrimaryFile(file.bookId, newPrimary?.id ?? null);
       }
 
@@ -2138,7 +2142,8 @@ export class BookService {
       throw new BadRequestException(`currentFileId ${dto.currentFileId} does not belong to book ${bookId}`);
     }
     const previous = await this.bookRepo.findAudioProgress(userId, bookId);
-    await this.bookRepo.upsertAudioProgress(userId, bookId, dto.currentFileId, dto.positionSeconds, dto.percentage);
+    const saved = await this.bookRepo.upsertAudioProgress(userId, bookId, dto.currentFileId, dto.positionSeconds, dto.percentage);
+    if (!saved) return;
     await this.audiobookEbookProgressSync?.syncFromAudioProgress({
       userId,
       bookId,
@@ -2146,6 +2151,7 @@ export class BookService {
       positionSeconds: dto.positionSeconds,
       percentage: dto.percentage,
       syncKobo: this.hasPermission(user, Permission.KoboSync),
+      sourceUpdatedAt: saved.capturedAt,
     });
     const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
     await this.autoUpdateReadStatusForProgress(
@@ -2154,6 +2160,25 @@ export class BookService {
       dto.percentage,
       strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
     );
+  }
+
+  async syncEbookProgressForAudiobookPlayback(
+    user: RequestUser,
+    bookId: number,
+    currentFileId: number,
+    positionSeconds: number,
+    percentage: number,
+    sourceUpdatedAt: Date,
+  ): Promise<void> {
+    await this.audiobookEbookProgressSync?.syncFromAudioProgress({
+      userId: user.id,
+      bookId,
+      currentFileId,
+      positionSeconds,
+      percentage,
+      syncKobo: this.hasPermission(user, Permission.KoboSync),
+      sourceUpdatedAt,
+    });
   }
 
   async autoUpdateReadStatusForProgress(
@@ -2261,6 +2286,8 @@ export class BookService {
       positionSeconds: dto.positionSeconds ?? null,
       mediaOverlayFragment: dto.mediaOverlayFragment ?? null,
       mediaOverlaySectionIndex: dto.mediaOverlaySectionIndex ?? null,
+      sourceUpdatedAt: now,
+      syncSiblingEpubs: text.moved,
     });
     const strongRereadEvidence = previous != null && previous.percentage - text.percentage >= 10;
     await this.autoUpdateReadStatusForProgress(
@@ -2282,6 +2309,8 @@ export class BookService {
       positionSeconds?: number | null;
       mediaOverlayFragment?: string | null;
       mediaOverlaySectionIndex?: number | null;
+      sourceUpdatedAt?: Date;
+      syncSiblingEpubs?: boolean;
     } = {},
   ): Promise<void> {
     await this.audiobookEbookProgressSync?.syncFromEbookProgress({
@@ -2294,6 +2323,8 @@ export class BookService {
       positionSeconds: locators.positionSeconds ?? null,
       mediaOverlayFragment: locators.mediaOverlayFragment ?? null,
       mediaOverlaySectionIndex: locators.mediaOverlaySectionIndex ?? null,
+      sourceUpdatedAt: locators.sourceUpdatedAt,
+      syncSiblingEpubs: locators.syncSiblingEpubs,
     });
   }
 

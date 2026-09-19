@@ -32,7 +32,7 @@ import { getProviderColor, PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '@/features/book/lib/cover-aspect-ratio'
 import { FORMAT_TO_GROUP, READER_OPENABLE_FORMATS } from '@bookorbit/types'
-import type { BookDetail, BookKoboState, CustomMetadataBookValue, ReadStatus, UserBookStatus } from '@bookorbit/types'
+import type { BookDetail, BookKoboState, CustomMetadataBookValue, ReadAloudProgressSync, ReadStatus, UserBookStatus } from '@bookorbit/types'
 import { STATUS_OPTIONS, STATUS_ICONS, STATUS_COLORS, useBookStatus } from '@/features/book/composables/useBookStatus'
 import BookDownloadButton from '@/features/book/components/BookDownloadButton.vue'
 import DiscoverRow from '@/features/book/components/detail/DiscoverRow.vue'
@@ -350,6 +350,7 @@ const detailCoverAspectRatio = computed(() => {
 })
 const primaryFile = computed(() => props.book.files.find((f) => f.role === 'primary') ?? props.book.files[0] ?? null)
 const readAlongFile = computed(() => props.book.files.find((file) => hasReadAlong(file)) ?? null)
+const hasAudioFile = computed(() => props.book.files.some((file) => file.format != null && FORMAT_TO_GROUP[file.format] === 'audio'))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
 const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
 const readableFiles = computed(() => props.book.files.filter((f) => f.format && READER_OPENABLE_FORMATS.has(f.format)))
@@ -368,6 +369,53 @@ const openableFiles = computed(() => {
   return readableFiles.value
 })
 const hasMultipleFiles = computed(() => openableFiles.value.length > 1)
+const readAloudSync = ref<ReadAloudProgressSync>(props.book.readAloudSync)
+const readAloudSyncSaving = ref(false)
+const readAloudSyncError = ref<string | null>(null)
+const showReadAloudSync = computed(() => readAlongFile.value != null || hasAudioFile.value)
+const readAloudSyncStatus = computed(() => t(`book.detail.details.readAloudSync.state.${readAloudSync.value.state}`))
+const readAloudSyncDescription = computed(() => {
+  if (readAloudSync.value.state === 'enabled') return t('book.detail.details.readAloudSync.enabledDescription')
+  if (readAloudSync.value.state === 'disabled') return t('book.detail.details.readAloudSync.disabledDescription')
+  const reason = readAloudSync.value.unavailableReason ?? 'missing_duration'
+  if (reason === 'duration_mismatch') {
+    return t('book.detail.details.readAloudSync.reason.durationMismatch', {
+      audio: formatDuration(readAloudSync.value.audioDurationSeconds),
+      overlay: formatDuration(readAloudSync.value.overlayDurationSeconds),
+    })
+  }
+  return t(`book.detail.details.readAloudSync.reason.${reason}`)
+})
+
+watch(
+  () => props.book.readAloudSync,
+  (value) => {
+    readAloudSync.value = value
+    readAloudSyncError.value = null
+  },
+)
+
+async function handleToggleReadAloudSync() {
+  if (readAloudSyncSaving.value) return
+  const mode = readAloudSync.value.mode === 'disabled' ? 'auto' : 'disabled'
+  readAloudSyncSaving.value = true
+  readAloudSyncError.value = null
+  try {
+    const res = await api(`/api/v1/books/${props.book.id}/read-aloud-sync`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+    if (!res.ok) throw new Error('Failed to update read-aloud sync')
+    const updated = (await res.json()) as BookDetail
+    readAloudSync.value = updated.readAloudSync
+    emit('saved', updated)
+  } catch {
+    readAloudSyncError.value = t('book.detail.details.readAloudSync.saveFailed')
+  } finally {
+    readAloudSyncSaving.value = false
+  }
+}
 const authorLinks = computed(() => props.book.authors.filter((author) => author.name.trim().length > 0))
 const narratorLine = computed(() => props.book.audioMetadata?.narrators?.map((n) => n.name).join(', ') || null)
 const formats = computed(() => {
@@ -1724,6 +1772,37 @@ watch(
           </span>
         </div>
       </div>
+
+      <section v-if="showReadAloudSync" data-test="read-aloud-sync" class="rounded-lg border border-border bg-card px-3 py-2.5">
+        <div class="flex items-start gap-3">
+          <Headphones class="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <p class="text-xs font-semibold text-foreground">{{ t('book.detail.details.readAloudSync.title') }}</p>
+              <span class="text-[11px] text-muted-foreground">{{ readAloudSyncStatus }}</span>
+            </div>
+            <p class="mt-0.5 text-xs text-muted-foreground">{{ readAloudSyncDescription }}</p>
+            <p v-if="readAloudSyncError" class="mt-1 text-xs text-destructive" role="status" aria-live="polite">
+              {{ readAloudSyncError }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-test="read-aloud-sync-toggle"
+            class="shrink-0 rounded-md border border-input px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="readAloudSyncSaving"
+            @click="handleToggleReadAloudSync"
+          >
+            {{
+              readAloudSyncSaving
+                ? t('book.detail.details.readAloudSync.saving')
+                : readAloudSync.mode === 'disabled'
+                  ? t('book.detail.details.readAloudSync.enable')
+                  : t('book.detail.details.readAloudSync.disable')
+            }}
+          </button>
+        </div>
+      </section>
 
       <!-- Genres + Tags -->
       <div v-if="book.genres.length || book.tags.length" class="space-y-1">

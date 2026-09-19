@@ -748,4 +748,102 @@ describe('DetailsTab cover surface', () => {
 
     expect(wrapper.find('button[aria-label="Edit date added"]').exists()).toBe(false)
   })
+
+  it('shows read-aloud sync state and persists the toggle', async () => {
+    const book = makeBook({
+      files: [
+        {
+          ...makeBook().files[0]!,
+          mediaOverlay: { available: true, durationSeconds: 3600 },
+        },
+        {
+          id: 102,
+          format: 'm4b',
+          role: 'content',
+          sizeBytes: 5000,
+          absolutePath: '/books/cover-behavior-test.m4b',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          filename: 'cover-behavior-test.m4b',
+          durationSeconds: 3600,
+        },
+      ],
+      readAloudSync: {
+        mode: 'auto',
+        state: 'enabled',
+        unavailableReason: null,
+        overlayFileId: 101,
+        audioDurationSeconds: 3600,
+        overlayDurationSeconds: 3600,
+        durationDifferenceSeconds: 0,
+        durationDifferenceRatio: 0,
+        koreaderDownloadAvailable: true,
+      },
+    })
+    const updated = makeBook({ ...book, readAloudSync: { ...book.readAloudSync, mode: 'disabled', state: 'disabled' } })
+    mocks.api.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/read-aloud-sync')) return response(updated)
+      if (url.includes('/metadata-preferences/provider-links')) return response({ amazonDomain: 'amazon.com' })
+      if (url.includes('/metadata-score/weights')) return response({})
+      if (url.includes('/playback-state')) return response(null)
+      if (url.includes('/collections/membership')) return response([])
+      if (url.includes('/kobo-state')) return response({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] })
+      if (url.includes('/koreader/books/')) return response(null)
+      if (url.includes('/progress')) return response([])
+      return response({})
+    })
+    const wrapper = mountDetails(book)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('Enabled')
+    await wrapper.get('[data-test="read-aloud-sync-toggle"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api).toHaveBeenCalledWith('/api/v1/books/12/read-aloud-sync', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'disabled' }),
+    })
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('Disabled')
+    expect(wrapper.emitted('saved')).toEqual([[updated]])
+  })
+
+  it('explains a duration mismatch and exposes a localized save failure', async () => {
+    const book = makeBook({
+      files: [
+        { ...makeBook().files[0]!, mediaOverlay: { available: true, durationSeconds: 3600 } },
+        {
+          id: 102,
+          format: 'mp3',
+          role: 'content',
+          sizeBytes: 5000,
+          absolutePath: '/books/audio.mp3',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          filename: 'audio.mp3',
+          durationSeconds: 4000,
+        },
+      ],
+      readAloudSync: {
+        mode: 'auto',
+        state: 'unavailable',
+        unavailableReason: 'duration_mismatch',
+        overlayFileId: 101,
+        audioDurationSeconds: 4000,
+        overlayDurationSeconds: 3600,
+        durationDifferenceSeconds: 400,
+        durationDifferenceRatio: 400 / 3600,
+        koreaderDownloadAvailable: true,
+      },
+    })
+    const wrapper = mountDetails(book)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('audiobook 1h 6m, read-along EPUB 1h')
+    mocks.api.mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response)
+    await wrapper.get('[data-test="read-aloud-sync-toggle"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="status"]').text()).toBe('Could not update read-aloud progress sync.')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+  })
 })

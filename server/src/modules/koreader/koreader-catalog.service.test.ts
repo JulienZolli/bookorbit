@@ -9,7 +9,7 @@ vi.mock('fs/promises', () => ({
 import { createReadStream } from 'fs';
 import { join } from 'path';
 import { stat } from 'fs/promises';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { DEFAULT_KOREADER_DEVICE_PATTERN } from '@bookorbit/types';
 import type { MockedFunction } from 'vitest';
 
@@ -72,6 +72,7 @@ function makeDetail(overrides: Record<string, unknown> = {}) {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
         filename: 'dune.epub',
         durationSeconds: null,
+        mediaOverlay: null,
       },
     ],
     lastWrittenAt: null,
@@ -105,6 +106,7 @@ function makeManifestRow(overrides: Record<string, unknown> = {}) {
       {
         id: 100,
         format: 'EPUB',
+        mediaOverlayAvailable: false,
         sizeBytes: 1234,
         fileHash: 'abcdef0123456789',
         filename: 'dune.epub',
@@ -720,6 +722,7 @@ describe('KoreaderCatalogService', () => {
             id: 100,
             format: 'epub',
             role: 'primary',
+            downloadVariant: 'original',
             sizeBytes: 1234,
             durationSeconds: null,
             downloadUrl: '/api/v1/koreader/plugin/catalog/files/100/download',
@@ -997,6 +1000,7 @@ describe('KoreaderCatalogService', () => {
       expect(file).toMatchObject({
         id: 100,
         format: 'epub',
+        downloadVariant: 'original',
         sizeBytes: 1234,
         fileHash: 'abcdef0123456789',
         contentVersion: '2026-02-01T00:00:00.000Z',
@@ -1004,6 +1008,98 @@ describe('KoreaderCatalogService', () => {
       });
       expect(file.devicePath).not.toContain('/books/');
       expect(JSON.stringify(result)).not.toContain('absolutePath');
+    });
+
+    it('marks read-along EPUBs as derived and does not publish metadata for the original bytes', async () => {
+      const { service, opdsBookService } = makeService();
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({
+        rows: [
+          makeManifestRow({
+            files: [
+              {
+                id: 100,
+                format: 'epub',
+                mediaOverlayAvailable: false,
+                sizeBytes: 1234,
+                fileHash: 'standard-hash',
+                filename: 'dune.epub',
+                contentVersion: new Date('2026-02-01T00:00:00.000Z'),
+              },
+              {
+                id: 101,
+                format: 'epub',
+                mediaOverlayAvailable: true,
+                sizeBytes: 9_999_999,
+                fileHash: 'audio-archive-hash',
+                filename: 'dune-read-along.epub',
+                contentVersion: new Date('2026-02-02T00:00:00.000Z'),
+              },
+            ],
+          }),
+        ],
+        hasNext: false,
+      });
+
+      const result = await service.getBulkManifest(makeUser({ id: 7 }), makeQuery());
+
+      expect(result.items[0]!.files).toEqual([
+        expect.objectContaining({ id: 100, downloadVariant: 'original', sizeBytes: 1234, fileHash: 'standard-hash' }),
+        expect.objectContaining({
+          id: 101,
+          downloadVariant: 'audioless_epub',
+          sizeBytes: null,
+          fileHash: null,
+          devicePath: 'Series/Dune/01.00 - Dune - Read Along.epub',
+        }),
+      ]);
+    });
+
+    it('keeps detail and manifest variants and collision-safe paths identical', async () => {
+      const files = [
+        {
+          id: 100,
+          format: 'epub',
+          role: 'primary',
+          sizeBytes: 1234,
+          absolutePath: '/books/dune.epub',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          filename: 'dune.epub',
+          durationSeconds: null,
+          mediaOverlay: null,
+        },
+        {
+          id: 101,
+          format: 'epub',
+          role: 'content',
+          sizeBytes: 9_999_999,
+          absolutePath: '/books/dune-read-along.epub',
+          createdAt: new Date('2026-01-02T00:00:00.000Z'),
+          filename: 'dune-read-along.epub',
+          durationSeconds: null,
+          mediaOverlay: { available: true, durationSeconds: 100 },
+        },
+      ];
+      const manifestFiles = files.map((file) => ({
+        id: file.id,
+        format: file.format,
+        mediaOverlayAvailable: file.mediaOverlay?.available === true,
+        sizeBytes: file.sizeBytes,
+        fileHash: `${file.id}-hash`,
+        filename: file.filename,
+        contentVersion: file.createdAt,
+      }));
+      const { service, opdsBookService, bookService } = makeService();
+      opdsBookService.getBookManifestPage.mockResolvedValueOnce({ rows: [makeManifestRow({ files: manifestFiles })], hasNext: false });
+      bookService.getDetail.mockResolvedValueOnce(makeDetail({ files }));
+
+      const [manifest, detail] = await Promise.all([
+        service.getBulkManifest(makeUser({ id: 7 }), makeQuery()),
+        service.getBookDetail(makeUser({ id: 7 }), 10),
+      ]);
+
+      expect(detail.files.map(({ id, downloadVariant, sizeBytes, devicePath }) => ({ id, downloadVariant, sizeBytes, devicePath }))).toEqual(
+        manifest.items[0]!.files.map(({ id, downloadVariant, sizeBytes, devicePath }) => ({ id, downloadVariant, sizeBytes, devicePath })),
+      );
     });
 
     it('scopes the query to the requesting user and forwards the filter', async () => {
@@ -1265,17 +1361,16 @@ describe('KoreaderCatalogService', () => {
       expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
     });
 
-    it('falls back to the original EPUB when the audioless rebuild fails', async () => {
+    it('does not expose the original audio archive when the audioless rebuild fails', async () => {
       const { service, bookService } = makeService();
       bookService.verifyFileAccess.mockResolvedValueOnce(readAlongFile);
       bookService.createAudiolessEpubDownload.mockRejectedValueOnce(new Error('corrupt central directory'));
       const reply = makeReply();
 
-      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+      await expect(service.streamFile(makeUser({ id: 7 }), 100, reply as never)).rejects.toBeInstanceOf(InternalServerErrorException);
 
-      expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
-      expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
-      expect(reply.send).toHaveBeenCalled();
+      expect(mockCreateReadStream).not.toHaveBeenCalledWith('/books/dune.epub');
+      expect(reply.send).not.toHaveBeenCalled();
     });
 
     it('serves the stored file untouched when there is no media overlay', async () => {

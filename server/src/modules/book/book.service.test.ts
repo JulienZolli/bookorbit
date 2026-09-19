@@ -126,6 +126,7 @@ function makeService(overrides: { bookMetadataLockService?: unknown } = {}) {
     findKoboSyncCollectionNamesForBook: vi.fn(),
     findFileById: vi.fn(),
     updateBookFile: vi.fn().mockResolvedValue(undefined),
+    updateBookPrimaryFile: vi.fn().mockResolvedValue(undefined),
     findLibraryIdByBookId: vi.fn(),
     findProgress: vi.fn(),
     findProgressByBook: vi.fn(),
@@ -5280,6 +5281,35 @@ describe('BookService', () => {
       expect(rm).toHaveBeenCalledWith('/path/to/old.epub', { force: true });
       expect(bookRepo.deleteBookFile).toHaveBeenCalledWith(fileId);
       expect(bookRepo.updateBookPrimaryFile).toHaveBeenCalledWith(10, 101);
+    });
+
+    it('uses library format priority and read-aloud capability when replacing a deleted primary', async () => {
+      const { service, bookRepo, libraryService } = makeService();
+      const user = makeUser({ id: 1 });
+      const fileId = 100;
+      const file = { absolutePath: '/path/to/old.epub', bookId: 10, libraryId: 1 };
+
+      bookRepo.findFileById = vi.fn().mockResolvedValue(file);
+      libraryService.checkLibraryAccess = vi.fn().mockResolvedValue(true);
+      libraryService.findOne.mockResolvedValue({
+        readingThreshold: 1,
+        markAsFinishedPercentComplete: 99,
+        formatPriority: ['epub', 'm4b'],
+      });
+      vi.mocked(rm).mockResolvedValue(undefined);
+      bookRepo.deleteBookFile = vi.fn().mockResolvedValue(undefined);
+      bookRepo.findFilesForBook = vi.fn().mockResolvedValue([
+        { id: 100, role: 'content', format: 'epub', sizeBytes: 100, mediaOverlayAvailable: false },
+        { id: 101, role: 'content', format: 'epub', sizeBytes: 100, mediaOverlayAvailable: false },
+        { id: 102, role: 'content', format: 'epub', sizeBytes: 100, mediaOverlayAvailable: true },
+        { id: 103, role: 'content', format: 'm4b', sizeBytes: 100, mediaOverlayAvailable: false },
+      ]);
+      bookRepo.findBookBase = vi.fn().mockResolvedValue({ id: 10, primaryFileId: 100 });
+
+      await service.deleteFile(fileId, user);
+
+      expect(libraryService.findOne).toHaveBeenCalledWith(1);
+      expect(bookRepo.updateBookPrimaryFile).toHaveBeenCalledWith(10, 102);
     });
 
     it('preserves the database row and primary file when disk deletion fails', async () => {

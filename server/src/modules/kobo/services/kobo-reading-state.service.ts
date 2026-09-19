@@ -8,6 +8,7 @@ import * as schema from '../../../db/schema';
 import { UserBookStatusService } from '../../user-book-status/user-book-status.service';
 import { ReadingSessionService } from '../../reading-session/reading-session.service';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED } from '../../achievement/achievement-events.service';
+import { BookService } from '../../book/book.service';
 import {
   KOBO_STATISTICS_CURSOR_SOURCE,
   koboSourceDeviceKey,
@@ -89,6 +90,7 @@ export class KoboReadingStateService {
     private readonly achievementEvents: AchievementEventsService,
     private readonly analyticsResolver: KoboAnalyticsResolverService,
     private readonly readingSessions: ReadingSessionService,
+    private readonly bookService: BookService,
   ) {}
 
   async upsertState(
@@ -603,6 +605,12 @@ export class KoboReadingStateService {
           lastReadAt: sourceUpdatedAt,
         },
       });
+
+    await this.bookService.syncAudioProgressForExternalEbookProgress(userId, bookId, primaryFile.fileId, percentage, {
+      cfi: nextCfi,
+      koreaderProgress: nextXpointer,
+      sourceUpdatedAt,
+    });
   }
 
   private async markSnapshotBookUnsyncedForOtherDevices(userId: number, bookId: number, sourceDeviceId: number): Promise<void> {

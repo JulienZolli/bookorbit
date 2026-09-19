@@ -427,6 +427,7 @@ export class KoreaderService {
       .syncAudioProgressForExternalEbookProgress(userId, bookFile.bookId, bookFile.id, bookorbitPercentage, {
         cfi,
         koreaderProgress: data.progress ?? null,
+        sourceUpdatedAt: data.timestamp ? new Date(data.timestamp * 1000) : undefined,
       })
       .catch(() => undefined);
     const strongRereadEvidence = previousPercentage !== null && previousPercentage - bookorbitPercentage >= 10;
