@@ -5,7 +5,7 @@ import { ScanGateway } from './scan.gateway';
 
 function makeGateway() {
   const jwtService = { verify: vi.fn() };
-  const authService = { validateUser: vi.fn() };
+  const authService = { validateSessionUser: vi.fn() };
   const scanJobStore = { get: vi.fn(), isRunning: vi.fn() };
   const achievementEvents = new AchievementEventsService();
   const configService = { get: vi.fn().mockReturnValue('http://localhost:5173') };
@@ -94,7 +94,7 @@ describe('handleConnection', () => {
   it('stores validated user on the socket when token is valid', async () => {
     const { gateway, jwtService, authService } = makeGateway();
     jwtService.verify.mockReturnValue({ sub: 42, ver: 3 });
-    authService.validateUser.mockResolvedValue({ id: 42, username: 'reader' });
+    authService.validateSessionUser.mockResolvedValue({ id: 42, username: 'reader' });
     const disconnect = vi.fn();
     const join = vi.fn().mockResolvedValue(undefined);
     const client = {
@@ -109,7 +109,7 @@ describe('handleConnection', () => {
     await gateway.handleConnection(client);
 
     expect(jwtService.verify).toHaveBeenCalledWith('valid', { algorithms: ['HS256'] });
-    expect(authService.validateUser).toHaveBeenCalledWith(42, 3, 'legacy');
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(42, 3, 'legacy', undefined);
     expect(client.data.user).toEqual({ id: 42, username: 'reader' });
     expect(join).toHaveBeenCalledWith('user:42');
     expect(disconnect).not.toHaveBeenCalled();

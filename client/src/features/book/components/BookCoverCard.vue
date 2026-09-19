@@ -12,6 +12,7 @@ import {
   Eye,
   FolderInput,
   FolderPlus,
+  Headphones,
   Image,
   Lock,
   LockOpen,
@@ -52,6 +53,7 @@ import BookCoverArtwork from './BookCoverArtwork.vue'
 import BookCoverSurface from './BookCoverSurface.vue'
 import { fetchAuthors } from '@/features/author/api/author'
 import { useI18n } from 'vue-i18n'
+import { hasReadAlong, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 const { t } = useI18n()
 
@@ -81,6 +83,8 @@ const authorQuery = computed(() => props.book.authors[0] ?? null)
 const readableFiles = computed(() => props.book.files.filter((f) => f.format && READER_OPENABLE_FORMATS.has(f.format)))
 const primaryFile = computed(() => readableFiles.value.find((f) => f.role === 'primary') ?? readableFiles.value[0] ?? null)
 const mediaProfile = computed(() => getBookMediaProfile(readableFiles.value))
+const readAlongFile = computed(() => readableFiles.value.find((file) => hasReadAlong(file)) ?? null)
+const formatOverlayFile = computed(() => readAlongFile.value ?? primaryFile.value)
 const isAudiobook = computed(() => mediaProfile.value.primaryMediaKind === 'audiobook')
 const isComic = computed(() => mediaProfile.value.primaryMediaKind === 'comic')
 
@@ -132,7 +136,7 @@ const showSendDialog = ref(false)
 
 const hasProgress = computed(() => props.book.readingProgress != null && props.book.readingProgress > 0)
 const showProgressBar = computed(() => cardOverlays.value.includes('progress-bar') && hasProgress.value)
-const showFormatOverlay = computed(() => cardOverlays.value.includes('format') && primaryFile.value?.format != null)
+const showFormatOverlay = computed(() => cardOverlays.value.includes('format') && formatOverlayFile.value?.format != null)
 const showRatingOverlay = computed(() => cardOverlays.value.includes('rating') && props.book.rating != null)
 const showLockStatusPill = computed(() => cardOverlays.value.includes('lock-status') && !props.selectionMode && !isMissing.value)
 const metadataLocked = computed(() => props.book.hasMetadataLocks)
@@ -157,6 +161,13 @@ const ratingColor = computed(() => {
   if (r === 3) return '#ca8a04'
   if (r === 4) return '#65a30d'
   return '#059669'
+})
+
+const formatOverlayStyle = computed(() => {
+  const file = formatOverlayFile.value
+  if (!file?.format) return {}
+  const color = hasReadAlong(file) ? READ_ALONG_FORMAT_COLOR : getFormatColor(file.format)
+  return { backgroundColor: `${color}e6` }
 })
 
 const coverLoaded = ref(false)
@@ -491,14 +502,16 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
           <!-- Bottom-right overlay: format badge -->
           <div
             v-if="showFormatOverlay && !selectionMode"
-            class="absolute bottom-1.5 right-1.5 z-10 pointer-events-none transition-opacity duration-150"
+            class="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 pointer-events-none transition-opacity duration-150"
             :class="overlayFadeClass"
           >
             <span
-              class="text-[8px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded text-white"
-              :style="{ backgroundColor: getFormatColor(primaryFile!.format!) + 'cc' }"
+              class="inline-flex items-center gap-0.5 text-[8px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded text-white"
+              :style="formatOverlayStyle"
+              :title="hasReadAlong(formatOverlayFile) ? READ_ALONG_FORMAT_TITLE : undefined"
             >
-              {{ primaryFile!.format!.toUpperCase() }}
+              {{ formatOverlayFile!.format!.toUpperCase() }}
+              <Headphones v-if="hasReadAlong(formatOverlayFile)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
             </span>
           </div>
 

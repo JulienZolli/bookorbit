@@ -1,4 +1,5 @@
 import type { RefreshResponse } from '@bookorbit/types'
+import { i18n } from '@/i18n'
 
 /**
  * Refresh this far ahead of `exp`. A token that survives the check still has to travel, reach a
@@ -92,10 +93,32 @@ export function setOnAuthFailure(fn: () => void): void {
   _onAuthFailure = fn
 }
 
-function rawFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+/**
+ * A request that never reached the server: offline, connection refused, DNS failure, blocked origin.
+ * `fetch` rejects these with a `TypeError` whose message is the browser's own untranslated English,
+ * "Failed to fetch", and plenty of call sites render `reason.message` straight into a toast. The
+ * rejection is retagged here, at the one place every request passes through, so no caller can leak it.
+ */
+export class NetworkError extends Error {
+  /** The browser's own wording. Useful in a log line, never in the interface. */
+  readonly browserMessage: string
+
+  constructor(browserMessage: string) {
+    super(i18n.global.t('errors.network'))
+    this.name = 'NetworkError'
+    this.browserMessage = browserMessage
+  }
+}
+
+async function rawFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers)
   if (_accessToken) headers.set('Authorization', `Bearer ${_accessToken}`)
-  return fetch(input, { ...init, headers, credentials: 'include' })
+  try {
+    return await fetch(input, { ...init, headers, credentials: 'include' })
+  } catch (reason) {
+    if (reason instanceof TypeError) throw new NetworkError(reason.message)
+    throw reason
+  }
 }
 
 async function attemptRefresh(): Promise<string> {

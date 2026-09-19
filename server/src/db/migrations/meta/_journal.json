@@ -638,6 +638,27 @@
       "when": 1789316739511,
       "tag": "0090_add_indexer_seed_goals",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1789366394767,
+      "tag": "0091_add_read_aloud_and_podcasts",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1789366475035,
+      "tag": "0092_narration_progress_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1789366529464,
+      "tag": "0093_add_device_auth_sessions",
+      "breakpoints": true
     }
   ]
 }

@@ -83,6 +83,7 @@ function makeRunHistoryConfig(lastRunAt: string, lastQueuedCount: number | null)
 function makeLibrary(): Library {
   return {
     id: 2,
+    type: 'books',
     name: 'PDFs',
     icon: null,
     displayOrder: 0,

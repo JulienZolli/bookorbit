@@ -2,6 +2,7 @@ import { basename } from 'path';
 
 import type { BookCard, BookMetadataLockField, CollapsedSeriesInfo, CustomMetadataBookValue, UserBookStatus } from '@bookorbit/types';
 import { BOOK_METADATA_LOCK_FIELDS, compareSeriesIndices, normalizeCoverAspectRatio } from '@bookorbit/types';
+import { mediaOverlayCapabilityFromFields } from '../../reader/epub/epub-media-overlay-capability';
 
 const LOCK_FIELD_SET = new Set<string>(BOOK_METADATA_LOCK_FIELDS);
 
@@ -50,7 +51,16 @@ type CollapsedBookRow = BookRow & {
 
 type NameRow = { bookId: number; name: string };
 type NarratorRow = { bookId: number; name: string };
-type FileRow = { bookId: number; id: number; format: string | null; role: string; sizeBytes: number | null };
+type FileRow = {
+  bookId: number;
+  id: number;
+  format: string | null;
+  role: string;
+  sizeBytes: number | null;
+  mediaOverlayAvailable?: boolean | null;
+  mediaOverlayDurationSeconds?: number | null;
+  mediaOverlayCheckedAt?: Date | null;
+};
 type SeriesMembershipRow = {
   bookId: number;
   seriesId: number;
@@ -105,10 +115,18 @@ export function assembleBookCards(
     authorsByBook.set(row.bookId, list);
   }
 
-  const filesByBook = new Map<number, { id: number; format: string | null; role: string; sizeBytes: number | null }[]>();
+  const filesByBook = new Map<number, Omit<FileRow, 'bookId'>[]>();
   for (const row of fileRows) {
     const list = filesByBook.get(row.bookId) ?? [];
-    list.push({ id: row.id, format: row.format, role: row.role, sizeBytes: row.sizeBytes });
+    list.push({
+      id: row.id,
+      format: row.format,
+      role: row.role,
+      sizeBytes: row.sizeBytes,
+      mediaOverlayAvailable: row.mediaOverlayAvailable,
+      mediaOverlayDurationSeconds: row.mediaOverlayDurationSeconds,
+      mediaOverlayCheckedAt: row.mediaOverlayCheckedAt,
+    });
     filesByBook.set(row.bookId, list);
   }
 
@@ -178,12 +196,16 @@ export function assembleBookCards(
       rawFiles.find((f) => f.role === 'content') ??
       rawFiles[0] ??
       null;
-    const files = rawFiles.map((f) => ({
-      id: f.id,
-      format: f.format,
-      role: primaryFile && f.id === primaryFile.id ? 'primary' : f.role,
-      sizeBytes: f.sizeBytes,
-    }));
+    const files = rawFiles.map((f) => {
+      const mediaOverlay = mediaOverlayCapabilityFromFields(f);
+      return {
+        id: f.id,
+        format: f.format,
+        role: primaryFile && f.id === primaryFile.id ? 'primary' : f.role,
+        sizeBytes: f.sizeBytes,
+        ...(mediaOverlay ? { mediaOverlay } : {}),
+      };
+    });
     const readingProgress = primaryFile != null ? (progressByFileId.get(primaryFile.id) ?? null) : null;
 
     return {

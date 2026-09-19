@@ -1,10 +1,12 @@
 import { oklchToHex, readCssColor } from '@/lib/echarts'
 import type { ReadingSessionSourceBucket } from '@bookorbit/types'
 
-// The 3 reading-source buckets reuse the existing pill tokens (light + dark variants
-// live in client/src/assets/theme/tokens.css). bookorbit shares the "web" hue.
+// Reading-source buckets use fixed light/dark pill tokens so the same source has the
+// same identity in every chart and reading-log surface.
 export const SOURCE_BUCKET_COLOR_TOKENS: Record<ReadingSessionSourceBucket, string> = {
   bookorbit: '--pill-web',
+  ios: '--pill-ios',
+  watchos: '--pill-watchos',
   koreader: '--pill-koreader',
   kobo: '--pill-kobo',
 }
@@ -39,6 +41,8 @@ export function resolveSourceBucketColors(themeKey: string): Record<ReadingSessi
 
   const colors: Record<ReadingSessionSourceBucket, string> = {
     bookorbit: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.bookorbit)),
+    ios: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.ios)),
+    watchos: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.watchos)),
     koreader: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.koreader)),
     kobo: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.kobo)),
   }

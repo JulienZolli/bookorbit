@@ -82,6 +82,7 @@ BOOKS_HOST_PATH=./books              # folder on your server where your book fil
 
 POSTGRES_PASSWORD=         # database password           - openssl rand -hex 24
 JWT_SECRET=                # signs login tokens          - openssl rand -hex 32
+PODCAST_ENCRYPTION_KEY=    # encrypts podcast URLs       - openssl rand -hex 32
 SETUP_BOOTSTRAP_TOKEN=     # one-time setup wizard token - openssl rand -hex 16
 ```
 
@@ -106,6 +107,8 @@ secrets:
 Set `POSTGRES_PASSWORD=` and `POSTGRES_PASSWORD_FILE=/run/secrets/bookorbit_postgres_password` in `.env`. The override passes the file path to PostgreSQL while the app receives it from the existing `.env` import. Other container platforms may mount secret files directly without a Compose override.
 
 On a NAS, or any host where your book folder is owned by a user other than UID 1000, also set `PUID` and `PGID` to match that owner. Run `id -u` and `id -g` as the owning user to find them. Getting these wrong is the most common cause of permission errors on first scan.
+
+When upgrading an installation that previously used podcasts without `PODCAST_ENCRYPTION_KEY`, set it to the current `JWT_SECRET` first. A new key would make existing encrypted podcast URLs unreadable. Fresh installations should use an independent generated key.
 
 Optionally set `LIBRARY_BROWSE_ROOT=/books` to start the library folder picker at `/books` instead of `/`.
 

@@ -771,11 +771,17 @@ describe('BookController', () => {
       cfi: null,
       pageNumber: null,
       percentage: 0,
+      positionSeconds: null,
+      mediaOverlayFragment: null,
+      mediaOverlaySectionIndex: null,
       koboLocationSource: null,
       koboLocationType: null,
       koboLocationValue: null,
       koboContentSourceProgressPercent: null,
       koreaderProgress: null,
+      narrationPercentage: null,
+      narrationUpdatedAt: null,
+      textUpdatedAt: null,
     });
     expect(bookService.getProgress).toHaveBeenCalledWith(user.id, 9, user);
   });
@@ -971,6 +977,18 @@ describe('BookController', () => {
     }
 
     expect(Reflect.getMetadata(FORBIDDEN_PERMISSION_KEY, BookController.prototype.refreshMetadata)).toBeUndefined();
+  });
+
+  // Both routes previously verified library access only, so a library editor without delete
+  // rights could remove a file from disk, and the web client already assumed otherwise.
+  it('gates per-file mutations on the same permissions as the book-level routes', () => {
+    expect(Reflect.getMetadata(PERMISSION_KEY, BookController.prototype.deleteFile)).toBe(Permission.LibraryDeleteBooks);
+    expect(Reflect.getMetadata(PERMISSION_KEY, BookController.prototype.renameFile)).toBe(Permission.LibraryEditMetadata);
+  });
+
+  // Progress is the caller's own, so clearing it stays available to every account with access.
+  it('leaves per-file progress clearing ungated', () => {
+    expect(Reflect.getMetadata(PERMISSION_KEY, BookController.prototype.clearFileProgress)).toBeUndefined();
   });
 
   it('marks bulk-download endpoints as demo-restricted', () => {

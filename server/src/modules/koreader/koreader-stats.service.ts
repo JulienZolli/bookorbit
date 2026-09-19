@@ -137,6 +137,7 @@ export class KoreaderStatsService {
         progressDelta: session.progressDelta,
         endProgress: session.endProgress,
         timezone,
+        source: 'koreader',
       });
     }
   }

@@ -136,7 +136,7 @@ describe('KoreaderStatsService', () => {
     expect(achievementEvents.emit).toHaveBeenCalledTimes(2);
     expect(achievementEvents.emit).toHaveBeenCalledWith(
       ACHIEVEMENT_EVENT_READING_SESSION_SAVED,
-      expect.objectContaining({ userId: 7, bookFileId: 10, durationSeconds: 60, timezone: 'Asia/Kolkata' }),
+      expect.objectContaining({ userId: 7, bookFileId: 10, durationSeconds: 60, timezone: 'Asia/Kolkata', source: 'koreader' }),
     );
   });
 
@@ -168,6 +168,7 @@ describe('KoreaderStatsService', () => {
       progressDelta: 56,
       endProgress: 56.5,
       timezone: 'Asia/Kolkata',
+      source: 'koreader',
     });
   });
 

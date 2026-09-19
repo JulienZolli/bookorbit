@@ -159,6 +159,7 @@ export async function createLibraryWithFolder(
   ctx: AuthorizationMatrixE2EContext,
   options: {
     mode?: 'book_per_file' | 'book_per_folder';
+    type?: 'books' | 'podcasts';
     allowedFormats?: string[];
     name?: string;
   } = {},
@@ -169,6 +170,7 @@ export async function createLibraryWithFolder(
   const { libraryId, libraryFolderId } = await seedLibrary(ctx.db, {
     rootPath: folderPath,
     mode: options.mode ?? 'book_per_file',
+    type: options.type,
     allowedFormats: options.allowedFormats ?? [],
     watch: false,
     name: options.name,

@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 
-import type { BookCard, DashboardScrollerBatchResponse } from '@bookorbit/types';
+import type { BookCard, DashboardScrollerBatchResponse, DashboardScrollerResponse } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -112,17 +112,52 @@ export class DashboardService {
     return bookIds;
   }
 
-  async getScroller(type: ScrollerType, user: RequestUser, limit: number, smartScopeId?: number): Promise<BookCard[]> {
+  async getScroller(type: ScrollerType, user: RequestUser, limit: number, smartScopeId?: number): Promise<DashboardScrollerResponse> {
     const clampedLimit = Math.min(Math.max(1, limit), DASHBOARD_SCROLLER_MAX_LIMIT);
 
     if (type === ScrollerType.SMART_SCOPE) {
       const resolvedSmartScopeId = this.assertSmartScopeId(smartScopeId);
+      const scope = await this.smartScopeService.findOne(resolvedSmartScopeId, user);
+      if (scope.mediaType !== 'books') return { books: [], total: 0 };
       const accessibleLibraryIds = resolveDashboardLibraryIds(await this.libraryService.findAccessibleLibraryIds(user), user);
       const result = await this.smartScopeService.executeSmartScope(resolvedSmartScopeId, user, 0, clampedLimit, undefined, accessibleLibraryIds);
-      return result.items;
+      return { books: result.items, total: result.total };
     }
 
-    return this.loadCardsByIds(await this.findScrollerBookIds(type, user, clampedLimit), user.id);
+    // Resolved once and handed to both halves. The selection and the count have to agree about
+    // which libraries are in play, and asking twice invites them to disagree.
+    const accessibleLibraryIds = resolveDashboardLibraryIds(await this.libraryService.findAccessibleLibraryIds(user), user);
+    const bookIds = await this.findScrollerBookIdsForLibraries(type, user, clampedLimit, accessibleLibraryIds);
+    const [books, total] = await Promise.all([this.loadCardsByIds(bookIds, user.id), this.countScroller(type, user, accessibleLibraryIds)]);
+
+    return { books, total };
+  }
+
+  /**
+   * How many books the shelf could have drawn from, or null where the answer is not worth its
+   * query. See `DashboardScrollerResponse.total`: `up-next-in-series` would have to materialise its
+   * recursive CTE in full, and `random` would anti-join the whole library to size a pool it only
+   * ever samples. Neither shelf is asked, and neither guesses.
+   */
+  private async countScroller(type: Exclude<ScrollerType, 'smart-scope'>, user: RequestUser, accessibleLibraryIds: number[]): Promise<number | null> {
+    if (accessibleLibraryIds.length === 0) return 0;
+
+    const contentFilters = user.isSuperuser ? undefined : user.contentFilters;
+    switch (type) {
+      // Not the whole library, which is what this shelf could technically return. See
+      // `countBooksAddedThisMonth`: a recency shelf is only interesting for how much is new.
+      case ScrollerType.RECENTLY_ADDED:
+        return this.dashboardRepo.countBooksAddedThisMonth(accessibleLibraryIds, contentFilters);
+      case ScrollerType.CONTINUE_READING:
+        return this.dashboardRepo.countContinueReadingBooks(accessibleLibraryIds, user.id, contentFilters);
+      case ScrollerType.CONTINUE_LISTENING:
+        return this.dashboardRepo.countContinueListeningBooks(accessibleLibraryIds, user.id, contentFilters);
+      case ScrollerType.WANT_TO_READ:
+        return this.dashboardRepo.countWantToReadBooks(accessibleLibraryIds, user.id, contentFilters);
+      case ScrollerType.UP_NEXT_IN_SERIES:
+      case ScrollerType.RANDOM:
+        return null;
+    }
   }
 
   // Book-id selection without web card assembly lets other clients shape the
@@ -132,9 +167,12 @@ export class DashboardService {
   }
 
   async getSmartScopeBookIds(smartScopeId: number | undefined, user: RequestUser, limit: number): Promise<number[]> {
+    const resolvedSmartScopeId = this.assertSmartScopeId(smartScopeId);
+    const scope = await this.smartScopeService.findOne(resolvedSmartScopeId, user);
+    if (scope.mediaType !== 'books') return [];
     const accessibleLibraryIds = resolveDashboardLibraryIds(await this.libraryService.findAccessibleLibraryIds(user), user);
     const result = await this.smartScopeService.executeSmartScope(
-      this.assertSmartScopeId(smartScopeId),
+      resolvedSmartScopeId,
       user,
       0,
       Math.min(Math.max(1, limit), DASHBOARD_SCROLLER_MAX_LIMIT),

@@ -1,3 +1,4 @@
+import { OidcCallbackDto } from '../dto/oidc-callback.dto';
 import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { compare } from 'bcryptjs';
@@ -12,9 +13,9 @@ import { UserService } from '../../user/user.service';
 import { AuthService } from '../auth.service';
 import { BackchannelLogoutService } from './backchannel-logout.service';
 import { OidcClaimExtractorService } from './oidc-claim-extractor.service';
+import { isAllowedRedirectUri } from './redirect-uri';
 import { OidcDiscoveryService } from './oidc-discovery.service';
 import { OidcGroupMappingService } from './oidc-group-mapping.service';
-import { OidcSessionRepository } from './oidc-session.repository';
 import { OidcStateService } from './oidc-state.service';
 import { OidcTokenClientService } from './oidc-token-client.service';
 import { OidcTokenValidatorService } from './oidc-token-validator.service';
@@ -33,19 +34,11 @@ function toThrowable(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new UnauthorizedException(fallbackMessage);
 }
 
-function normalizeRedirectUri(raw: string): string {
-  try {
-    const u = new URL(raw);
-    return u.origin + u.pathname;
-  } catch {
-    return raw;
-  }
-}
-
 @Injectable()
 export class OidcService {
   private readonly logger = new Logger(OidcService.name);
   private readonly appUrl: string;
+  private readonly nativeRedirectUri: string;
 
   constructor(
     private readonly providerService: OidcProviderService,
@@ -54,7 +47,6 @@ export class OidcService {
     private readonly tokenValidator: OidcTokenValidatorService,
     private readonly claimExtractor: OidcClaimExtractorService,
     private readonly stateService: OidcStateService,
-    private readonly sessionRepo: OidcSessionRepository,
     private readonly groupMapping: OidcGroupMappingService,
     private readonly backchannelLogout: BackchannelLogoutService,
     private readonly identityRepo: OidcIdentityRepository,
@@ -65,6 +57,7 @@ export class OidcService {
     private readonly authenticationPolicy: AuthenticationPolicyService,
   ) {
     this.appUrl = (this.configService.get<string>('app.appUrl') ?? 'http://localhost:5173').replace(/\/$/, '');
+    this.nativeRedirectUri = this.configService.get<string>('app.nativeRedirectUri') ?? 'bookorbit://oauth2-callback';
   }
 
   async generateState(providerSlug: string): Promise<{ state: string; authorizationEndpoint: string }> {
@@ -147,10 +140,7 @@ export class OidcService {
     });
   }
 
-  async handleCallback(
-    params: { code: string; codeVerifier: string; redirectUri: string; nonce: string; state: string },
-    reply: FastifyReply,
-  ): Promise<OidcCallbackResponse> {
+  async handleCallback(params: OidcCallbackDto, reply: FastifyReply): Promise<OidcCallbackResponse> {
     const stateResult = await this.stateService.validateAndConsume(params.state);
     if (!stateResult.valid || !stateResult.providerId) {
       throw new UnauthorizedException({
@@ -165,8 +155,7 @@ export class OidcService {
     const claimMapping = provider.claimMapping as OidcClaimMapping;
     const autoProvision = provider.autoProvision as OidcAutoProvision;
 
-    const allowedRedirectUri = `${this.appUrl}/oauth2-callback`;
-    if (normalizeRedirectUri(params.redirectUri) !== normalizeRedirectUri(allowedRedirectUri)) {
+    if (!isAllowedRedirectUri(params.redirectUri, { appUrl: this.appUrl, nativeRedirectUri: this.nativeRedirectUri })) {
       throw new BadRequestException(`Redirect URI is not allowed: ${params.redirectUri}`);
     }
 
@@ -252,15 +241,13 @@ export class OidcService {
     const user = await this.findOrProvisionUser(claims, provider, disc.issuer, autoProvision);
 
     const sid = (idTokenClaims as Record<string, unknown>).sid ? String((idTokenClaims as Record<string, unknown>).sid) : undefined;
-    await this.sessionRepo.create({
-      userId: user.id,
+    const authResult = await this.authService.issueTokensForUser(user.id, reply, AuthenticationMethod.Oidc, params, {
       providerId: provider.id,
       oidcSubject: claims.subject,
       oidcIssuer: disc.issuer,
       oidcSessionId: sid,
       idTokenHint: tokens.idToken,
       idpRefreshToken: tokens.refreshToken ?? null,
-      expiresAt: this.authService.getRefreshTokenExpiryDate(),
     });
 
     this.auditEvents.emit(AUDIT_EVENT, {
@@ -272,7 +259,6 @@ export class OidcService {
       description: `User logged in via OIDC (issuer: ${disc.issuer})`,
     });
 
-    const authResult = await this.authService.issueTokensForUser(user.id, reply, AuthenticationMethod.Oidc);
     return { mode: 'login' as const, ...authResult } as OidcCallbackResponse;
   }
 

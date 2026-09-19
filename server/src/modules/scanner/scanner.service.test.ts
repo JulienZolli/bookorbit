@@ -1,6 +1,6 @@
 vi.mock('./lib/walk');
 vi.mock('./lib/hash');
-vi.mock('./lib/stability', () => ({ waitForStability: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../common/utils/fs-stability.utils', () => ({ waitForStability: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../common/utils/path-identity.utils', () => ({ pathsReferToSameEntry: vi.fn() }));
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
@@ -1149,7 +1149,9 @@ describe('file identity resolution', () => {
     const fileStat = makeFileStat({ mtime });
 
     const repo = makeRepo({
-      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes })]),
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes, mediaOverlayCheckedAt: new Date('2024-01-01') })]),
       findBooksByLibraryFolder: vi
         .fn()
         .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
@@ -1225,6 +1227,38 @@ describe('file identity resolution', () => {
     await done;
 
     expect(repo.updateBookFile).toHaveBeenCalledWith(1, expect.objectContaining({ ino: exactIno }));
+    expect(repo.createBookFile).not.toHaveBeenCalled();
+  });
+
+  it('backfills media-overlay capability when an unchanged EPUB has not been checked', async () => {
+    const mtime = new Date('2024-01-01T00:00:00Z');
+    const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/book.epub', sizeBytes: 1024, mtime });
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes, mediaOverlayCheckedAt: null })]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookFile).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        mediaOverlayAvailable: false,
+        mediaOverlayDurationSeconds: null,
+        mediaOverlayCheckedAt: expect.any(Date),
+      }),
+    );
     expect(repo.createBookFile).not.toHaveBeenCalled();
   });
 

@@ -18,7 +18,7 @@ vi.mock('../scanner/lib/walk', async (importOriginal) => ({
   buildSingleBookCandidate: vi.fn(),
 }));
 
-vi.mock('../scanner/lib/stability', () => ({ waitForDirectoryStability: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../common/utils/fs-stability.utils', () => ({ waitForDirectoryStability: vi.fn().mockResolvedValue(undefined) }));
 
 const mockedStat = vi.mocked(stat);
 

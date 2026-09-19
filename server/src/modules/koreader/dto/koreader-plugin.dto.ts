@@ -70,6 +70,11 @@ export class MatchCheckBookDto {
   source?: 'current_file' | 'file' | 'statistics';
 
   @IsOptional()
+  @IsInt()
+  @Min(1)
+  bookFileId?: number;
+
+  @IsOptional()
   @IsBoolean()
   metadataAmbiguous?: boolean;
 }

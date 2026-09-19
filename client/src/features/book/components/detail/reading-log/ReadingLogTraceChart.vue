@@ -24,6 +24,8 @@ onMounted(() => initChartThemes())
 const DAY_MS = 24 * 60 * 60 * 1000
 const BUCKET_TOKEN: Record<ReadingSessionSourceBucket, string> = {
   bookorbit: '--pill-web',
+  ios: '--pill-ios',
+  watchos: '--pill-watchos',
   koreader: '--pill-koreader',
   kobo: '--pill-kobo',
 }

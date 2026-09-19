@@ -35,6 +35,8 @@
     "db:studio": "drizzle-kit studio",
     "predb:seed": "pnpm --filter @bookorbit/types build",
     "db:seed": "tsx src/scripts/db-seed.ts",
+    "db:seed:apple-stats": "tsx --env-file-if-exists=.env src/scripts/seed-apple-source-stats.ts",
+    "tts:register-kokoro": "tsx --env-file-if-exists=.env src/scripts/register-kokoro-provider.ts",
     "whats-new:preview": "tsx src/scripts/whats-new-preview.ts",
     "whats-new:lint": "tsx src/scripts/whats-new-lint.ts",
     "whats-new:check": "tsx src/scripts/whats-new-check.ts",

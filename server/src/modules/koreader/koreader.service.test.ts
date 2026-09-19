@@ -106,6 +106,7 @@ describe('KoreaderService', () => {
   };
   let mockBookService: {
     syncKoboReadingStateForExternalProgress: ReturnType<typeof vi.fn>;
+    syncAudioProgressForExternalEbookProgress: ReturnType<typeof vi.fn>;
     autoUpdateReadStatusForProgress: ReturnType<typeof vi.fn>;
   };
   let mockPackageService: {
@@ -190,6 +191,7 @@ describe('KoreaderService', () => {
 
     mockBookService = {
       syncKoboReadingStateForExternalProgress: vi.fn().mockResolvedValue(undefined),
+      syncAudioProgressForExternalEbookProgress: vi.fn().mockResolvedValue(undefined),
       autoUpdateReadStatusForProgress: vi.fn().mockResolvedValue(undefined),
     };
     mockPackageService = {

@@ -8,10 +8,14 @@ import { parseCronToHuman } from '@/features/library/utils/cron'
 
 const { t, locale } = useI18n()
 
-const props = defineProps<{
-  watch: boolean
-  autoScanCronExpression: string | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    watch: boolean
+    autoScanCronExpression: string | null
+    showAutoScanSchedule?: boolean
+  }>(),
+  { showAutoScanSchedule: true },
+)
 
 const emit = defineEmits<{
   'update:watch': [value: boolean]
@@ -92,7 +96,7 @@ function humanReadableCron(cron: string | null): string {
     </div>
 
     <!-- Auto-scan schedule -->
-    <div>
+    <div v-if="showAutoScanSchedule">
       <p class="text-[11px] font-semibold uppercase tracking-widest text-foreground mb-3">{{ t('library.creator.schedule.autoScanSchedule') }}</p>
       <p class="mb-3 text-xs text-muted-foreground">{{ t('library.creator.schedule.timezoneHint') }}</p>
       <div class="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3">

@@ -7,6 +7,7 @@ import type { CustomMetadataBookValue } from "./custom-metadata";
 import type { CoverAspectRatio } from "./library";
 import { DEFAULT_FORMAT_PRIORITY } from "./library";
 import type { SeriesIndex } from "./series-index";
+import type { EpubMediaOverlayCapability } from "./epub";
 
 // Derived rather than duplicated: these two lists describe the same set of formats,
 // and maintaining them separately let BOOK_FORMATS fall behind on azw and kepub.
@@ -84,6 +85,7 @@ export type BookFileRef = {
   format: string | null;
   role: string;
   sizeBytes: number | null;
+  mediaOverlay?: EpubMediaOverlayCapability | null;
 };
 
 /** The kinds a real file can be. `BookMediaKind` adds the case where no format identifies one. */
@@ -177,6 +179,7 @@ export type BookDetailFile = {
   createdAt: string;
   filename: string | null;
   durationSeconds: number | null;
+  mediaOverlay?: EpubMediaOverlayCapability | null;
 };
 
 export type ProviderIds = Partial<Record<MetadataProviderKey, string | null>>;
@@ -186,6 +189,28 @@ export type AudioMetadata = {
   durationSeconds: number | null;
   abridged: boolean;
   chapters: AudiobookChapter[] | null;
+};
+
+export type ReadAloudProgressSyncMode = "auto" | "disabled";
+
+export type ReadAloudProgressSyncState = "enabled" | "disabled" | "unavailable";
+
+export type ReadAloudProgressSyncUnavailableReason =
+  | "no_media_overlay_epub"
+  | "no_audio_files"
+  | "missing_duration"
+  | "duration_mismatch";
+
+export type ReadAloudProgressSync = {
+  mode: ReadAloudProgressSyncMode;
+  state: ReadAloudProgressSyncState;
+  unavailableReason: ReadAloudProgressSyncUnavailableReason | null;
+  overlayFileId: number | null;
+  audioDurationSeconds: number | null;
+  overlayDurationSeconds: number | null;
+  durationDifferenceSeconds: number | null;
+  durationDifferenceRatio: number | null;
+  koreaderDownloadAvailable: boolean;
 };
 
 export type BookFileWriteDisabledReason =
@@ -235,6 +260,7 @@ export type BookDetail = {
   metadataScore: number | null;
   readStatus: UserBookStatus | null;
   audioMetadata: AudioMetadata | null;
+  readAloudSync: ReadAloudProgressSync;
   formatPriority: string[];
   comicMetadata: ComicMetadataFields | null;
   customMetadata: CustomMetadataBookValue[];

@@ -221,6 +221,23 @@ describe('BookListRow - present state', () => {
     expect(wrapper.find('[class*="bg-amber-500"]').exists()).toBe(false)
   })
 
+  it('marks the EPUB format button for media-overlay read-along files', () => {
+    const wrapper = mount(BookListRow, {
+      props: {
+        book: {
+          ...presentBook,
+          files: [{ id: 10, format: 'epub', role: 'primary', sizeBytes: null, mediaOverlay: { available: true, durationSeconds: 42 } }],
+        },
+      },
+      global: globalStubs,
+    })
+
+    expect(wrapper.text()).toContain('epub')
+    expect(wrapper.text()).not.toContain('NARR')
+    expect(wrapper.text()).toContain('Open read-along EPUB')
+    expect(wrapper.find('.lucide-headphones').exists()).toBe(true)
+  })
+
   it('applies hover:bg-muted/50 when present with a readable file', () => {
     const wrapper = mount(BookListRow, { props: { book: presentBook }, global: globalStubs })
     const root = wrapper.find('.flex.items-center')

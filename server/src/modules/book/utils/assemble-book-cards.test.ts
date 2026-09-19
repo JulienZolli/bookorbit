@@ -93,6 +93,28 @@ describe('assembleBookCards', () => {
     expect(card.hardcoverEditionId).toBe('8941973');
   });
 
+  it('includes EPUB media-overlay capability when present on file rows', () => {
+    const rows = [makeBookRow(1)];
+    const fileRows = [
+      {
+        bookId: 1,
+        id: 10,
+        format: 'epub',
+        role: 'primary',
+        sizeBytes: 4096,
+        mediaOverlayAvailable: true,
+        mediaOverlayDurationSeconds: 42,
+        mediaOverlayCheckedAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ];
+
+    const [card] = assembleBookCards(rows, [], fileRows, [], []);
+
+    expect(card.files).toEqual([
+      { id: 10, format: 'epub', role: 'primary', sizeBytes: 4096, mediaOverlay: { available: true, durationSeconds: 42 } },
+    ]);
+  });
+
   it('falls back to basename of folderPath when title is null', () => {
     const rows = [makeBookRow(2, { title: null, folderPath: '/books/my-book-folder' })];
 

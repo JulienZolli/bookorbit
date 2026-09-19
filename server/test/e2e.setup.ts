@@ -1,6 +1,5 @@
 import { vi } from 'vitest';
 
-vi.mock('../src/modules/scanner/lib/stability', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/modules/scanner/lib/stability')>()),
+vi.mock('../src/common/utils/fs-stability.utils', () => ({
   waitForStability: vi.fn().mockResolvedValue(undefined),
 }));

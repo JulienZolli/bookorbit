@@ -159,6 +159,14 @@ describe('BookTableFormatCell', () => {
     expect(wrapper.text()).toContain('epub')
   })
 
+  it('marks the EPUB format badge for media-overlay read-along files', () => {
+    const wrapper = mountFormat([{ id: 1, format: 'epub', role: 'primary', sizeBytes: null, mediaOverlay: { available: true, durationSeconds: 42 } }])
+    expect(wrapper.text()).toContain('epub')
+    expect(wrapper.text()).not.toContain('NARR')
+    expect(wrapper.text()).toContain('Read-along EPUB')
+    expect(wrapper.find('.lucide-headphones').exists()).toBe(true)
+  })
+
   it('shows multiple format badges for multiple files', () => {
     const wrapper = mountFormat([
       { id: 1, format: 'epub', role: 'primary', sizeBytes: null },

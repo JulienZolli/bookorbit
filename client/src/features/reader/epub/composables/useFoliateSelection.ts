@@ -1,6 +1,7 @@
 export interface SelectionDetail {
   text: string
   cfi: string | null
+  range: Range | null
   popupPosition: { x: number; y: number; showBelow: boolean }
 }
 
@@ -46,7 +47,7 @@ export function useFoliateSelection(getView: () => unknown) {
       const content = contents?.[0]
       const selectionCfi = content ? (view?.getCFI?.(content.index, range) ?? null) : null
 
-      onTextSelected?.({ text, cfi: selectionCfi, popupPosition: { x: clampedX, y: popupY, showBelow } })
+      onTextSelected?.({ text, cfi: selectionCfi, range: range.cloneRange(), popupPosition: { x: clampedX, y: popupY, showBelow } })
     }, 10)
   }
 

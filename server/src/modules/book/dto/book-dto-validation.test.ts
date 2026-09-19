@@ -20,6 +20,7 @@ import { MetadataExportDto } from './metadata-export.dto';
 import { GetBooksDto } from './get-books.dto';
 import { SaveProgressDto } from './save-progress.dto';
 import { SearchBooksDto } from './search-books.dto';
+import { UpsertAudioProgressDto } from './upsert-audio-progress.dto';
 import { UpdateBookMetadataDto } from './update-book-metadata.dto';
 import { UpdateBookAddedAtDto } from './update-book-added-at.dto';
 import { UpdatePersonalNoteDto } from './update-personal-note.dto';
@@ -133,6 +134,8 @@ describe('Book DTO validation', () => {
           percentage: 100,
           cfi: 'epubcfi(/6/2)',
           pageNumber: 5,
+          mediaOverlayFragment: 'OPS/ch1.xhtml#s1',
+          mediaOverlaySectionIndex: 3,
           koreaderProgress: '/body/DocFragment[2]/body/p[1]/text()[1].0',
         })
       ).length,
@@ -141,6 +144,8 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(SaveProgressDto, { percentage: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, cfi: 123 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 'five' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, mediaOverlayFragment: 123 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, mediaOverlaySectionIndex: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, koreaderProgress: 123 })).length).toBeGreaterThan(0);
   });
 
@@ -328,5 +333,15 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdatePersonalNoteDto, { note: 'My private review' })).length).toBe(0);
     expect((await errorsFor(UpdatePersonalNoteDto, { note: null })).length).toBe(0);
     expect((await errorsFor(UpdatePersonalNoteDto, { note: 'a'.repeat(10001) })).length).toBeGreaterThan(0);
+  });
+
+  it('validates audiobook progress bounds for percentage and position', async () => {
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: 0, currentFileId: 1, positionSeconds: 0 })).length).toBe(0);
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: 100, currentFileId: 2, positionSeconds: 120.5 })).length).toBe(0);
+
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: -1, currentFileId: 1, positionSeconds: 0 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: 101, currentFileId: 1, positionSeconds: 0 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: 10, currentFileId: 0, positionSeconds: 0 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpsertAudioProgressDto, { percentage: 10, currentFileId: 1, positionSeconds: -5 })).length).toBeGreaterThan(0);
   });
 });

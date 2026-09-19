@@ -588,7 +588,7 @@ export class OpdsBookService {
       })
       .from(collections)
       .leftJoin(collectionBooks, eq(collectionBooks.collectionId, collections.id))
-      .where(eq(collections.userId, userId))
+      .where(and(eq(collections.userId, userId), eq(collections.mediaType, 'books')))
       .groupBy(collections.id)
       .orderBy(collections.name);
   }
@@ -597,7 +597,10 @@ export class OpdsBookService {
   // their list siblings compute. Counting collections through getUserCollections
   // would aggregate over collection_books just to read the row count back.
   async countUserCollections(userId: number): Promise<number> {
-    const [row] = await this.db.select({ total: count() }).from(collections).where(eq(collections.userId, userId));
+    const [row] = await this.db
+      .select({ total: count() })
+      .from(collections)
+      .where(and(eq(collections.userId, userId), eq(collections.mediaType, 'books')));
     return Number(row?.total ?? 0);
   }
 
@@ -605,7 +608,7 @@ export class OpdsBookService {
     const [row] = await this.db
       .select({ total: count() })
       .from(smartScopes)
-      .where(or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true)));
+      .where(and(eq(smartScopes.mediaType, 'books'), or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true))));
     return Number(row?.total ?? 0);
   }
 
@@ -626,7 +629,7 @@ export class OpdsBookService {
         icon: smartScopes.icon,
       })
       .from(smartScopes)
-      .where(or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true)))
+      .where(and(eq(smartScopes.mediaType, 'books'), or(eq(smartScopes.userId, userId), eq(smartScopes.isPublic, true))))
       .orderBy(smartScopes.name);
   }
 
@@ -691,6 +694,8 @@ export class OpdsBookService {
     const [smartScope] = await this.db.select().from(smartScopes).where(eq(smartScopes.id, smartScopeId)).limit(1);
     if (!smartScope) return null;
     if (!smartScope.isPublic && smartScope.userId !== userId) return null;
+    // OPDS serves books. A podcast scope's rules are not a GroupRule and would not survive buildWhere.
+    if (smartScope.mediaType !== 'books') return null;
 
     const where = this.queryBuilder.buildWhere(smartScope.filter as GroupRule | null, {
       accessibleLibraryIds: accessibleIds,

@@ -172,6 +172,9 @@ export const readingProgress = pgTable(
     pageNumber: integer('page_number'),
     // Audio: playback position in seconds
     positionSeconds: real('position_seconds'),
+    // EPUB3 media overlay: SMIL text fragment and spine section for exact narration resume
+    mediaOverlayFragment: varchar('media_overlay_fragment', { length: 4096 }),
+    mediaOverlaySectionIndex: integer('media_overlay_section_index'),
     // Kobo: spine XHTML resource used as Location.Source
     koboLocationSource: varchar('kobo_location_source', { length: 4096 }),
     // Kobo: exact bookmark location kind/value, usually KoboSpan + kobo.x.y for KEPUB
@@ -181,6 +184,15 @@ export const readingProgress = pgTable(
     koboContentSourceProgressPercent: real('kobo_content_source_progress_percent'),
     // KOReader: XPointer progress string generated from the EPUB DOM
     koreaderProgress: text('koreader_progress'),
+    // EPUB3 narration keeps its own progress beside the text position above, because the two move
+    // independently: a reader can be at 32% by eye and a minute into the narration. They shared
+    // `percentage` and `cfi` until a read-along resume wrote the narration marker over a page the
+    // reader had actually reached.
+    narrationPercentage: real('narration_percentage'),
+    narrationUpdatedAt: timestamp('narration_updated_at', { withTimezone: true }),
+    // When the text position last moved, as distinct from `last_read_at`, which advances for
+    // narration writes too. The pair is what tells a client which of the two is the fresher.
+    textUpdatedAt: timestamp('text_updated_at', { withTimezone: true }),
     // Last time this row was written by the web reader or Kobo. The KOReader sync path
     // deliberately freezes it so it stays a reliable "last local write" marker to compare
     // against koreader_device_progress.updatedAt, so it is NOT a last-read timestamp.
@@ -204,8 +216,16 @@ export const readingProgress = pgTable(
     check('reading_progress_page_number_nonnegative_chk', sql`${t.pageNumber} is null or ${t.pageNumber} >= 0`),
     check('reading_progress_position_seconds_nonnegative_chk', sql`${t.positionSeconds} is null or ${t.positionSeconds} >= 0`),
     check(
+      'reading_progress_media_overlay_section_index_nonnegative_chk',
+      sql`${t.mediaOverlaySectionIndex} is null or ${t.mediaOverlaySectionIndex} >= 0`,
+    ),
+    check(
       'reading_progress_kobo_content_source_progress_range_chk',
       sql`${t.koboContentSourceProgressPercent} is null or (${t.koboContentSourceProgressPercent} >= 0 and ${t.koboContentSourceProgressPercent} <= 100)`,
+    ),
+    check(
+      'reading_progress_narration_percentage_range_chk',
+      sql`${t.narrationPercentage} is null or (${t.narrationPercentage} >= 0 and ${t.narrationPercentage} <= 100)`,
     ),
   ],
 );
@@ -228,9 +248,11 @@ export const readingSessions = pgTable(
     attemptId: integer('attempt_id').references(() => readingAttempts.id, { onDelete: 'set null' }),
     // Client-generated UUID; used for idempotent retries.
     sessionId: varchar('session_id', { length: 64 }).notNull(),
-    // 'web' (browser reader) | 'koreader' (page-stats derivation) | 'manual' (user-entered) | 'kobo' (future)
+    // Browser, native Apple clients, external readers, or a user-entered session.
     source: varchar('source', { length: 10 }).$type<ReadingSessionSource>(),
     sourceDeviceKey: varchar('source_device_key', { length: 128 }),
+    // 'read' (default, manual reading), 'tts' (text-to-speech), or 'listen' (audiobook playback)
+    sessionType: varchar('session_type', { length: 20 }).notNull().default('read'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
     endedAt: timestamp('ended_at', { withTimezone: true }).notNull(),
     // Server-computed from endedAt - startedAt; client-provided timestamps are untrusted for duration.
@@ -248,7 +270,7 @@ export const readingSessions = pgTable(
     index('rs_user_book_source_device_started_idx').on(t.userId, t.bookId, t.source, t.sourceDeviceKey, t.startedAt),
     index('reading_sessions_book_id_idx').on(t.bookId),
     index('rs_attempt_started_at_idx').on(t.attemptId, t.startedAt),
-    check('reading_sessions_source_chk', sql`${t.source} in ('web', 'koreader', 'manual', 'kobo')`),
+    check('reading_sessions_source_chk', sql`${t.source} in ('web', 'ios', 'watchos', 'koreader', 'manual', 'kobo')`),
     check('reading_sessions_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} >= 0`),
     check('reading_sessions_end_progress_range_chk', sql`${t.endProgress} is null or (${t.endProgress} >= 0 and ${t.endProgress} <= 100)`),
     check('reading_sessions_ended_after_started_chk', sql`${t.endedAt} >= ${t.startedAt}`),
@@ -355,6 +377,31 @@ export type AudiobookProgress = typeof audiobookProgress.$inferSelect;
 export type NewAudiobookProgress = typeof audiobookProgress.$inferInsert;
 
 export type BookmarkOrigin = 'web' | 'koreader';
+
+export const userBookReadAloudSyncSettings = pgTable(
+  'user_book_read_aloud_sync_settings',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    mode: varchar('mode', { length: 20 }).$type<'auto' | 'disabled'>().notNull().default('auto'),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => new Date()),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.bookId] }),
+    index('ubrass_user_id_idx').on(t.userId),
+    check('user_book_read_aloud_sync_settings_mode_chk', sql`${t.mode} in ('auto', 'disabled')`),
+  ],
+);
+
+export type UserBookReadAloudSyncSetting = typeof userBookReadAloudSyncSettings.$inferSelect;
+export type NewUserBookReadAloudSyncSetting = typeof userBookReadAloudSyncSettings.$inferInsert;
 
 export const bookmarks = pgTable(
   'bookmarks',

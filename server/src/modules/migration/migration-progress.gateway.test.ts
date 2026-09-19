@@ -29,7 +29,7 @@ function makeGateway() {
     verify: vi.fn(),
   };
   const authService = {
-    validateUser: vi.fn(),
+    validateSessionUser: vi.fn(),
   };
   const repo = {
     findRunById: vi.fn(),
@@ -78,12 +78,12 @@ describe('MigrationProgressGateway', () => {
     const { gateway, jwtService, authService } = makeGateway();
     const client = makeClient();
     jwtService.verify.mockReturnValue({ sub: 7, ver: 1 });
-    authService.validateUser.mockResolvedValue(makeUser({ permissions: [Permission.ManageAppSettings] }));
+    authService.validateSessionUser.mockResolvedValue(makeUser({ permissions: [Permission.ManageAppSettings] }));
 
     await gateway.handleConnection(client as never);
 
     expect(jwtService.verify).toHaveBeenCalledWith('token-1', { algorithms: ['HS256'] });
-    expect(authService.validateUser).toHaveBeenCalledWith(7, 1, 'legacy');
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(7, 1, 'legacy', undefined);
     expect(client.disconnect).not.toHaveBeenCalled();
     expect((client.data as { user?: RequestUser }).user?.id).toBe(7);
   });
@@ -98,7 +98,7 @@ describe('MigrationProgressGateway', () => {
 
     const forbiddenClient = makeClient();
     jwtService.verify.mockReturnValue({ sub: 7, ver: 1 });
-    authService.validateUser.mockResolvedValue(makeUser({ permissions: [] }));
+    authService.validateSessionUser.mockResolvedValue(makeUser({ permissions: [] }));
 
     await gateway.handleConnection(forbiddenClient as never);
     expect(forbiddenClient.disconnect).toHaveBeenCalledTimes(1);

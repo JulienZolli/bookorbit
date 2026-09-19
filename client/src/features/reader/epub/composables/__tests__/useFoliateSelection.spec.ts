@@ -11,10 +11,12 @@ interface RectLike {
 }
 
 function makeRange(text: string, rect: RectLike): Range {
-  return {
+  const r = {
     toString: () => text,
     getBoundingClientRect: () => rect as DOMRect,
+    cloneRange: () => r,
   } as unknown as Range
+  return r
 }
 
 function makeDoc(options: { selection: Selection | null; iframeRect?: RectLike }): Document {
@@ -67,6 +69,7 @@ describe('useFoliateSelection', () => {
     expect(onSelected).toHaveBeenCalledWith({
       text: 'picked text',
       cfi: 'epubcfi(/6/2)',
+      range: expect.objectContaining({ toString: expect.any(Function) }),
       popupPosition: {
         x: 100,
         y: 130,

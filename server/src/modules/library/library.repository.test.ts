@@ -57,7 +57,8 @@ describe('LibraryRepository', () => {
   it('findAll counts only present books while retaining empty libraries', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const leftJoin = vi.fn().mockReturnValue({ groupBy });
+    const where = vi.fn().mockReturnValue({ groupBy });
+    const leftJoin = vi.fn().mockReturnValue({ where });
     const from = vi.fn().mockReturnValue({ leftJoin });
     db.select.mockReturnValue({ from });
 
@@ -70,12 +71,14 @@ describe('LibraryRepository', () => {
         { op: 'eq', left: books.status, right: LIBRARY_BOOK_STATUS_PRESENT },
       ],
     });
+    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
   });
 
   it('findAllForUser includes file rename eligibility and counts only present books', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const leftJoin = vi.fn().mockReturnValue({ groupBy });
+    const where = vi.fn().mockReturnValue({ groupBy });
+    const leftJoin = vi.fn().mockReturnValue({ where });
     const innerJoin = vi.fn().mockReturnValue({ leftJoin });
     const from = vi.fn().mockReturnValue({ innerJoin });
     db.select.mockReturnValue({ from });
@@ -95,6 +98,7 @@ describe('LibraryRepository', () => {
       ],
     });
     expect(orderBy).toHaveBeenCalledWith(libraries.displayOrder, libraries.name);
+    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
   });
 
   it('findAutoScanSchedules selects only libraries with a configured expression', async () => {

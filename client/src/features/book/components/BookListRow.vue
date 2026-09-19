@@ -14,6 +14,7 @@ import {
   Eye,
   ExternalLink,
   FolderPlus,
+  Headphones,
   LibraryBig,
   Loader2,
   FolderInput,
@@ -36,6 +37,7 @@ import SendBookDialog from '@/features/email/components/SendBookDialog.vue'
 import { RATING_STARS, getRatingStarClass } from '@/features/book/lib/rating-stars'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { displayPublishedDate } from '../lib/published-date'
+import { hasReadAlong, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 const COLLAPSED_SERIES_COVER_LIMIT = 3
 
@@ -156,6 +158,23 @@ function openFile(file: BookFileRef, mode?: 'peek') {
     params: { bookId: props.book.id, fileId: file.id },
     query: mode === 'peek' ? { format: file.format ?? 'epub', mode } : { format: file.format ?? 'epub' },
   })
+}
+
+function formatButtonClasses(file: BookFileRef, primary: boolean): string {
+  if (hasReadAlong(file)) return 'bg-transparent text-white hover:opacity-90 transition-opacity'
+  return primary
+    ? 'bg-primary/15 text-primary hover:bg-primary/25 transition-colors'
+    : 'bg-muted text-muted-foreground hover:bg-muted/70 transition-colors'
+}
+
+function formatButtonStyle(file: BookFileRef): Record<string, string> | undefined {
+  return hasReadAlong(file) ? { backgroundColor: READ_ALONG_FORMAT_COLOR } : undefined
+}
+
+function formatButtonTooltip(file: BookFileRef): string {
+  return hasReadAlong(file)
+    ? t('book.actions.openReadAlong')
+    : t('book.actions.openAs', { format: file.format?.toUpperCase() ?? t('book.unknownFormat') })
 }
 
 function peekPrimaryFile() {
@@ -376,24 +395,32 @@ function handleRowClick(event: MouseEvent) {
         <Tooltip v-if="primaryFile && !isMissing">
           <TooltipTrigger as-child>
             <button
-              class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/15 text-primary hover:bg-primary/25 transition-colors"
+              class="inline-flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+              :class="formatButtonClasses(primaryFile, true)"
+              :style="formatButtonStyle(primaryFile)"
+              :title="hasReadAlong(primaryFile) ? READ_ALONG_FORMAT_TITLE : undefined"
               @click="openFile(primaryFile)"
             >
               {{ primaryFile.format ?? '?' }}
+              <Headphones v-if="hasReadAlong(primaryFile)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
             </button>
           </TooltipTrigger>
-          <TooltipContent>{{ t('book.actions.openAs', { format: primaryFile.format?.toUpperCase() ?? t('book.unknownFormat') }) }}</TooltipContent>
+          <TooltipContent>{{ formatButtonTooltip(primaryFile) }}</TooltipContent>
         </Tooltip>
         <Tooltip v-for="file in uniqueSecondaryFiles" :key="file.id">
           <TooltipTrigger as-child>
             <button
-              class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground hover:bg-muted/70 transition-colors"
+              class="inline-flex items-center gap-0.5 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded"
+              :class="formatButtonClasses(file, false)"
+              :style="formatButtonStyle(file)"
+              :title="hasReadAlong(file) ? READ_ALONG_FORMAT_TITLE : undefined"
               @click="openFile(file)"
             >
               {{ file.format ?? '?' }}
+              <Headphones v-if="hasReadAlong(file)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
             </button>
           </TooltipTrigger>
-          <TooltipContent>{{ t('book.actions.openAs', { format: file.format?.toUpperCase() ?? t('book.unknownFormat') }) }}</TooltipContent>
+          <TooltipContent>{{ formatButtonTooltip(file) }}</TooltipContent>
         </Tooltip>
       </div>
 

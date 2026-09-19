@@ -42,6 +42,7 @@ import { DeleteBooksDto } from './dto/delete-books.dto';
 import { ExportBooksDto } from './dto/export-books.dto';
 import { MetadataExportDto } from './dto/metadata-export.dto';
 import { SaveProgressDto } from './dto/save-progress.dto';
+import { UpsertAudioProgressDto } from './dto/upsert-audio-progress.dto';
 import { UpdateBookMetadataAndLocksDto } from './dto/update-book-metadata-and-locks.dto';
 import { UpdateBookMetadataDto } from './dto/update-book-metadata.dto';
 import { UpdateBookAddedAtDto } from './dto/update-book-added-at.dto';
@@ -53,6 +54,7 @@ import { Permission, AuditAction, AuditResource } from '@bookorbit/types';
 import type { BookDeletionAuditMeta } from '@bookorbit/types';
 import type { BookQuery } from '@bookorbit/types';
 import { UpdateBookMetadataLocksDto } from '../book-metadata-lock/dto/update-book-metadata-locks.dto';
+import { UpdateReadAloudSyncSettingsDto } from './dto/update-read-aloud-sync-settings.dto';
 
 function shouldSyncFileWrite(value: string | undefined): boolean {
   return value === 'true';
@@ -455,18 +457,80 @@ export class BookController {
     }
   }
 
+  @Get('files/:fileId/audioless-epub/download')
+  @RequirePermission(Permission.LibraryDownload)
+  async downloadAudiolessEpub(@Param('fileId', ParseIntPipe) fileId: number, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
+    const event = 'book.download_audioless_epub';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] fileId=${fileId} userId=${user.id} - audioless EPUB download started`);
+    let removedEntries = 0;
+    let sanitizedEntries = 0;
+    let sizeBytes = 0;
+    let clientDisconnected = false;
+    const handleDisconnect = () => {
+      clientDisconnected = true;
+    };
+    reply.raw.on('close', handleDisconnect);
+    reply.raw.on('aborted', handleDisconnect);
+
+    try {
+      const result = await this.bookService.createAudiolessEpubDownload(fileId, user, { linkKoreaderHash: true });
+      removedEntries = result.removedEntries;
+      sanitizedEntries = result.sanitizedEntries;
+      sizeBytes = result.size;
+      const stream = createReadStream(result.path);
+      stream.once('close', () => {
+        void result.cleanup();
+      });
+
+      reply.raw.setHeader('Content-Type', 'application/epub+zip');
+      reply.raw.setHeader('Content-Disposition', contentDispositionHeader('attachment', result.filename, 'download'));
+      reply.raw.setHeader('Content-Length', result.size);
+      reply.send(stream);
+
+      if (!clientDisconnected) {
+        this.logger.log(
+          `[${event}] [end] fileId=${fileId} userId=${user.id} durationMs=${Date.now() - startedAt} sizeBytes=${sizeBytes} removedEntries=${removedEntries} sanitizedEntries=${sanitizedEntries} hash=${result.koreaderHash.slice(0, 8)} - audioless EPUB download completed`,
+        );
+      }
+    } catch (err) {
+      if (clientDisconnected) {
+        this.logger.log(
+          `[${event}] [end] fileId=${fileId} userId=${user.id} durationMs=${Date.now() - startedAt} sizeBytes=${sizeBytes} removedEntries=${removedEntries} sanitizedEntries=${sanitizedEntries} disconnected=true - audioless EPUB download disconnected`,
+        );
+        return;
+      }
+
+      const errorClass = err instanceof Error ? err.name : 'Error';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[${event}] [fail] fileId=${fileId} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - audioless EPUB download failed`,
+      );
+      throw err;
+    } finally {
+      reply.raw.off('close', handleDisconnect);
+      reply.raw.off('aborted', handleDisconnect);
+    }
+  }
+
   @Get('files/:fileId/progress')
   async getFileProgress(@Param('fileId', ParseIntPipe) fileId: number, @CurrentUser() user: RequestUser) {
     return (
       (await this.bookService.getProgress(user.id, fileId, user)) ?? {
         cfi: null,
         pageNumber: null,
+        positionSeconds: null,
+        mediaOverlayFragment: null,
+        mediaOverlaySectionIndex: null,
         percentage: 0,
         koboLocationSource: null,
         koboLocationType: null,
         koboLocationValue: null,
         koboContentSourceProgressPercent: null,
         koreaderProgress: null,
+        narrationPercentage: null,
+        narrationUpdatedAt: null,
+        textUpdatedAt: null,
       }
     );
   }
@@ -482,6 +546,10 @@ export class BookController {
     await this.bookService.clearFileProgress(user.id, fileId, user);
   }
 
+  /**
+   * Renaming rewrites the file on disk, so it takes the same permission as any other
+   * metadata-driven write rather than library access alone.
+   */
   @Patch('files/:fileId')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.LibraryEditMetadata)
@@ -489,11 +557,26 @@ export class BookController {
     await this.bookService.renameFile(fileId, dto, user);
   }
 
+  /**
+   * Deleting removes the file from disk permanently. Verifying library access alone let an editor
+   * without delete rights destroy content, which `DELETE /books` has never permitted.
+   */
   @Delete('files/:fileId')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.LibraryDeleteBooks)
   async deleteFile(@Param('fileId', ParseIntPipe) fileId: number, @CurrentUser() user: RequestUser) {
     await this.bookService.deleteFile(fileId, user);
+  }
+
+  @Get(':id/audio-progress')
+  async getAudioProgress(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    return (await this.bookService.getAudioProgress(user.id, id, user)) ?? null;
+  }
+
+  @Patch(':id/audio-progress')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async saveAudioProgress(@Param('id', ParseIntPipe) id: number, @Body() dto: UpsertAudioProgressDto, @CurrentUser() user: RequestUser) {
+    await this.bookService.saveAudioProgress(user.id, id, dto, user);
   }
 
   @Patch(':id/personal-note')
@@ -610,6 +693,11 @@ export class BookController {
   @Get(':id/progress')
   async getBookProgress(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     return this.bookService.getBookProgress(user.id, id, user);
+  }
+
+  @Patch(':id/read-aloud-sync')
+  updateReadAloudSync(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateReadAloudSyncSettingsDto, @CurrentUser() user: RequestUser) {
+    return this.bookService.updateReadAloudSyncMode(id, dto.mode, user);
   }
 
   @Patch(':id/status')

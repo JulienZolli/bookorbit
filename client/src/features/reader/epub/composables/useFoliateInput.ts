@@ -21,6 +21,7 @@ export function useFoliateInput(
   onMiddleTap: (() => void) | undefined,
   handleSelectionEnd: (doc: Document) => void,
   handleSelectionChange: (doc: Document) => void,
+  canNavigate: (() => boolean) | undefined = undefined,
 ) {
   const clickedDocs = new WeakSet<Document>()
 
@@ -75,6 +76,10 @@ export function useFoliateInput(
     return Date.now() < suppressClickNavigationUntil
   }
 
+  function canProceedNavigation(): boolean {
+    return canNavigate ? canNavigate() : true
+  }
+
   function handleTouchStart(e: TouchEvent) {
     if (e.touches.length !== 1) return
     const touch = e.touches[0]!
@@ -84,6 +89,7 @@ export function useFoliateInput(
     touchStartScreenY = touch.screenY
     touchStartTime = Date.now()
     isTextSelectionInProgress = false
+    if (longHoldTimeout) clearTimeout(longHoldTimeout)
     longHoldTimeout = setTimeout(() => {
       longHoldTimeout = null
     }, 500)
@@ -127,6 +133,7 @@ export function useFoliateInput(
         // scrolling would then read as a swipe and turn the page.
         if (isScrolledFlow()) return
         if (isNavigating) return
+        if (!canProceedNavigation()) return
         isNavigating = true
         if (deltaX < 0) navigateRight()
         else navigateLeft()
@@ -171,6 +178,7 @@ export function useFoliateInput(
     doc.addEventListener(
       'mousedown',
       () => {
+        if (longHoldTimeout) clearTimeout(longHoldTimeout)
         longHoldTimeout = setTimeout(() => {
           longHoldTimeout = null
         }, 500)
@@ -253,12 +261,18 @@ export function useFoliateInput(
       if (isNavigating) return
 
       const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0
+      const y = e.data.clientY
+      const height = window.innerHeight
 
-      if (currentZone === 'left' && !isMobile) {
+      if (!isMobile && (y < 64 || y > height - 64)) {
+        onMiddleTap?.()
+      } else if (currentZone === 'left' && !isMobile) {
+        if (!canProceedNavigation()) return
         isNavigating = true
         navigateLeft()
         setTimeout(() => (isNavigating = false), 300)
       } else if (currentZone === 'right' && !isMobile) {
+        if (!canProceedNavigation()) return
         isNavigating = true
         navigateRight()
         setTimeout(() => (isNavigating = false), 300)
@@ -268,38 +282,102 @@ export function useFoliateInput(
     }, DOUBLE_CLICK_MS)
   }
 
+  function isInteractive(el: HTMLElement | null): boolean {
+    if (!el) return false
+    if (typeof el.closest === 'function') {
+      if (el.closest('[role="menu"]') || el.closest('[role="dialog"]') || el.closest('.bg-card')) {
+        return true
+      }
+    }
+    let current: HTMLElement | null = el
+    while (current && current !== document.body) {
+      const tagName = typeof current.tagName === 'string' ? current.tagName.toLowerCase() : ''
+      if (tagName === 'button' || tagName === 'input' || tagName === 'select' || tagName === 'a' || tagName === 'textarea') {
+        return true
+      }
+      if (typeof current.getAttribute === 'function') {
+        const role = current.getAttribute('role')
+        if (role === 'button' || role === 'link' || role === 'checkbox' || role === 'switch') {
+          return true
+        }
+      }
+      if (current.classList && typeof current.classList.contains === 'function') {
+        if (current.classList.contains('cursor-pointer')) {
+          return true
+        }
+      }
+      current = current.parentElement
+    }
+    return false
+  }
+
+  function handleParentClick(e: MouseEvent) {
+    if (Date.now() - lastTouchTime < 500) return
+    const view = getViewEl() as unknown as HTMLElement | null
+    if (!view) return
+
+    const target = e.target as HTMLElement | null
+    if (!target) return
+
+    const isInsideView = target === view || (view.contains && typeof view.contains === 'function' && view.contains(target))
+    const headerEl = document.querySelector('header')
+    const footerEl = document.querySelector('footer')
+    const isInsideHeader = headerEl && typeof headerEl.contains === 'function' && headerEl.contains(target)
+    const isInsideFooter = footerEl && typeof footerEl.contains === 'function' && footerEl.contains(target)
+
+    if (!isInsideView && !isInsideHeader && !isInsideFooter) return
+    if (isInteractive(target)) return
+
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0
+    if (!isMobile) {
+      const y = e.clientY
+      const height = window.innerHeight
+      if (y < 64 || y > height - 64) {
+        onMiddleTap?.()
+      }
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     const target = (e.composedPath?.()[0] || e.target) as HTMLElement | null
     if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable) return
     const view = getViewEl()
     if (!view) return
     if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      if (!canProceedNavigation()) return
       navigateLeft()
-      e.preventDefault()
     } else if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      if (!canProceedNavigation()) return
       navigateRight()
-      e.preventDefault()
     } else if (e.key === 'PageUp') {
-      navigatePrev()
       e.preventDefault()
+      if (!canProceedNavigation()) return
+      navigatePrev()
     } else if (e.key === 'PageDown') {
-      navigateNext()
       e.preventDefault()
+      if (!canProceedNavigation()) return
+      navigateNext()
     } else if (e.key === ' ' && e.shiftKey) {
+      e.preventDefault()
+      if (!canProceedNavigation()) return
       navigatePrev()
-      e.preventDefault()
     } else if (e.key === ' ') {
-      navigateNext()
       e.preventDefault()
+      if (!canProceedNavigation()) return
+      navigateNext()
     }
   }
 
   window.addEventListener('message', handleWindowMessage)
   document.addEventListener('keydown', handleKeydown)
+  document.addEventListener('click', handleParentClick, true)
 
   function cleanup() {
     window.removeEventListener('message', handleWindowMessage)
     document.removeEventListener('keydown', handleKeydown)
+    document.removeEventListener('click', handleParentClick, true)
   }
 
   return { attachIframeClicks, suppressNextTapNavigation, cleanup }

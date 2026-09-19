@@ -90,18 +90,21 @@ export class AuthorsRepository {
 
     const sortNameExpr = sql`COALESCE(${authors.sortName}, ${authors.name})`;
 
+    const trimmedQuery = params.q?.trim();
     const orderBy =
-      params.sort === 'bookCount'
-        ? this.orderByDirection(bookCountExpr, params.order)
-        : params.sort === 'lastAddedAt'
-          ? this.orderByDirection(lastAddedExpr, params.order)
-          : params.sort === 'lastEnrichedAt'
-            ? params.order === 'asc'
-              ? sql`${authors.lastEnrichedAt} ASC NULLS LAST`
-              : sql`${authors.lastEnrichedAt} DESC NULLS LAST`
-            : params.sort === 'sortName'
-              ? this.orderByDirection(sortNameExpr, params.order)
-              : this.orderByDirection(authors.name, params.order);
+      params.sort === 'relevance' && trimmedQuery
+        ? this.orderByDirection(searchRelevance(authors.name, trimmedQuery), params.order)
+        : params.sort === 'bookCount'
+          ? this.orderByDirection(bookCountExpr, params.order)
+          : params.sort === 'lastAddedAt'
+            ? this.orderByDirection(lastAddedExpr, params.order)
+            : params.sort === 'lastEnrichedAt'
+              ? params.order === 'asc'
+                ? sql`${authors.lastEnrichedAt} ASC NULLS LAST`
+                : sql`${authors.lastEnrichedAt} DESC NULLS LAST`
+              : params.sort === 'sortName'
+                ? this.orderByDirection(sortNameExpr, params.order)
+                : this.orderByDirection(authors.name, params.order);
 
     const having = params.minBookCount !== undefined ? sql`count(distinct ${books.id}) >= ${params.minBookCount}` : undefined;
 
@@ -569,7 +572,10 @@ export class AuthorsRepository {
     }
     const query = params.q?.trim();
     if (query) {
-      clauses.push(accentInsensitiveIlike(authors.name, buildSearchPattern(query)));
+      const contains = accentInsensitiveIlike(authors.name, buildSearchPattern(query));
+      clauses.push(
+        query.length >= 3 ? or(contains, sql`public.bookorbit_unaccent(${authors.name}) % public.bookorbit_unaccent(${query})`)! : contains,
+      );
     }
     if (params.hasPhoto !== undefined) {
       clauses.push(eq(authors.hasPhoto, params.hasPhoto));
@@ -592,4 +598,15 @@ export class AuthorsRepository {
   ) {
     return order === 'asc' ? asc(expression) : desc(expression);
   }
+}
+
+function searchRelevance(column: typeof authors.name, query: string): SQL {
+  const value = sql`lower(public.bookorbit_unaccent(COALESCE(${column}, '')))`;
+  const q = sql`lower(public.bookorbit_unaccent(${query}))`;
+  return sql`CASE
+    WHEN ${value} = ${q} THEN 1000
+    WHEN ${value} LIKE ${q} || '%' THEN 800
+    WHEN ${value} LIKE '%' || ${q} || '%' THEN 600
+    ELSE similarity(${value}, ${q}) * 400
+  END`;
 }

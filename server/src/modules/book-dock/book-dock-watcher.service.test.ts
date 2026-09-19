@@ -2,9 +2,8 @@ vi.mock('../scanner/lib/classify', () => ({
   isPrimaryFormat: vi.fn(),
 }));
 
-vi.mock('../scanner/lib/stability', () => ({
+vi.mock('../../common/utils/fs-stability.utils', () => ({
   waitForStability: vi.fn(),
-  waitForDirectoryStability: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('fs/promises', () => ({
@@ -24,8 +23,8 @@ vi.mock('chokidar', () => ({
 import { mkdir, readdir, realpath, stat, unlink } from 'fs/promises';
 import { watch } from 'chokidar';
 
+import { waitForStability } from '../../common/utils/fs-stability.utils';
 import { isPrimaryFormat } from '../scanner/lib/classify';
-import { waitForStability } from '../scanner/lib/stability';
 import { BookDockWatcherService } from './book-dock-watcher.service';
 
 function makeService(bookDockPath = '/data/book-dock') {

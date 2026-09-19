@@ -12,7 +12,10 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
 import { MetadataScoreModule } from '../metadata-score/metadata-score.module';
 import { NarratorModule } from '../narrator/narrator.module';
 import { UserBookNoteModule } from '../user-book-note/user-book-note.module';
+import { PositionConverterModule } from '../position-converter/position-converter.module';
 import { UserBookStatusModule } from '../user-book-status/user-book-status.module';
+import { AudiobookEbookProgressSyncService } from './audiobook-ebook-progress-sync.service';
+import { AudiolessEpubService } from './audioless-epub.service';
 import { BookReadService } from './book-read.service';
 import { BookQueryBuilder } from './book-query-builder.service';
 import { BookSortBuilder } from './book-sort-builder.service';
@@ -37,9 +40,19 @@ import { ReadingAttemptController } from './reading-attempt.controller';
     UserBookNoteModule,
     UserBookStatusModule,
     AchievementModule,
+    PositionConverterModule,
   ],
   controllers: [BookController, ReadingAttemptController],
-  providers: [BookService, BookRepository, BookReadService, BookSortBuilder, BookQueryBuilder, BookAuthorSortKeyBackfillService],
-  exports: [BookService, BookReadService, BookQueryBuilder],
+  providers: [
+    BookService,
+    BookRepository,
+    BookReadService,
+    BookSortBuilder,
+    BookQueryBuilder,
+    BookAuthorSortKeyBackfillService,
+    AudiobookEbookProgressSyncService,
+    AudiolessEpubService,
+  ],
+  exports: [BookService, BookReadService, BookQueryBuilder, AudiolessEpubService],
 })
 export class BookModule {}

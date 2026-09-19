@@ -112,6 +112,17 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     metadataScore: null,
     readStatus: null,
     audioMetadata: null,
+    readAloudSync: {
+      mode: 'auto',
+      state: 'unavailable',
+      unavailableReason: 'no_media_overlay_epub',
+      overlayFileId: null,
+      audioDurationSeconds: null,
+      overlayDurationSeconds: null,
+      durationDifferenceSeconds: null,
+      durationDifferenceRatio: null,
+      koreaderDownloadAvailable: false,
+    },
     formatPriority: [],
     comicMetadata: null,
     customMetadata: [],
@@ -511,6 +522,55 @@ describe('DetailsTab - present state', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('>99%')
+  })
+
+  it('shows EPUB3 narration progress when only media-overlay position is stored', async () => {
+    vi.mocked(api).mockImplementation(async (input) => {
+      if (input === '/api/v1/books/1/progress') {
+        return makeApiResponse([
+          {
+            fileId: 101,
+            cfi: null,
+            pageNumber: null,
+            percentage: 0,
+            positionSeconds: 900,
+            mediaOverlayFragment: 'OPS/chapter.xhtml#s12',
+            mediaOverlaySectionIndex: 3,
+            updatedAt: null,
+          },
+        ])
+      }
+      if (input === '/api/v1/collections?bookIds=1') {
+        return makeApiResponse([])
+      }
+      return makeApiResponse({}, false)
+    })
+
+    const wrapper = mount(DetailsTab, {
+      props: {
+        book: makeBook({
+          files: [
+            {
+              id: 101,
+              format: 'epub',
+              role: 'primary',
+              sizeBytes: 1234,
+              absolutePath: '/books/test.epub',
+              createdAt: '2024-01-01T00:00:00.000Z',
+              filename: 'test.epub',
+              durationSeconds: null,
+              mediaOverlay: { available: true, durationSeconds: 3600 },
+            },
+          ],
+        }),
+      },
+      global: globalStubs,
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('epub')
+    expect(wrapper.text()).toContain('25%')
   })
 
   it('resets a single file progress row from the inline control', async () => {

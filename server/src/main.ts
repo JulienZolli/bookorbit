@@ -21,6 +21,7 @@ import {
   buildHelmetOptions,
   buildEmptyJsonBodyStream,
   registerConditionalHsts,
+  registerDeclaredBodyLimits,
   registerEmptyBodyContentTypeParser,
   shouldInjectEmptyJsonBody,
   shouldServeSpaFallback,
@@ -38,6 +39,8 @@ async function bootstrap() {
   const fastify = adapter.getInstance();
   // Nest adds originalUrl to the raw request, but these helpers only use standard Fastify APIs.
   const standardFastify = fastify as unknown as FastifyInstance;
+
+  registerDeclaredBodyLimits(fastify);
 
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
   fastify.addHook('preParsing', (request, _reply, payload, done) => {

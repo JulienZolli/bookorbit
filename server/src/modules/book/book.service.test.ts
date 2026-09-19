@@ -125,10 +125,13 @@ function makeService(overrides: { bookMetadataLockService?: unknown } = {}) {
     findKoboSnapshotStates: vi.fn(),
     findKoboSyncCollectionNamesForBook: vi.fn(),
     findFileById: vi.fn(),
+    updateBookFile: vi.fn().mockResolvedValue(undefined),
     findLibraryIdByBookId: vi.fn(),
     findProgress: vi.fn(),
     findProgressByBook: vi.fn(),
     upsertProgress: vi.fn(),
+    findReadAloudSyncMode: vi.fn().mockResolvedValue('auto'),
+    upsertReadAloudSyncMode: vi.fn(),
     syncKoboReadingStateFromProgress: vi.fn(),
     isKoboTwoWayProgressSyncEnabled: vi.fn().mockResolvedValue(false),
     clearFileProgress: vi.fn(),
@@ -2344,6 +2347,9 @@ describe('BookService', () => {
           fileId: 10,
           cfi: null,
           pageNumber: null,
+          positionSeconds: null,
+          mediaOverlayFragment: null,
+          mediaOverlaySectionIndex: null,
           percentage: null,
           koboLocationSource: null,
           koboLocationType: null,
@@ -2356,6 +2362,9 @@ describe('BookService', () => {
           fileId: 11,
           cfi: 'epubcfi(/6/4)',
           pageNumber: 12,
+          positionSeconds: 84,
+          mediaOverlayFragment: 'OEBPS/chapter.xhtml#s4',
+          mediaOverlaySectionIndex: 2,
           percentage: 45,
           koboLocationSource: 'OEBPS/chapter.xhtml',
           koboLocationType: 'KoboSpan',
@@ -2374,6 +2383,9 @@ describe('BookService', () => {
           fileId: 10,
           cfi: null,
           pageNumber: null,
+          positionSeconds: null,
+          mediaOverlayFragment: null,
+          mediaOverlaySectionIndex: null,
           percentage: 0,
           koboLocationSource: null,
           koboLocationType: null,
@@ -2386,6 +2398,9 @@ describe('BookService', () => {
           fileId: 11,
           cfi: 'epubcfi(/6/4)',
           pageNumber: 12,
+          positionSeconds: 84,
+          mediaOverlayFragment: 'OEBPS/chapter.xhtml#s4',
+          mediaOverlaySectionIndex: 2,
           percentage: 45,
           koboLocationSource: 'OEBPS/chapter.xhtml',
           koboLocationType: 'KoboSpan',
@@ -2410,7 +2425,23 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 7, { percentage: 25, positionSeconds: 900 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 7, null, null, 25, 900, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(
+        user.id,
+        7,
+        null,
+        null,
+        25,
+        900,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        expect.any(Date),
+      );
     });
 
     it('passes null positionSeconds when not provided in DTO', async () => {
@@ -2424,7 +2455,23 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 8, { percentage: 50 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(
+        user.id,
+        8,
+        null,
+        null,
+        50,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        expect.any(Date),
+      );
       expect(libraryService.findOne).toHaveBeenCalledWith(2);
       expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 11, 50, 3, 97);
     });
@@ -2442,7 +2489,23 @@ describe('BookService', () => {
 
       await expect(service.saveProgress(user.id, 8, { percentage: 50 } as never, user)).resolves.toBeUndefined();
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, null, null, null, null, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(
+        user.id,
+        8,
+        null,
+        null,
+        50,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        expect.any(Date),
+      );
       expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 11, 50, 3, 97);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[book.progress_status_update] [fail] userId=1 bookId=11 libraryId=2'));
       warnSpy.mockRestore();
@@ -2491,6 +2554,89 @@ describe('BookService', () => {
 
       expect(bookRepo.isKoboTwoWayProgressSyncEnabled).toHaveBeenCalledWith(user.id);
       expect(bookRepo.syncKoboReadingStateFromProgress).not.toHaveBeenCalled();
+    });
+
+    describe('narration writes', () => {
+      const narrationSetup = (previousPercentage: number | null) => {
+        const made = makeService();
+        const user = makeUser({ permissions: [Permission.KoboSync] });
+        made.bookRepo.findFileById.mockResolvedValue({ id: 8, bookId: 11, libraryId: 2, absolutePath: '/books/b.epub', format: 'epub' });
+        made.bookRepo.upsertProgress.mockResolvedValue(undefined);
+        made.bookRepo.isKoboTwoWayProgressSyncEnabled.mockResolvedValue(true);
+        made.bookRepo.syncKoboReadingStateFromProgress.mockResolvedValue(true);
+        made.bookRepo.findProgress.mockResolvedValue(
+          previousPercentage == null ? null : { percentage: previousPercentage, cfi: 'epubcfi(/6/40)', pageNumber: null },
+        );
+        made.libraryService.verifyUserAccess.mockResolvedValue(undefined);
+        made.libraryService.findOne = vi.fn().mockResolvedValue({ readingThreshold: 4, markAsFinishedPercentComplete: 90 });
+        return { ...made, user };
+      };
+
+      // The read-along resume that started all this: opening at a narration marker 2% in while
+      // the reader had reached 32% by eye.
+      it('keeps the stored text position when the narration marker sits behind it', async () => {
+        const { service, bookRepo, user } = narrationSetup(32);
+
+        await service.saveProgress(
+          user.id,
+          8,
+          {
+            percentage: 2.43,
+            source: 'narration',
+            positionSeconds: 44.3,
+            mediaOverlayFragment: 'split_007.html#s4',
+            mediaOverlaySectionIndex: 8,
+          } as never,
+          user,
+        );
+
+        const [, , cfi, , percentage, , , , , , , , , narration, textUpdatedAt] = bookRepo.upsertProgress.mock.calls[0] as unknown[];
+        expect(percentage).toBe(32);
+        expect(cfi).toBe('epubcfi(/6/40)');
+        expect(narration).toEqual({ percentage: 2.43, updatedAt: expect.any(Date) });
+        expect(textUpdatedAt).toBeNull();
+      });
+
+      it('carries the text position forward when the narration passes it', async () => {
+        const { service, bookRepo, user } = narrationSetup(32);
+
+        await service.saveProgress(user.id, 8, { percentage: 55, source: 'narration', positionSeconds: 900 } as never, user);
+
+        const [, , , , percentage, , , , , , , , , narration, textUpdatedAt] = bookRepo.upsertProgress.mock.calls[0] as unknown[];
+        expect(percentage).toBe(55);
+        expect(narration).toEqual({ percentage: 55, updatedAt: expect.any(Date) });
+        expect(textUpdatedAt).toEqual(expect.any(Date));
+      });
+
+      it('does not mirror a narration marker that stayed put to Kobo or the read status', async () => {
+        const { service, bookRepo, userBookStatusService, user } = narrationSetup(32);
+
+        await service.saveProgress(user.id, 8, { percentage: 2.43, source: 'narration' } as never, user);
+
+        expect(bookRepo.syncKoboReadingStateFromProgress).toHaveBeenCalledWith(user.id, 8, 32, null, null, null, null);
+        expect(userBookStatusService.autoUpdate).toHaveBeenCalledWith(user.id, 11, 32, 4, 90);
+      });
+
+      it('treats a narration write on a file with no stored position as progress', async () => {
+        const { service, bookRepo, user } = narrationSetup(null);
+
+        await service.saveProgress(user.id, 8, { percentage: 3, source: 'narration' } as never, user);
+
+        const [, , , , percentage] = bookRepo.upsertProgress.mock.calls[0] as unknown[];
+        expect(percentage).toBe(3);
+      });
+
+      // Turning back a page is reading, and the text write is the one that speaks for it.
+      it('still lets a text write move the position backwards', async () => {
+        const { service, bookRepo, user } = narrationSetup(32);
+
+        await service.saveProgress(user.id, 8, { percentage: 5, cfi: 'epubcfi(/6/8)' } as never, user);
+
+        const [, , cfi, , percentage, , , , , , , , , narration] = bookRepo.upsertProgress.mock.calls[0] as unknown[];
+        expect(percentage).toBe(5);
+        expect(cfi).toBe('epubcfi(/6/8)');
+        expect(narration).toBeNull();
+      });
     });
 
     it('does not mirror EPUB percentage to Kobo state without Kobo sync permission', async () => {

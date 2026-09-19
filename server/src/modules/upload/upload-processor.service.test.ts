@@ -4,7 +4,7 @@ vi.mock('../scanner/lib/hash', () => ({ computeFileHash: vi.fn() }));
 import { InternalServerErrorException } from '@nestjs/common';
 import { stat } from 'fs/promises';
 import { computeFileHash } from '../scanner/lib/hash';
-import { books, bookFiles, bookMetadata } from '../../db/schema';
+import { books, bookFiles, bookMetadata, uploadSessions } from '../../db/schema';
 import { UploadProcessorService } from './upload-processor.service';
 
 const mockStat = stat as MockedFunction<typeof stat>;
@@ -27,6 +27,8 @@ describe('UploadProcessorService', () => {
   const insertBookFilesOnConflict = vi.fn();
   const updateBooksSet = vi.fn();
   const updateBooksWhere = vi.fn();
+  const updateSessionSet = vi.fn();
+  const updateSessionWhere = vi.fn();
 
   const selectFrom = vi.fn();
   const selectWhere = vi.fn();
@@ -49,6 +51,7 @@ describe('UploadProcessorService', () => {
     }),
     update: vi.fn((table: unknown) => {
       if (table === books) return { set: updateBooksSet };
+      if (table === uploadSessions) return { set: updateSessionSet };
       throw new Error('unexpected table');
     }),
     delete: vi.fn((table: unknown) => {
@@ -79,6 +82,8 @@ describe('UploadProcessorService', () => {
     updateBooksSet.mockReturnValue({ where: updateBooksWhere });
     updateBooksWhere.mockResolvedValue(undefined);
     deleteWhere.mockResolvedValue(undefined);
+    updateSessionSet.mockReturnValue({ where: updateSessionWhere });
+    updateSessionWhere.mockResolvedValue(undefined);
 
     orchestrator.scheduleImportedBooksIfEligible.mockResolvedValue(0);
 
@@ -110,6 +115,14 @@ describe('UploadProcessorService', () => {
     );
     expect(updateBooksSet).toHaveBeenCalledWith({ primaryFileId: 420 });
     expect(orchestrator.scheduleImportedBooksIfEligible).not.toHaveBeenCalled();
+  });
+
+  it('persists the session result in the same transaction as the book record', async () => {
+    await service.createBookRecord(1, 2, '/folder', '/folder/book.epub', 'book/book.epub', 'epub', 12345, { uploadSessionId: 'session-id' });
+
+    expect(tx.update).toHaveBeenCalledWith(uploadSessions);
+    expect(updateSessionSet).toHaveBeenCalledWith(expect.objectContaining({ resultBookId: 42 }));
+    expect(updateSessionWhere).toHaveBeenCalled();
   });
 
   it('adds a file to an existing book when the folder path already exists in the library', async () => {
@@ -326,8 +339,9 @@ describe('UploadProcessorService', () => {
       expect(orchestrator.scheduleImportedBooksIfEligible).not.toHaveBeenCalled();
     });
 
-    it('extractMetadataAsync handles supported format boundary', () => {
+    it('extractMetadataAsync handles supported format boundary', async () => {
       serviceNoOrch.extractMetadataAsync(1, '/tmp/file.azw', 'azw');
+      await new Promise((resolve) => setImmediate(resolve));
 
       expect(metadataService.extractAndSave).toHaveBeenCalledWith(1, '/tmp/file.azw', 'azw');
     });

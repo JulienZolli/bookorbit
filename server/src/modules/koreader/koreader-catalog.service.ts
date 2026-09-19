@@ -3,7 +3,7 @@ import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import { basename } from 'path';
 
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import type { FastifyReply } from 'fastify';
 
@@ -41,6 +41,7 @@ import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pag
 import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { RequestUser } from '../../common/types/request-user';
 import { contentDispositionHeader } from '../../common/utils/content-disposition.utils';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { storageConfig } from '../../config/config';
 import { BookReadService } from '../book/book-read.service';
 import { BookService } from '../book/book.service';
@@ -136,6 +137,8 @@ const ROOT_SECTIONS: KoreaderCatalogEntry[] = [
 
 @Injectable()
 export class KoreaderCatalogService {
+  private readonly logger = new Logger(KoreaderCatalogService.name);
+
   constructor(
     private readonly opdsBookService: OpdsBookService,
     private readonly bookService: BookService,
@@ -499,6 +502,26 @@ export class KoreaderCatalogService {
       throw new NotFoundException('File not found');
     }
 
+    if (file.format?.toLowerCase() === 'epub' && file.mediaOverlayAvailable === true) {
+      try {
+        const result = await this.bookService.createAudiolessEpubDownload(fileId, user, { linkKoreaderHash: true });
+        const stream = createReadStream(result.path);
+        stream.once('close', () => {
+          void result.cleanup();
+        });
+        reply.header('Content-Disposition', contentDispositionHeader('attachment', result.filename, 'download'));
+        reply.header('Content-Length', result.size);
+        reply.type('application/epub+zip');
+        reply.send(stream);
+        return;
+      } catch (err) {
+        const errorClass = err instanceof Error ? err.name : 'Error';
+        const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+        this.logger.warn(
+          `[koreader.stream_file] [fail] fileId=${fileId} userId=${user.id} errorClass=${errorClass} error="${errorMessage}" - audioless rebuild failed, serving original EPUB`,
+        );
+      }
+    }
     const format = this.normalizeFormat(file.format);
     const filename = await this.bookService.resolveDownloadFilename({
       bookId: file.bookId,

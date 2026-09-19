@@ -91,7 +91,7 @@ export class CatalogRepository {
     return this.db
       .select({ name: collections.name })
       .from(collections)
-      .where(and(eq(collections.userId, userId), accentInsensitiveIlike(collections.name, pattern)))
+      .where(and(eq(collections.userId, userId), eq(collections.mediaType, 'books'), accentInsensitiveIlike(collections.name, pattern)))
       .orderBy(collections.name)
       .limit(COLLECTION_SEARCH_LIMIT);
   }

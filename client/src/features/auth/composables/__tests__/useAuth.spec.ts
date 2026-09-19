@@ -127,4 +127,20 @@ describe('useAuth', () => {
     expect(setAccessTokenMock).toHaveBeenCalledWith(null)
     expect(routerPushMock).toHaveBeenCalledWith('/login')
   })
+  it('finishes local sign-out when the server is unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockRejectedValue(new TypeError('network unavailable')))
+    const { useAuth } = await import('../useAuth')
+    await expect(useAuth().logout()).resolves.toBeUndefined()
+    expect(setAccessTokenMock).toHaveBeenCalledWith(null)
+    expect(routerPushMock).toHaveBeenCalledWith('/login')
+  })
+
+  it('uses the local login route after successful logout', async () => {
+    const readBody = vi.fn<() => unknown>()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue({ ok: true, json: readBody } as unknown as Response))
+    const { useAuth } = await import('../useAuth')
+    await useAuth().logout()
+    expect(readBody).not.toHaveBeenCalled()
+    expect(routerPushMock).toHaveBeenCalledWith('/login')
+  })
 })

@@ -3,6 +3,7 @@ import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestj
 import { SQL, and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import type { GroupRule } from '@bookorbit/types';
 import { DB } from '../../../db/db.module';
 import * as schema from '../../../db/schema';
 import { mapWithConcurrency } from '../../../common/utils/batch.utils';
@@ -666,8 +667,10 @@ export class KoboSyncService {
   }
 
   private async buildTagItems(userId: number, eligibleIds: Set<number>, smartScopeMatchCache: SmartScopeMatchCache): Promise<unknown[]> {
+    // Book collections only. A Kobo tag is a set of book entitlements, so a podcast collection
+    // would emit an empty tag; the schema also refuses the sync flag on one.
     const collections = await this.db.query.collections.findMany({
-      where: and(eq(schema.collections.userId, userId), eq(schema.collections.syncToKobo, true)),
+      where: and(eq(schema.collections.userId, userId), eq(schema.collections.syncToKobo, true), eq(schema.collections.mediaType, 'books')),
     });
 
     const collectionIds = collections.map((c) => c.id);
@@ -755,10 +758,12 @@ export class KoboSyncService {
         // A scope without a filter matches zero books everywhere else in the app
         // (SmartScopeService.findAll/prepareBooksQuery), so mirror that here rather
         // than syncing the whole library for an unconfigured scope.
-        if (!scope.filter) {
+        // Kobo holds books. The scope query already excludes podcast scopes, whose rules are not a
+        // GroupRule; this second check keeps that guarantee local to where the filter is read.
+        if (!scope.filter || scope.mediaType !== 'books') {
           return [scope.id, { name: scope.name, bookIds: [], where: undefined }];
         }
-        const where = this.queryBuilder.buildWhere(scope.filter, { accessibleLibraryIds: libraryIds, userId, timeZone });
+        const where = this.queryBuilder.buildWhere(scope.filter as GroupRule, { accessibleLibraryIds: libraryIds, userId, timeZone });
         const bookIds = await this.fetchSmartScopeBookIds(where);
         return [scope.id, { name: scope.name, bookIds, where }];
       }),

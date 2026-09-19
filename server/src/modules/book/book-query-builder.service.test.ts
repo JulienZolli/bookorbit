@@ -786,9 +786,15 @@ describe('buildQuickSearch', () => {
 
     expect(result).toMatchObject({ type: 'or' });
     expect(result.clauses).toHaveLength(5);
-    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
+    expect(result.clauses[0]).toMatchObject({
+      type: 'or',
+      clauses: [expect.objectContaining({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' }), expect.objectContaining({ type: 'sql' })],
+    });
     expect(result.clauses[1]).toMatchObject({ type: 'sql' });
-    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
+    expect(result.clauses[2]).toMatchObject({
+      type: 'or',
+      clauses: [expect.objectContaining({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' }), expect.objectContaining({ type: 'sql' })],
+    });
     expect(result.clauses[3]).toMatchObject({ type: 'sql' });
     expect(result.clauses[4]).toMatchObject({ type: 'sql' });
   });
@@ -798,8 +804,8 @@ describe('buildQuickSearch', () => {
 
     const result = builder.buildQuickSearch('50% off') as any;
 
-    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
-    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
+    expect(result.clauses[0].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
+    expect(result.clauses[2].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
   });
 
   it('escapes underscore in q', () => {
@@ -807,7 +813,16 @@ describe('buildQuickSearch', () => {
 
     const result = builder.buildQuickSearch('book_one') as any;
 
-    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%book\\_one%' });
+    expect(result.clauses[0].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%book\\_one%' });
+  });
+
+  it('does not add fuzzy predicates for two-character queries', () => {
+    const { builder } = makeBuilder();
+
+    const result = builder.buildQuickSearch('du') as any;
+
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%du%' });
+    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%du%' });
   });
 
   it('calls db.select three times for author, series membership, and narrator exists subqueries', () => {

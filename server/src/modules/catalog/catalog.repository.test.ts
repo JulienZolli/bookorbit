@@ -160,6 +160,7 @@ describe('CatalogRepository', () => {
     await expect(repository.searchCollections(42, ' sci_fi% ')).resolves.toEqual([{ name: 'Favorites' }]);
 
     expect(eq).toHaveBeenCalledWith(collections.userId, 42);
+    expect(eq).toHaveBeenCalledWith(collections.mediaType, 'books');
     expect(accentInsensitiveIlike).toHaveBeenCalledWith(collections.name, '%sci\\_fi\\%%');
     expect(and).toHaveBeenCalled();
     expect(selectChain.from).toHaveBeenCalledWith(collections);

@@ -5,7 +5,7 @@ import { WS_UNAUTHORIZED_EVENT } from '../../common/utils/ws-auth.utils';
 
 function makeGateway() {
   const jwtService = { verify: vi.fn() };
-  const authService = { validateUser: vi.fn() };
+  const authService = { validateSessionUser: vi.fn() };
   const queueRepo = { getStatusSummary: vi.fn() };
   const enrichmentConfig = { isPaused: vi.fn() };
   const session = { getSnapshot: vi.fn() };
@@ -120,7 +120,7 @@ describe('AuthorEnrichmentGateway', () => {
     const { gateway, jwtService, authService, queueRepo, enrichmentConfig, session } = makeGateway();
     const user = { id: 11, isSuperuser: false, permissions: [Permission.ManageMetadataConfig] };
     jwtService.verify.mockReturnValue({ sub: 11, ver: 2 });
-    authService.validateUser.mockResolvedValue(user);
+    authService.validateSessionUser.mockResolvedValue(user);
     queueRepo.getStatusSummary.mockResolvedValue({ queued: 3, processing: 1, rateLimited: 0, failed: 0, latestFailureAt: null, done: 2, total: 6 });
     enrichmentConfig.isPaused.mockResolvedValue(true);
     session.getSnapshot.mockReturnValue({ sessionTotal: 6, sessionDone: 2, sessionFailed: 1, currentItemName: 'Alice' });
@@ -133,7 +133,7 @@ describe('AuthorEnrichmentGateway', () => {
 
     await gateway.handleConnection(client);
 
-    expect(authService.validateUser).toHaveBeenCalledWith(11, 2, 'legacy');
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(11, 2, 'legacy', undefined);
     expect(client.emit).toHaveBeenCalledWith(AUTHOR_ENRICHMENT_STATUS_EVENT, {
       queued: 3,
       processing: 1,
@@ -154,7 +154,7 @@ describe('AuthorEnrichmentGateway', () => {
   it('handleConnection rejects connected users without enrichment-status permission', async () => {
     const { gateway, jwtService, authService } = makeGateway();
     jwtService.verify.mockReturnValue({ sub: 7, ver: 1 });
-    authService.validateUser.mockResolvedValue({ id: 7, isSuperuser: false, permissions: [] });
+    authService.validateSessionUser.mockResolvedValue({ id: 7, isSuperuser: false, permissions: [] });
     const client = {
       id: 'sock-3',
       handshake: { auth: { token: 'jwt' } },

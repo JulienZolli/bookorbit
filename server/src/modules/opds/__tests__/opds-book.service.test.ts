@@ -265,7 +265,7 @@ describe('OpdsBookService', () => {
   });
 
   it('applies text search inside smartScope when q is provided', async () => {
-    const { service } = makeService([[{ id: 3, userId: 7, isPublic: false, filter: null }]]);
+    const { service } = makeService([[{ id: 3, userId: 7, mediaType: 'books', isPublic: false, filter: null }]]);
     const privateService = testable(service);
     const searchSpy = vi.spyOn(privateService, 'buildCatalogSearchClause');
 
@@ -276,7 +276,7 @@ describe('OpdsBookService', () => {
   });
 
   it('omits text search clause inside smartScope when q is absent', async () => {
-    const { service } = makeService([[{ id: 3, userId: 7, isPublic: false, filter: null }]]);
+    const { service } = makeService([[{ id: 3, userId: 7, mediaType: 'books', isPublic: false, filter: null }]]);
     const privateService = testable(service);
     const searchSpy = vi.spyOn(privateService, 'buildCatalogSearchClause');
 
@@ -286,15 +286,23 @@ describe('OpdsBookService', () => {
   });
 
   it('returns no smartScope books when smartScope is missing or private to another user', async () => {
-    const { service } = makeService([[], [{ id: 5, userId: 99, isPublic: false, filter: null }]]);
+    const { service } = makeService([[], [{ id: 5, userId: 99, mediaType: 'books', isPublic: false, filter: null }]]);
     const privateService = testable(service);
 
     await expect(privateService.buildSmartScopeWhere(7, 5, [1])).resolves.toBeNull();
     await expect(privateService.buildSmartScopeWhere(7, 5, [1])).resolves.toBeNull();
   });
 
+  it('returns no smartScope books for a podcast scope, whose rules are not a book rule tree', async () => {
+    const { service, queryBuilder } = makeService([[{ id: 11, userId: 7, mediaType: 'podcasts', isPublic: false, filter: { filter: 'unplayed' } }]]);
+    const privateService = testable(service);
+
+    await expect(privateService.buildSmartScopeWhere(7, 11, [1])).resolves.toBeNull();
+    expect(queryBuilder.buildWhere).not.toHaveBeenCalled();
+  });
+
   it('builds smartScope filters and delegates smartScope pagination', async () => {
-    const { service, queryBuilder } = makeService([[{ id: 9, userId: 7, isPublic: false, filter: { op: 'and' } }]], {
+    const { service, queryBuilder } = makeService([[{ id: 9, userId: 7, mediaType: 'books', isPublic: false, filter: { op: 'and' } }]], {
       buildWhere: vi.fn().mockReturnValue({ kind: 'where' }),
     });
     const privateService = testable(service);

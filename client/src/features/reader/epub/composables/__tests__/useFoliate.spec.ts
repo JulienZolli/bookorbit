@@ -280,4 +280,20 @@ describe('useFoliate.open', () => {
     expect(onAnnotationClick).toHaveBeenCalledWith('epubcfi(/6/4)', expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }))
     expect(inputMock.suppressNextTapNavigation.mock.invocationCallOrder[0]!).toBeLessThan(onAnnotationClick.mock.invocationCallOrder[0]!)
   })
+
+  it('prefers media-overlay fragment when requested', async () => {
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 1, 'epub', {
+      cfi: 'epubcfi(/6/4!)',
+      fallbackFraction: 0.75,
+      mediaOverlayFragment: 'OPS/ch1.xhtml#s12',
+      mediaOverlaySectionIndex: 2,
+      preferMediaOverlay: true,
+    })
+
+    expect(mockGoTo).toHaveBeenCalledWith('OPS/ch1.xhtml#s12')
+    expect(mockGoTo).not.toHaveBeenCalledWith('epubcfi(/6/4!)')
+    expect(mockGoToFraction).not.toHaveBeenCalled()
+  })
 })

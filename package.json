@@ -43,6 +43,8 @@
     "coverage:server": "pnpm --filter server test:cov",
     "coverage:client": "pnpm --filter client test:cov --run",
     "db:up": "docker compose -f docker-compose.dev.yml up -d --wait",
+    "tts:up": "docker compose -f docker-compose.dev.yml --profile tts up -d --wait kokoro",
+    "tts:down": "docker compose -f docker-compose.dev.yml --profile tts stop kokoro",
     "prod:up": "docker compose up -d --wait",
     "prod:down": "docker compose down",
     "db:migrate": "pnpm --filter server db:migrate",

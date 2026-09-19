@@ -251,6 +251,7 @@ export type GroupRule = {
  * User-defined custom metadata fields are sortable too, as `CustomSortField`.
  */
 export type StaticSortField =
+  | "relevance"
   | "author"
   | "title"
   | "series"
@@ -289,6 +290,7 @@ export type SortField = StaticSortField | CustomSortField;
 
 /** Built-in sort fields only. Custom fields are resolved at runtime, not enumerable here. */
 export const SORT_FIELDS: StaticSortField[] = [
+  "relevance",
   "author",
   "title",
   "series",

@@ -59,6 +59,18 @@ export class UpdateLibraryDto {
   @IsNotEmpty({ each: true })
   folders?: string[];
 
+  /** Podcast-only: roots holding podcast folders the user already has. Never written to. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @IsNotEmpty({ each: true })
+  localFolders?: string[];
+
+  /** Podcast-only: automatically discover changes beneath local podcast roots. */
+  @IsOptional()
+  @IsBoolean()
+  watchLocalFolders?: boolean;
+
   @IsOptional()
   @IsIn(LIBRARY_COVER_ASPECT_RATIOS)
   coverAspectRatio?: CoverAspectRatio;

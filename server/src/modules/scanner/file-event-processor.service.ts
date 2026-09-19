@@ -7,6 +7,7 @@ import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY } from './lib/classify';
 import { ScannerRepository } from './scanner.repository';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 
 export type FileEventResult =
   | { type: 'book-missing'; libraryId: number; bookIds: number[] }
@@ -25,6 +26,15 @@ export class FileEventProcessorService {
   private readonly logger = new Logger(FileEventProcessorService.name);
 
   constructor(private readonly scannerRepo: ScannerRepository) {}
+
+  private async inspectMediaOverlayFields(absolutePath: string, format: string | null) {
+    return inspectEpubMediaOverlayFields(absolutePath, format, (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[scanner.file_event.media_overlay_capability] [fail] path="${sanitizeLogValue(absolutePath)}" errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - EPUB media-overlay inspection failed`,
+      );
+    });
+  }
 
   async handleUnlink(absolutePath: string, scopeLibraryId?: number): Promise<FileEventResult> {
     const row = await this.scannerRepo.findBookFileByAbsolutePath(absolutePath, scopeLibraryId);
@@ -106,7 +116,11 @@ export class FileEventProcessorService {
       // Check the file's own book first before searching for any missing book
       const ownBook = await this.scannerRepo.findBookById(existing.file.bookId);
       if (ownBook?.status === 'missing') {
-        await this.scannerRepo.updateBookFile(existing.file.id, { ...this.statToFileInfo(fileStat), relPath: currentRelPath });
+        await this.scannerRepo.updateBookFile(existing.file.id, {
+          ...this.statToFileInfo(fileStat),
+          relPath: currentRelPath,
+          ...(await this.inspectMediaOverlayFields(absolutePath, format)),
+        });
         await this.refreshPrimaryFile(ownBook.id, existing.libraryId);
         await this.scannerRepo.markBooksAsPresent([ownBook.id]);
         this.logger.log(
@@ -127,7 +141,11 @@ export class FileEventProcessorService {
         return { type: 'noop' };
       }
 
-      await this.scannerRepo.updateBookFile(existing.file.id, { ...this.statToFileInfo(fileStat), relPath: currentRelPath });
+      await this.scannerRepo.updateBookFile(existing.file.id, {
+        ...this.statToFileInfo(fileStat),
+        relPath: currentRelPath,
+        ...(await this.inspectMediaOverlayFields(absolutePath, format)),
+      });
       await this.refreshPrimaryFile(book.id, book.libraryId);
       await this.scannerRepo.markBooksAsPresent([book.id]);
       this.logger.log(
@@ -150,6 +168,7 @@ export class FileEventProcessorService {
         ...this.statToFileInfo(fileStat),
         format,
         role: 'content',
+        ...(await this.inspectMediaOverlayFields(absolutePath, format)),
       });
 
       await this.refreshPrimaryFile(book.id, book.libraryId);
@@ -178,6 +197,7 @@ export class FileEventProcessorService {
             ...this.statToFileInfo(fileStat),
             format,
             role: 'content',
+            ...(await this.inspectMediaOverlayFields(absolutePath, format)),
           });
           await this.refreshPrimaryFile(ownBook.id, ownBook.libraryId);
           await this.scannerRepo.markBooksAsPresent([ownBook.id]);
@@ -259,7 +279,10 @@ export class FileEventProcessorService {
     if (existingContent.length === 0) return { type: 'noop' };
 
     for (const file of existingContent) {
-      await this.scannerRepo.updateBookFile(file.id, this.statToFileInfo(file.stat));
+      await this.scannerRepo.updateBookFile(file.id, {
+        ...this.statToFileInfo(file.stat),
+        ...(await this.inspectMediaOverlayFields(file.absolutePath, file.format)),
+      });
     }
 
     // Use cached formatPriority when available
@@ -367,10 +390,13 @@ export class FileEventProcessorService {
       }
     }
 
+    const { format } = classifyFile(newAbsolutePath);
     await this.scannerRepo.updateBookFile(file.id, {
       absolutePath: newAbsolutePath,
       relPath: relative(libraryFolderPath, newAbsolutePath),
       ...this.statToFileInfo(fileStat),
+      format,
+      ...(await this.inspectMediaOverlayFields(newAbsolutePath, format)),
     });
 
     if (newFolderPath !== oldFolderPath) {

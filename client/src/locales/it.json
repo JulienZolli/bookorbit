@@ -5025,6 +5025,18 @@
       "seeAllLibraries": "Vedi tutte le biblioteche ({count})",
       "seeAllSmartScopes": "Vedi tutti i filtri intelligenti ({count})",
       "seeAllCollections": "Vedi tutte le collezioni ({count})",
+      "podcasts": "Podcasts",
+      "newPodcastLibrary": "New Podcast Library",
+      "noPodcastLibraries": "No podcast libraries yet",
+      "filterPodcastLibraries": "Filter podcast libraries",
+      "filterPodcastLibrariesPlaceholder": "Filter podcast libraries...",
+      "seeAllPodcastLibraries": "See all podcast libraries ({count})",
+      "queue": "Queue",
+      "mode": {
+        "books": "Books",
+        "podcasts": "Podcasts",
+        "switcherAria": "Switch between books and podcasts"
+      },
       "updateAvailable": "Aggiorna {version}",
       "zones": {
         "browse": "Sfoglia"
@@ -5077,6 +5089,8 @@
       "columnVisibilityHint": "Utilizza il pannello di visibilità delle colonne nell'intestazione della tabella per mostrare o nascondere le colonne.",
       "columnVisibilityMobileHint": "La visibilità delle colonne può essere gestita dall'intestazione della tabella.",
       "searchPlaceholder": "Cerca titolo, autore, serie, narratore...",
+      "clearSearch": "Clear search",
+      "closeSearch": "Close search",
       "mobileSearch": {
         "description": "Cerca elementi per titolo, autore, serie o narratore.",
         "done": "Fatto"
@@ -5091,6 +5105,7 @@
         "display": "Visualizzazione",
         "coverSize": "Dimensioni della copertina",
         "gridGap": "Divario della griglia",
+        "pixelValue": "{value} pixels",
         "showJumpRails": "Mostra i binari di salto",
         "columnsHint": "Utilizza il pannello di visibilità delle colonne nell'intestazione della tabella per mostrare o nascondere le colonne.",
         "coverShape": "Forma della copertina",
@@ -5120,6 +5135,11 @@
       "description": "Questo {entity} non esiste o è stato eliminato.",
       "goBack": "Torna indietro"
     },
+    "media": {
+      "volume": "Volume",
+      "mute": "Mute",
+      "unmute": "Unmute"
+    },
     "themePicker": {
       "light": "Luce",
       "dark": "Buio",
@@ -5145,7 +5165,8 @@
       "sort": {
         "custom": "Ordine personalizzato",
         "name": "Nome",
-        "bookCount": "Numero di libri"
+        "bookCount": "Numero di libri",
+        "showCount": "Show count"
       },
       "ascending": "Ascendente",
       "descending": "Discendente",
@@ -5154,7 +5175,9 @@
       "noMatches": "Nessuna corrispondenza",
       "noMatchesHint": "Prova con un altro termine di ricerca.",
       "bookCount": "Libri: {count}",
+      "showCount": "Shows: {count}",
       "librariesEmptyHint": "Crea una biblioteca per iniziare ad aggiungere libri.",
+      "podcastLibrariesEmptyHint": "Create a podcast library to start following shows.",
       "smartScopesEmptyHint": "I filtri intelligenti salvano un insieme di filtri che usi spesso.",
       "collectionsEmptyHint": "Le collezioni raggruppano i libri che scegli manualmente."
     }
@@ -5523,6 +5546,17 @@
       "sending": "Invio...",
       "queued": "{count, plural, =0 {nessuna email in coda} one {una e-mail in coda} other {# e-mail in coda} many {# e-mail in coda}}",
       "failed": "Impossibile inviare"
+    }
+  },
+  "errors": {
+    "network": "Could not reach BookOrbit. Check your connection, then try again.",
+    "codes": {
+      "PODCAST_LOCAL_NO_REFRESH": "This show has no feed, so there is nothing to refresh.",
+      "PODCAST_LOCAL_NO_DOWNLOAD": "This episode is one of your own files, so there is nothing to download. Your copy is already the only one.",
+      "PODCAST_LOCAL_FILE_NOT_REMOVABLE": "This episode is one of your own files, so BookOrbit will not delete it. Remove it from the folder yourself.",
+      "PODCAST_LOCAL_MEDIA_MISSING": "The only copy of this episode is no longer on disk, so it cannot be played.",
+      "PODCAST_LOCAL_FOLDER_EMPTY": "This folder holds no audio BookOrbit can import, so it cannot become a show.",
+      "PODCAST_STORAGE_FULL": "This podcast library is out of storage. Free some space or raise its quota, then try again. Files that belong to local shows are never removed to make room."
     }
   },
   "hardcover": {
@@ -7369,6 +7403,7 @@
   "titles": {
     "dashboard": "Cruscotto",
     "libraries": "Biblioteche",
+    "podcastLibraries": "Podcast Libraries",
     "opds": "OPDS",
     "koboSync": "Kobo Sincronizza",
     "koreaderSync": "KOReader Sincronizza",

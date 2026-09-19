@@ -2,7 +2,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia } from 'pinia'
 import { RouterLinkStub } from '@vue/test-utils'
-import type { BookReadingSession, BookReadingSessionStats, ReadingAttempt } from '@bookorbit/types'
+import type { BookDetail, BookReadingSession, BookReadingSessionStats, ReadingAttempt } from '@bookorbit/types'
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(),
@@ -31,7 +31,7 @@ vi.mock('@/components/ui/dropdown-menu', () => ({
 import ReadingLogTab from '../ReadingLogTab.vue'
 import ResetReadingStateDialog from '@/features/book/components/ResetReadingStateDialog.vue'
 
-function makeBook(overrides = {}) {
+function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
   return {
     id: 10,
     libraryId: 1,
@@ -67,11 +67,36 @@ function makeBook(overrides = {}) {
     metadataScore: null,
     readStatus: null,
     audioMetadata: null,
+    readAloudSync: {
+      mode: 'auto',
+      state: 'unavailable',
+      unavailableReason: 'no_media_overlay_epub',
+      overlayFileId: null,
+      audioDurationSeconds: null,
+      overlayDurationSeconds: null,
+      durationDifferenceSeconds: null,
+      durationDifferenceRatio: null,
+      koreaderDownloadAvailable: false,
+    },
     formatPriority: [],
     comicMetadata: null,
     customMetadata: [],
     lockedFields: [],
     collections: [],
+    ...overrides,
+  }
+}
+
+function makeBookFile(overrides: Partial<BookDetail['files'][number]> = {}): BookDetail['files'][number] {
+  return {
+    id: 1,
+    format: 'epub',
+    role: 'primary',
+    sizeBytes: 1,
+    absolutePath: '/book.epub',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    filename: 'book.epub',
+    durationSeconds: null,
     ...overrides,
   }
 }
@@ -262,17 +287,15 @@ describe('ReadingLogTab', () => {
 
   it('offers a format filter only when the book has more than one format', async () => {
     mocks.api.mockImplementation(routeApi({ sessions: [makeSession()] }))
-    const single = mountTab(
-      makeBook({ files: [{ id: 1, format: 'epub', bookId: 10, filePath: '/a.epub', fileName: 'a.epub', fileSize: 1, lastModified: null }] }),
-    )
+    const single = mountTab(makeBook({ files: [makeBookFile({ id: 1, format: 'epub', filename: 'a.epub', absolutePath: '/a.epub' })] }))
     await flushPromises()
     expect(single.find('select').exists()).toBe(false)
 
     const multiple = mountTab(
       makeBook({
         files: [
-          { id: 1, format: 'epub', bookId: 10, filePath: '/a.epub', fileName: 'a.epub', fileSize: 1, lastModified: null },
-          { id: 2, format: 'pdf', bookId: 10, filePath: '/a.pdf', fileName: 'a.pdf', fileSize: 1, lastModified: null },
+          makeBookFile({ id: 1, format: 'epub', filename: 'a.epub', absolutePath: '/a.epub' }),
+          makeBookFile({ id: 2, format: 'pdf', filename: 'a.pdf', absolutePath: '/a.pdf' }),
         ],
       }),
     )

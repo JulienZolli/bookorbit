@@ -180,4 +180,46 @@ describe('validateEnv', () => {
   it('rejects a relative migration import root', () => {
     expect(() => validateEnv({ ...BASE_ENV, MIGRATION_IMPORT_ROOT: './imports' })).toThrow('MIGRATION_IMPORT_ROOT must be an absolute path');
   });
+
+  it('accepts bounded podcast security and resource settings', () => {
+    expect(() =>
+      validateEnv({
+        ...BASE_ENV,
+        PODCAST_ENCRYPTION_KEY: '1234567890abcdef',
+        PODCAST_MAX_FEED_BYTES: String(100 * 1024 * 1024),
+        PODCAST_MAX_EPISODE_BYTES: String(20 * 1024 * 1024 * 1024),
+        PODCAST_MAX_CONCURRENT_DOWNLOADS: '32',
+        PODCAST_REQUEST_TIMEOUT_MS: String(10 * 60_000),
+        PODCAST_MAX_DOWNLOAD_DURATION_MS: String(24 * 60 * 60_000),
+      }),
+    ).not.toThrow();
+  });
+
+  it('allows the podcast encryption key to be omitted outside production', () => {
+    expect(() => validateEnv(BASE_ENV)).not.toThrow();
+    expect(() => validateEnv({ ...BASE_ENV, NODE_ENV: 'test' })).not.toThrow();
+  });
+
+  it('requires a dedicated podcast encryption key in production', () => {
+    const productionEnv = {
+      ...BASE_ENV,
+      NODE_ENV: 'production',
+      SETUP_BOOTSTRAP_TOKEN: '1234567890abcdef',
+    };
+
+    expect(() => validateEnv(productionEnv)).toThrow('PODCAST_ENCRYPTION_KEY is required in production');
+    expect(() => validateEnv({ ...productionEnv, PODCAST_ENCRYPTION_KEY: '1234567890abcdef' })).not.toThrow();
+  });
+
+  it.each([
+    ['PODCAST_ENCRYPTION_KEY', 'short'],
+    ['PODCAST_ENCRYPTION_KEY', '                '],
+    ['PODCAST_MAX_FEED_BYTES', String(100 * 1024 * 1024 + 1)],
+    ['PODCAST_MAX_EPISODE_BYTES', String(20 * 1024 * 1024 * 1024 + 1)],
+    ['PODCAST_MAX_CONCURRENT_DOWNLOADS', '33'],
+    ['PODCAST_REQUEST_TIMEOUT_MS', String(10 * 60_000 + 1)],
+    ['PODCAST_MAX_DOWNLOAD_DURATION_MS', String(24 * 60 * 60_000 + 1)],
+  ])('rejects an invalid %s setting', (name, value) => {
+    expect(() => validateEnv({ ...BASE_ENV, [name]: value })).toThrow(name);
+  });
 });

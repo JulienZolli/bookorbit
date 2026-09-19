@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { dirname, sep } from 'path';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
+import { normalizeWatchEvent, waitForWatcherReady, type WatchEventType } from '../../common/utils/fs-watch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
@@ -14,7 +15,7 @@ import { ScannerService } from './scanner.service';
 import { FileEventProcessorService, type FileEventResult } from './file-event-processor.service';
 
 type Db = NodePgDatabase<typeof schema>;
-type EventType = 'delete' | 'create';
+type EventType = WatchEventType;
 
 export const WATCHER_DEBOUNCE_MS = 500;
 const DEBOUNCE_MS = WATCHER_DEBOUNCE_MS;
@@ -510,26 +511,4 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.gateway.emitBookTransferred({ fromLibraryId: result.fromLibraryId, toLibraryId: result.toLibraryId, bookIds: result.bookIds });
     }
   }
-}
-
-function normalizeWatchEvent(eventName: string): EventType | null {
-  if (eventName === 'unlink' || eventName === 'unlinkDir') return 'delete';
-  if (eventName === 'add' || eventName === 'addDir' || eventName === 'change') return 'create';
-  return null;
-}
-
-function waitForWatcherReady(watcher: FSWatcher): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const handleReady = () => {
-      watcher.off('error', handleError);
-      resolve();
-    };
-    const handleError = (error: unknown) => {
-      watcher.off('ready', handleReady);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    };
-
-    watcher.once('ready', handleReady);
-    watcher.once('error', handleError);
-  });
 }

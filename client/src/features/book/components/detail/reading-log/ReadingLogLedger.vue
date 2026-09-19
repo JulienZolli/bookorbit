@@ -38,6 +38,8 @@ const ROW_GRID =
 
 const BUCKET_TOKEN: Record<ReadingSessionSourceBucket, string> = {
   bookorbit: '--pill-web',
+  ios: '--pill-ios',
+  watchos: '--pill-watchos',
   koreader: '--pill-koreader',
   kobo: '--pill-kobo',
 }

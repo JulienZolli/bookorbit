@@ -5,13 +5,15 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { isAudioFormat } from '@bookorbit/types';
 import type { FileRole as BookFileRole } from '../scanner/lib/classify';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { FORMATS_WITH_UNBOUNDED_METADATA_READS, MAX_BUFFERED_METADATA_BYTES } from '../../common/constants/upload.constants';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookFiles, bookMetadata, books } from '../../db/schema';
+import { bookFiles, bookMetadata, books, uploadSessions } from '../../db/schema';
 import { BookMetadataFetchOrchestratorService } from '../book-metadata-fetch/book-metadata-fetch-orchestrator.service';
 import { MetadataService } from '../metadata/metadata.service';
 import { computeFileHash } from '../scanner/lib/hash';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -43,6 +45,9 @@ interface MeasuredFile {
   ino: bigint;
   mtime: Date;
   fileHash: string;
+  mediaOverlayAvailable: boolean;
+  mediaOverlayDurationSeconds: number | null;
+  mediaOverlayCheckedAt: Date | null;
 }
 
 const METADATA_FORMATS = new Set([
@@ -74,6 +79,15 @@ export class UploadProcessorService {
     @Optional() private readonly autoFetchOrchestrator?: BookMetadataFetchOrchestratorService,
   ) {}
 
+  private async inspectMediaOverlayFields(absolutePath: string, format: string | null) {
+    return inspectEpubMediaOverlayFields(absolutePath, format, (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[upload.processor.media_overlay_capability] [fail] path="${sanitizeLogValue(absolutePath)}" errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - EPUB media-overlay inspection failed`,
+      );
+    });
+  }
+
   /**
    * One `book_files` row, attached to the book that owns `folderPath` or to a new one. Calling it
    * repeatedly with the same `folderPath` is how a multi-file unit becomes one book with many
@@ -88,12 +102,23 @@ export class UploadProcessorService {
     relPath: string,
     format: string,
     sizeBytes: number,
-    options: { role?: BookFileRole; sortOrder?: number | null } = {},
+    options: { role?: BookFileRole; sortOrder?: number | null; uploadSessionId?: string } = {},
   ): Promise<{ bookId: number; created: boolean }> {
-    const measured = await this.measureFile(absolutePath);
-    const result = await this.db.transaction((tx) =>
-      this.upsertBookFile(tx, libraryId, libraryFolderId, { folderPath, absolutePath, relPath, format, sizeBytes, ...options }, measured),
-    );
+    const { uploadSessionId, ...fileOptions } = options;
+    const measured = await this.measureFile(absolutePath, format);
+    const result = await this.db.transaction(async (tx) => {
+      const upserted = await this.upsertBookFile(
+        tx,
+        libraryId,
+        libraryFolderId,
+        { folderPath, absolutePath, relPath, format, sizeBytes, ...fileOptions },
+        measured,
+      );
+      if (uploadSessionId) {
+        await tx.update(uploadSessions).set({ resultBookId: upserted.bookId, updatedAt: new Date() }).where(eq(uploadSessions.id, uploadSessionId));
+      }
+      return upserted;
+    });
     return { bookId: result.bookId, created: result.createdBook };
   }
 
@@ -110,7 +135,7 @@ export class UploadProcessorService {
     // Hashing is the expensive half and needs no transaction, so it happens before one is open
     // rather than holding a write transaction for the length of a 31-track read.
     const measured: MeasuredFile[] = [];
-    for (const file of files) measured.push(await this.measureFile(file.absolutePath));
+    for (const file of files) measured.push(await this.measureFile(file.absolutePath, file.format));
 
     return this.db.transaction(async (tx) => {
       const bookIds: number[] = [];
@@ -152,9 +177,13 @@ export class UploadProcessorService {
     });
   }
 
-  private async measureFile(absolutePath: string): Promise<MeasuredFile> {
-    const [fileStat, fileHash] = await Promise.all([stat(absolutePath, { bigint: true }), computeFileHash(absolutePath)]);
-    return { ino: fileStat.ino, mtime: fileStat.mtime, fileHash };
+  private async measureFile(absolutePath: string, format: string): Promise<MeasuredFile> {
+    const [fileStat, fileHash, mediaOverlayFields] = await Promise.all([
+      stat(absolutePath, { bigint: true }),
+      computeFileHash(absolutePath),
+      this.inspectMediaOverlayFields(absolutePath, format),
+    ]);
+    return { ino: fileStat.ino, mtime: fileStat.mtime, fileHash, ...mediaOverlayFields };
   }
 
   private async upsertBookFile(
@@ -178,6 +207,9 @@ export class UploadProcessorService {
       format,
       role,
       sortOrder,
+      mediaOverlayAvailable: measured.mediaOverlayAvailable,
+      mediaOverlayDurationSeconds: measured.mediaOverlayDurationSeconds,
+      mediaOverlayCheckedAt: measured.mediaOverlayCheckedAt,
     };
 
     const [existingBook] = await tx
@@ -215,7 +247,11 @@ export class UploadProcessorService {
   }
 
   processNewBookImportAsync(bookId: number, libraryId: number, absolutePath: string, format: string): void {
-    void this.runNewBookImport(bookId, libraryId, absolutePath, format);
+    void this.processNewBookImport(bookId, libraryId, absolutePath, format);
+  }
+
+  processNewBookImport(bookId: number, libraryId: number, absolutePath: string, format: string): Promise<void> {
+    return this.runNewBookImport(bookId, libraryId, absolutePath, format);
   }
 
   /**
@@ -231,8 +267,22 @@ export class UploadProcessorService {
     void this.runMetadataExtraction(bookId, absolutePath, format, event, startedAt);
   }
 
+  extractMetadata(bookId: number, absolutePath: string, format: string): Promise<void> {
+    if (!METADATA_FORMATS.has(format)) return Promise.resolve();
+    return this.runMetadataExtraction(bookId, absolutePath, format, 'upload.extract_metadata', Date.now());
+  }
+
   private async runMetadataExtraction(bookId: number, absolutePath: string, format: string, event: string, startedAt: number): Promise<void> {
     try {
+      const fileSize = await stat(absolutePath)
+        .then((value) => value.size)
+        .catch(() => 0);
+      if (FORMATS_WITH_UNBOUNDED_METADATA_READS.has(format) && fileSize > MAX_BUFFERED_METADATA_BYTES) {
+        this.logger.warn(
+          `[${event}] [end] bookId=${bookId} format=${format} sizeBytes=${fileSize} durationMs=${Date.now() - startedAt} skipped=true - metadata extraction skipped because the parser is not bounded for this file size`,
+        );
+        return;
+      }
       await this.metadataService.extractAndSave(bookId, absolutePath, format);
       // The embedded extractor writes the aggregate duration to book_metadata, but the
       // per-file book_files.durationSeconds the player sums is only populated here.

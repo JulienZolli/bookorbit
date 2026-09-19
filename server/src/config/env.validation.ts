@@ -74,6 +74,10 @@ const envSchema = z.object({
     .optional(),
   FILE_WRITE_DEBOUNCE_MS: z.coerce.number().int().positive().optional(),
   FILE_WRITE_MAX_CONCURRENT_WRITES: z.coerce.number().int().positive().optional(),
+  AUDIOLESS_EPUB_MAX_CONCURRENT_BUILDS: z.coerce.number().int().positive().max(32).optional(),
+  AUDIOLESS_EPUB_MAX_SOURCE_ENTRIES: z.coerce.number().int().positive().optional(),
+  AUDIOLESS_EPUB_MAX_METADATA_BYTES: z.coerce.number().int().positive().optional(),
+  AUDIOLESS_EPUB_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().optional(),
   CLIENT_URL: z.string().url().optional(),
   APP_URL: z.string().url().default('http://localhost:5173'),
   TRUST_PROXY: trustProxyEnv(),
@@ -84,6 +88,32 @@ const envSchema = z.object({
     .string()
     .transform((val) => val.trim())
     .refine((val) => val === '' || isAbsolute(val), 'MIGRATION_IMPORT_ROOT must be an absolute path')
+    .optional(),
+  PODCAST_ENCRYPTION_KEY: z.string().trim().min(16).optional(),
+  PODCAST_MAX_FEED_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100 * 1024 * 1024)
+    .optional(),
+  PODCAST_MAX_EPISODE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(20 * 1024 * 1024 * 1024)
+    .optional(),
+  PODCAST_MAX_CONCURRENT_DOWNLOADS: z.coerce.number().int().positive().max(32).optional(),
+  PODCAST_REQUEST_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10 * 60_000)
+    .optional(),
+  PODCAST_MAX_DOWNLOAD_DURATION_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
     .optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).optional(),
   OIDC_ALLOW_LOCAL_ISSUERS: booleanEnvFlag('OIDC_ALLOW_LOCAL_ISSUERS'),
@@ -115,6 +145,9 @@ export function validateEnv(config: Record<string, unknown>) {
   }
   if (result.data.NODE_ENV === 'production' && !result.data.SETUP_BOOTSTRAP_TOKEN?.trim()) {
     throw new Error('Environment validation failed:\n  SETUP_BOOTSTRAP_TOKEN: SETUP_BOOTSTRAP_TOKEN is required in production');
+  }
+  if (result.data.NODE_ENV === 'production' && !result.data.PODCAST_ENCRYPTION_KEY) {
+    throw new Error('Environment validation failed:\n  PODCAST_ENCRYPTION_KEY: PODCAST_ENCRYPTION_KEY is required in production');
   }
   return result.data;
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import { AlertTriangle, Loader2 } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
 import { DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from 'reka-ui'
@@ -13,6 +14,7 @@ const props = withDefaults(
     busy?: boolean
     destructive?: boolean
     confirmDisabled?: boolean
+    confirmationPhrase?: string
   }>(),
   { busy: false, destructive: true, confirmDisabled: false },
 )
@@ -21,11 +23,22 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 
 const { t } = useI18n()
 
+const typedPhrase = ref('')
+const phraseMatched = computed(() => !props.confirmationPhrase || typedPhrase.value.trim() === props.confirmationPhrase)
+
+watch(
+  () => props.open,
+  () => {
+    typedPhrase.value = ''
+  },
+)
+
 function handleOpenChange(open: boolean) {
   if (!open && !props.busy) emit('cancel')
 }
 
 function handleConfirm() {
+  if (!phraseMatched.value) return
   emit('confirm')
 }
 
@@ -50,12 +63,21 @@ function handleCancel() {
             <DialogTitle class="text-lg font-semibold text-foreground">{{ title }}</DialogTitle>
             <DialogDescription class="mt-1 text-sm text-muted-foreground">{{ description }}</DialogDescription>
             <slot />
+            <label v-if="confirmationPhrase" class="mt-4 block text-xs font-medium text-foreground">
+              {{ t('components.confirmDialog.typeToConfirm', { phrase: confirmationPhrase }) }}
+              <input
+                v-model="typedPhrase"
+                type="text"
+                autocomplete="off"
+                class="mt-1.5 h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </label>
           </div>
         </div>
         <div class="mt-6 flex justify-end gap-2">
           <Button variant="outline" :disabled="busy" @click="handleCancel">{{ t('common.cancel') }}</Button>
-          <Button :variant="destructive ? 'destructive' : 'default'" :disabled="busy || confirmDisabled" @click="handleConfirm">
-            <Loader2 v-if="busy" class="animate-spin" aria-hidden="true" />
+          <Button :variant="destructive ? 'destructive' : 'default'" :disabled="busy || confirmDisabled || !phraseMatched" @click="handleConfirm">
+            <Loader2 v-if="busy" class="animate-spin motion-reduce:animate-none" aria-hidden="true" />
             {{ confirmLabel }}
           </Button>
         </div>

@@ -1,7 +1,8 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import { DEFAULT_FORMAT_PRIORITY, FORMAT_LABELS, isFiveFieldCronExpression } from '@bookorbit/types'
-import type { AddedAtSource, CoverAspectRatio, Library, OrganizationMode, PrescanResult } from '@bookorbit/types'
+import type { AddedAtSource, CoverAspectRatio, Library, LibraryType, OrganizationMode, PrescanResult } from '@bookorbit/types'
+import { coveringFolderPath, normalizeFolderPath } from './folder-paths'
 
 export { DEFAULT_FORMAT_PRIORITY, FORMAT_LABELS }
 
@@ -19,12 +20,15 @@ const FILE_SIZE_MAX_MB = 10_000
 
 function blankForm() {
   return {
+    type: 'books' as LibraryType,
     name: '',
     icon: null as string | null,
     displayOrder: 0,
     coverAspectRatio: '2/3' as CoverAspectRatio,
     folders: [] as string[],
+    localFolders: [] as string[],
     watch: false,
+    watchLocalFolders: true,
     autoScanCronExpression: null as string | null,
     metadataPrecedence: [...DEFAULT_METADATA_PRECEDENCE],
     formatPriority: [...DEFAULT_FORMAT_PRIORITY] as string[],
@@ -67,6 +71,10 @@ export function useLibraryCreator() {
     if (!form.name.trim()) errors.details = 'Enter a library name.'
     else if (!form.icon?.trim()) errors.details = 'Choose an icon.'
     if (form.folders.length === 0) errors.folders = 'Add at least one folder.'
+    else if (form.type === 'podcasts' && form.folders.length !== 1) errors.folders = 'Choose exactly one storage folder for podcasts.'
+    else if (form.type === 'podcasts' && overlappingPodcastFolder(form.folders, form.localFolders)) {
+      errors.folders = 'Existing podcast folders must sit outside the storage folder.'
+    }
     if (form.autoScanCronExpression && !isFiveFieldCronExpression(form.autoScanCronExpression)) {
       errors.schedule = 'Enter a valid 5-field cron expression.'
     }
@@ -102,12 +110,15 @@ export function useLibraryCreator() {
   }
 
   function initEdit(library: Library) {
+    form.type = library.type
     form.name = library.name
     form.icon = library.icon ?? null
     form.displayOrder = library.displayOrder
     form.coverAspectRatio = library.coverAspectRatio
-    form.folders = library.folders.map((f) => f.path)
+    form.folders = library.folders.filter((f) => f.role !== 'local').map((f) => f.path)
+    form.localFolders = library.folders.filter((f) => f.role === 'local').map((f) => f.path)
     form.watch = library.watch
+    form.watchLocalFolders = library.watchLocalFolders ?? true
     form.autoScanCronExpression = library.autoScanCronExpression ?? null
     form.metadataPrecedence = [...library.metadataPrecedence]
     const missing = DEFAULT_FORMAT_PRIORITY.filter((f) => !library.formatPriority.includes(f))
@@ -176,12 +187,22 @@ export function useLibraryCreator() {
     error.value = null
     loading.value = true
     try {
-      const payload = {
-        ...form,
+      const sharedPayload = {
+        type: form.type,
         name: form.name.trim(),
         icon: form.icon!.trim(),
+        displayOrder: form.displayOrder,
+        coverAspectRatio: form.coverAspectRatio,
         folders: [...new Set(form.folders.map((path) => path.trim()))],
       }
+      const payload =
+        form.type === 'podcasts'
+          ? {
+              ...sharedPayload,
+              localFolders: [...new Set(form.localFolders.map((path) => path.trim()))],
+              watchLocalFolders: form.watchLocalFolders,
+            }
+          : { ...form, ...sharedPayload, localFolders: undefined, watchLocalFolders: undefined }
       let res: Response
       if (mode.value === 'create') {
         res = await api('/api/v1/libraries', {
@@ -190,10 +211,11 @@ export function useLibraryCreator() {
           body: JSON.stringify(payload),
         })
       } else {
+        const { type: _type, ...updatePayload } = payload
         res = await api(`/api/v1/libraries/${editingLibraryId.value}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(updatePayload),
         })
       }
       if (!res.ok) {
@@ -224,6 +246,18 @@ export function useLibraryCreator() {
     runPrescan,
     save,
   }
+}
+
+/**
+ * Whether a storage folder and an existing-podcasts folder overlap. The server refuses the same
+ * pairing; catching it here means the wizard says so before the save round-trip.
+ */
+function overlappingPodcastFolder(folders: string[], localFolders: string[]): boolean {
+  const storage = folders.map(normalizeFolderPath)
+  return localFolders.some((candidate) => {
+    const local = normalizeFolderPath(candidate)
+    return storage.some((path) => path === local || coveringFolderPath(local, [path]) !== null || coveringFolderPath(path, [local]) !== null)
+  })
 }
 
 async function responseError(response: Response, fallback: string): Promise<string> {

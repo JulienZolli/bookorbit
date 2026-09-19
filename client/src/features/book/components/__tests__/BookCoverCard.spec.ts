@@ -197,7 +197,19 @@ describe('BookCoverCard — cover aspect override', () => {
   })
 })
 
-describe('BookCoverCard — present state', () => {
+describe('BookCoverCard - present state', () => {
+  it('marks the EPUB format overlay for media-overlay read-along files', () => {
+    cardOverlays.value = ['format']
+    const wrapper = mountCard({
+      ...presentBook,
+      files: [{ id: 10, format: 'epub', role: 'primary', sizeBytes: null, mediaOverlay: { available: true, durationSeconds: 42 } }],
+    })
+
+    expect(wrapper.text()).toContain('EPUB')
+    expect(wrapper.text()).not.toContain('NARR')
+    expect(wrapper.find('.lucide-headphones').exists()).toBe(true)
+  })
+
   it('opens the reader on desktop card click by default', async () => {
     const wrapper = mountCard(presentBook)
 

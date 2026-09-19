@@ -7,9 +7,9 @@ import { watch } from 'chokidar';
 import type { BookDockFileRow, NewBookDockFileRow, NewBookDockUnitFileRow } from '../../db/schema';
 import { BookDockWatcherService } from './book-dock-watcher.service';
 import { BookDockIngestService } from './book-dock-ingest.service';
-import { waitForDirectoryStability } from '../scanner/lib/stability';
+import { waitForDirectoryStability } from '../../common/utils/fs-stability.utils';
 
-vi.mock('../scanner/lib/stability', () => ({
+vi.mock('../../common/utils/fs-stability.utils', () => ({
   waitForStability: vi.fn().mockResolvedValue(undefined),
   waitForDirectoryStability: vi.fn().mockResolvedValue(undefined),
 }));

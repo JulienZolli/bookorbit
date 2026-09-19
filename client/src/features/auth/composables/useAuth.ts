@@ -211,19 +211,11 @@ export function useAuth() {
 
   async function logout(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' })
+      await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => undefined)
+    } finally {
       clearAuth()
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}))
-        if (data?.logoutUrl) {
-          window.location.href = data.logoutUrl
-          return
-        }
-      }
-    } catch {
-      clearAuth()
+      router.push('/login')
     }
-    router.push('/login')
   }
 
   async function loginWithMagicLink(token: string): Promise<void> {

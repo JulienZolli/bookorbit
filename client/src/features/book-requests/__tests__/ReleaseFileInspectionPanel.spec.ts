@@ -38,7 +38,7 @@ describe('ReleaseFileInspectionPanel', () => {
     const wrapper = mountPanel()
 
     expect(wrapper.text()).toContain('Pride and Prejudice/Pride and Prejudice.epub')
-    expect(wrapper.text()).toContain('2 KB')
+    expect(wrapper.text()).toContain('2 kB')
     expect(wrapper.get('[role="status"]').text()).toContain('1 file')
   })
 

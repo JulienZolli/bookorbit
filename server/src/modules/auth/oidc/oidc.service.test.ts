@@ -4,6 +4,7 @@ import { OidcService } from './oidc.service';
 
 const APP_URL = 'http://localhost:5173';
 const VALID_REDIRECT_URI = `${APP_URL}/oauth2-callback`;
+const NATIVE_REDIRECT_URI = 'bookorbit://oauth2-callback';
 
 const PROVIDER = {
   id: 1,
@@ -50,9 +51,7 @@ function makeService() {
     generate: vi.fn().mockResolvedValue('state-token'),
     validateAndConsume: vi.fn().mockResolvedValue({ valid: true, providerId: 1 }),
   };
-  const sessionRepo = {
-    create: vi.fn().mockResolvedValue(undefined),
-  };
+
   const groupMapping = {
     syncUserGroups: vi.fn().mockResolvedValue(undefined),
     removeProviderGrants: vi.fn().mockResolvedValue(undefined),
@@ -78,7 +77,6 @@ function makeService() {
     setPermissionsDirectly: vi.fn(),
   };
   const authService = {
-    getRefreshTokenExpiryDate: vi.fn().mockReturnValue(new Date('2026-01-08T00:00:00Z')),
     issueTokensForUser: vi.fn().mockResolvedValue({ accessToken: 'token', user: {} }),
   };
   const auditEvents = {
@@ -87,6 +85,7 @@ function makeService() {
   const configService = {
     get: vi.fn().mockImplementation((key: string) => {
       if (key === 'app.appUrl') return APP_URL;
+      if (key === 'app.nativeRedirectUri') return NATIVE_REDIRECT_URI;
       return undefined;
     }),
   };
@@ -101,7 +100,6 @@ function makeService() {
     tokenValidator as never,
     claimExtractor as never,
     stateService as never,
-    sessionRepo as never,
     groupMapping as never,
     backchannelLogout as never,
     identityRepo as never,
@@ -118,7 +116,6 @@ function makeService() {
     claimExtractor,
     userService,
     authService,
-    sessionRepo,
     stateService,
     auditEvents,
     discovery,
@@ -188,6 +185,34 @@ describe('OidcService', () => {
     it('rejects callback when redirectUri does not match allowed app URL', async () => {
       const { service } = makeService();
       await expect(service.handleCallback({ ...BASE_CALLBACK, redirectUri: 'https://evil.example/callback' }, {} as never)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('accepts the native redirect URI so iOS can complete the flow', async () => {
+      const { service, identityRepo, userService, authService } = makeService();
+      const user = { id: 5, username: 'u1', active: true, permissions: [] };
+      identityRepo.findByProviderAndSubject.mockResolvedValue({ userId: 5 });
+      userService.findById.mockResolvedValue(user);
+      authService.issueTokensForUser.mockResolvedValue({ accessToken: 'at', user });
+
+      const callback = { ...BASE_CALLBACK, redirectUri: NATIVE_REDIRECT_URI, clientKind: 'native' as const, deviceLabel: 'iOS' };
+      const reply = {} as never;
+      const result = await service.handleCallback(callback, reply);
+      expect(authService.issueTokensForUser).toHaveBeenCalledWith(
+        5,
+        reply,
+        'oidc',
+        callback,
+        expect.objectContaining({ providerId: expect.any(Number), oidcIssuer: expect.any(String), oidcSubject: expect.any(String) }),
+      );
+
+      expect(result).toMatchObject({ mode: 'login', accessToken: 'at' });
+    });
+
+    it('rejects a private-use scheme that is not the configured native redirect URI', async () => {
+      const { service } = makeService();
+      await expect(service.handleCallback({ ...BASE_CALLBACK, redirectUri: 'evil://oauth2-callback' }, {} as never)).rejects.toThrow(
         BadRequestException,
       );
     });

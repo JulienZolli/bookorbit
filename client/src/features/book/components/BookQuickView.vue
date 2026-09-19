@@ -13,7 +13,7 @@ import { useBookDetail } from '../composables/useBookDetail'
 import { useCoverVersions } from '../composables/useCoverVersions'
 import { getFormatColor } from '../lib/format-colors'
 import { displayPublishedDate } from '../lib/published-date'
-import { FORMAT_TO_GROUP } from '@bookorbit/types'
+import { FORMAT_TO_GROUP, type BookFileRef } from '@bookorbit/types'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../lib/cover-aspect-ratio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -21,6 +21,7 @@ import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import BookCoverArtwork from './BookCoverArtwork.vue'
 import BookCoverSurface from './BookCoverSurface.vue'
 import { useI18n } from 'vue-i18n'
+import { hasReadAlong, isReadAlongFormat, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 const { t } = useI18n()
 
@@ -93,6 +94,7 @@ const quickViewCoverAspectRatio = computed(() => {
 })
 
 const primaryFile = computed(() => detail.value?.files.find((f) => f.role === 'primary') ?? detail.value?.files[0] ?? null)
+const readAlongFile = computed(() => detail.value?.files.find((file) => hasReadAlong(file)) ?? null)
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
 const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
 const knownFormats = computed(() => [
@@ -109,12 +111,25 @@ function providerLinkStyle(provider: string) {
 }
 
 function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
+  const color = formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_COLOR : getFormatColor(fmt)
   return {
     color,
     borderColor: `${color}66`,
     backgroundColor: `${color}1a`,
   }
+}
+
+function fileFormatBadgeStyle(file: Pick<BookFileRef, 'format' | 'mediaOverlay'>) {
+  const color = hasReadAlong(file) ? READ_ALONG_FORMAT_COLOR : getFormatColor(file.format ?? '?')
+  return {
+    color,
+    borderColor: `${color}66`,
+    backgroundColor: `${color}1a`,
+  }
+}
+
+function formatHasReadAlong(fmt: string): boolean {
+  return isReadAlongFormat(fmt, readAlongFile.value != null)
 }
 
 function handleCoverLoad(ratio: number | null) {
@@ -289,10 +304,12 @@ function handleDelete() {
                 <span
                   v-for="fmt in knownFormats"
                   :key="fmt"
-                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
+                  class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
                   :style="formatBadgeStyle(fmt)"
+                  :title="formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_TITLE : undefined"
                 >
                   {{ fmt }}
+                  <Headphones v-if="formatHasReadAlong(fmt)" class="size-3 shrink-0" :stroke-width="2.5" aria-hidden="true" />
                 </span>
                 <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
                   {{ t('book.quickView.pages', { count: detail.pageCount }) }}
@@ -321,10 +338,12 @@ function handleDelete() {
                 </p>
                 <div class="mt-1.5 flex items-center gap-1.5">
                   <span
-                    class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                    :style="formatBadgeStyle(primaryFile.format ?? '?')"
+                    class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
+                    :style="fileFormatBadgeStyle(primaryFile)"
+                    :title="hasReadAlong(primaryFile) ? READ_ALONG_FORMAT_TITLE : undefined"
                   >
                     {{ (primaryFile.format ?? '?').toUpperCase() }}
+                    <Headphones v-if="hasReadAlong(primaryFile)" class="size-3 shrink-0" :stroke-width="2.5" aria-hidden="true" />
                   </span>
                   <span class="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground">
                     {{ formatBytes(primaryFile.sizeBytes) }}

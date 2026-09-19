@@ -638,7 +638,7 @@ describe('KoboSyncService', () => {
     });
     db.query.collections.findMany.mockResolvedValue([]);
     const filter = { type: 'group', join: 'AND', rules: [] };
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 5, name: 'To Read', filter, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 5, name: 'To Read', mediaType: 'books', filter, syncToKobo: true }]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1, 2]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -664,7 +664,7 @@ describe('KoboSyncService', () => {
   it('buildTagItems excludes synced smart scopes without a filter instead of matching everything', async () => {
     const db = makeDb();
     db.query.collections.findMany.mockResolvedValue([]);
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 6, name: 'Empty Scope', filter: null, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 6, name: 'Empty Scope', mediaType: 'books', filter: null, syncToKobo: true }]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1]);
     const service = makeService(db);
 
@@ -685,8 +685,8 @@ describe('KoboSyncService', () => {
     const filterA = { type: 'group', join: 'AND', rules: [] };
     const filterB = { type: 'group', join: 'OR', rules: [] };
     smartScopeService.findKoboSyncScopes.mockResolvedValue([
-      { id: 1, name: 'Scope A', filter: filterA, syncToKobo: true },
-      { id: 2, name: 'Scope B', filter: filterB, syncToKobo: true },
+      { id: 1, name: 'Scope A', mediaType: 'books', filter: filterA, syncToKobo: true },
+      { id: 2, name: 'Scope B', mediaType: 'books', filter: filterB, syncToKobo: true },
     ]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -705,7 +705,9 @@ describe('KoboSyncService', () => {
     const filter = { type: 'group', join: 'AND', rules: [] };
     // A shared scope: owned by user 1, opted into by user 9. Ownership and opt-in are the
     // smart scope module's rules, so sync must not re-filter by owner (issue #795).
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 7, userId: 1, name: 'Book Club', filter, isPublic: true, syncToKobo: false }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([
+      { id: 7, userId: 1, name: 'Book Club', mediaType: 'books', filter, isPublic: true, syncToKobo: false },
+    ]);
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue([1]);
     queryBuilder.buildWhere.mockReturnValue('WHERE_CLAUSE');
     const service = makeService(db);
@@ -729,7 +731,7 @@ describe('KoboSyncService', () => {
   it('fetches synced smart scope book ids with the metadata join required by metadata-backed filters', async () => {
     const db = makeDb({ select: [[{ id: 10 }]] });
     const filter = { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'Dune' }] };
-    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 1, name: 'Dune Scope', filter, syncToKobo: true }]);
+    smartScopeService.findKoboSyncScopes.mockResolvedValue([{ id: 1, name: 'Dune Scope', mediaType: 'books', filter, syncToKobo: true }]);
     queryBuilder.buildWhere.mockReturnValue(sql`${schema.bookMetadata.title} ilike ${'%Dune%'}`);
     const service = makeService(db);
 

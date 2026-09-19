@@ -304,7 +304,7 @@ function handleMobileSearchOpenUpdate(value: boolean) {
     </div>
   </div>
 
-  <Sheet v-model:open="mobileDisplayOpen">
+  <Sheet v-if="showDisplayControls" v-model:open="mobileDisplayOpen">
     <SheetContent side="bottom">
       <SheetHeader>
         <SheetTitle>{{ t('components.viewHeader.display') }}</SheetTitle>

@@ -90,6 +90,7 @@ describe('UploadService', () => {
   const validator = {
     sanitizeFilename: vi.fn(),
     validateFormat: vi.fn(),
+    validateContent: vi.fn(),
   };
   const storage = {
     streamToTemp: vi.fn(),
@@ -106,6 +107,7 @@ describe('UploadService', () => {
   const user = { id: 7, isSuperuser: false, permissions: [] } as any;
 
   const moduleRef = { get: vi.fn().mockReturnValue(null) };
+  const pathPolicy = { assertWithinRoot: vi.fn() };
 
   let service: UploadService;
 
@@ -123,10 +125,13 @@ describe('UploadService', () => {
       storage as any,
       processor as any,
       moduleRef as any,
+      pathPolicy as any,
     );
 
     validator.sanitizeFilename.mockReturnValue('book.epub');
     validator.validateFormat.mockReturnValue('epub');
+    validator.validateContent.mockResolvedValue(undefined);
+    pathPolicy.assertWithinRoot.mockResolvedValue('/library/book.epub');
     storage.streamToTemp.mockResolvedValue({ tempPath: '/tmp/upload.bin', sizeBytes: 456 });
     storage.moveToPath.mockResolvedValue(undefined);
     storage.cleanup.mockResolvedValue(undefined);

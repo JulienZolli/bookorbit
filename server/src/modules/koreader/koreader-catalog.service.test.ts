@@ -149,10 +149,11 @@ function makeService(
       role: 'content',
       bookId: 10,
       libraryId: 1,
-      absolutePath: '/books/dune.epub',
+      absolutePath: '/path/to/library/dune.epub',
       format: 'epub',
     }),
     resolveDownloadFilename: vi.fn().mockResolvedValue('Dune - Frank Herbert.epub'),
+    createAudiolessEpubDownload: vi.fn(),
   };
   const bookReadService = {
     findProgressByBook: vi.fn().mockResolvedValue([
@@ -871,7 +872,7 @@ describe('KoreaderCatalogService', () => {
     );
     expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
     expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
-    expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
+    expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
   });
 
   it('encodes non-ASCII content file download filenames for Content-Disposition', async () => {
@@ -887,7 +888,7 @@ describe('KoreaderCatalogService', () => {
     );
     expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
     expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
-    expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
+    expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
   });
 
   it('rejects non-content file downloads and missing thumbnails', async () => {
@@ -1222,6 +1223,76 @@ describe('KoreaderCatalogService', () => {
 
       await expect(manifestDevicePath(seriesIndex, defaultOrganization)).resolves.toBe(expected);
       await expect(detailDevicePath(seriesIndex, defaultOrganization)).resolves.toBe(expected);
+    });
+  });
+
+  describe('streamFile', () => {
+    const readAlongFile = {
+      id: 100,
+      role: 'content',
+      bookId: 10,
+      libraryId: 1,
+      absolutePath: '/books/dune.epub',
+      format: 'epub',
+      mediaOverlayAvailable: true,
+    };
+
+    function audiolessResult() {
+      return {
+        path: '/path/to/temp/download.epub',
+        size: 4096,
+        filename: 'Dune - KOReader.epub',
+        bookId: 10,
+        removedEntries: 4,
+        sanitizedEntries: 0,
+        koreaderHash: 'deadbeef',
+        cleanup: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    it('serves the audioless rebuild for a read-along EPUB', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce(readAlongFile);
+      bookService.createAudiolessEpubDownload.mockResolvedValueOnce(audiolessResult());
+      mockCreateReadStream.mockReturnValueOnce({ once: vi.fn() } as never);
+      const reply = makeReply();
+
+      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+
+      expect(bookService.createAudiolessEpubDownload).toHaveBeenCalledWith(100, expect.objectContaining({ id: 7 }), { linkKoreaderHash: true });
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/temp/download.epub');
+      expect(reply.header).toHaveBeenCalledWith('Content-Length', 4096);
+      expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
+    });
+
+    it('falls back to the original EPUB when the audioless rebuild fails', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce(readAlongFile);
+      bookService.createAudiolessEpubDownload.mockRejectedValueOnce(new Error('corrupt central directory'));
+      const reply = makeReply();
+
+      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/books/dune.epub');
+      expect(reply.header).toHaveBeenCalledWith('Content-Length', 1234);
+      expect(reply.send).toHaveBeenCalled();
+    });
+
+    it('serves the stored file untouched when there is no media overlay', async () => {
+      const { service, bookService } = makeService();
+      const reply = makeReply();
+
+      await service.streamFile(makeUser({ id: 7 }), 100, reply as never);
+
+      expect(bookService.createAudiolessEpubDownload).not.toHaveBeenCalled();
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/path/to/library/dune.epub');
+    });
+
+    it('rejects a file that is not library content', async () => {
+      const { service, bookService } = makeService();
+      bookService.verifyFileAccess.mockResolvedValueOnce({ ...readAlongFile, role: 'sidecar' });
+
+      await expect(service.streamFile(makeUser({ id: 7 }), 100, makeReply() as never)).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

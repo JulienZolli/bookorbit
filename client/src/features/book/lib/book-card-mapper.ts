@@ -7,6 +7,7 @@ function toBookFileRef(file: BookDetail['files'][number]): BookFileRef {
     format: file.format,
     role: file.role,
     sizeBytes: file.sizeBytes,
+    ...(file.mediaOverlay ? { mediaOverlay: file.mediaOverlay } : {}),
   }
 }
 
@@ -50,7 +51,14 @@ function sameFiles(a: BookFileRef[], b: BookFileRef[]) {
   return a.every((file, index) => {
     const other = b[index]
     if (!other) return false
-    return file.id === other.id && file.format === other.format && file.role === other.role && file.sizeBytes === other.sizeBytes
+    return (
+      file.id === other.id &&
+      file.format === other.format &&
+      file.role === other.role &&
+      file.sizeBytes === other.sizeBytes &&
+      file.mediaOverlay?.available === other.mediaOverlay?.available &&
+      file.mediaOverlay?.durationSeconds === other.mediaOverlay?.durationSeconds
+    )
   })
 }
 

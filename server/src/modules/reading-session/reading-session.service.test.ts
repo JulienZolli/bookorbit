@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { BookService } from '../book/book.service';
-import { ReadingSessionRepository, type SaveReadingSessionResult } from './reading-session.repository';
+import { ReadingSessionRepository, type ReadingSessionSyncOptions, type SaveReadingSessionResult } from './reading-session.repository';
 import { ReadingSessionService } from './reading-session.service';
 import { EMPTY_CONTENT_FILTER_RULES, type ReadingSessionSource } from '@bookorbit/types';
 
@@ -31,7 +31,20 @@ const mockRepo = {
   saveSession:
     vi.fn<
       (
-        ...args: [number, number, string, Date, Date, number, number | null, number | null, ReadingSessionSource, string]
+        ...args: [
+          number,
+          number,
+          string,
+          Date,
+          Date,
+          number,
+          number | null,
+          number | null,
+          ReadingSessionSource,
+          string,
+          ReadingSessionSyncOptions | undefined,
+          'read' | 'tts' | 'listen',
+        ]
       ) => Promise<SaveReadingSessionResult>
     >(),
 };
@@ -39,6 +52,8 @@ const mockRepo = {
 const mockBookService = {
   verifyFileAccess: vi.fn<(...args: [number, RequestUser]) => Promise<void>>(),
 };
+
+const mockUserStatistics = { invalidateUser: vi.fn() };
 
 describe('ReadingSessionService', () => {
   let service: ReadingSessionService;
@@ -53,6 +68,7 @@ describe('ReadingSessionService', () => {
       mockRepo as unknown as ReadingSessionRepository,
       mockBookService as unknown as BookService,
       { emit: vi.fn() } as never,
+      mockUserStatistics as never,
     );
   });
 
@@ -82,7 +98,10 @@ describe('ReadingSessionService', () => {
       10,
       'web',
       'UTC',
+      undefined,
+      'read',
     );
+    expect(mockUserStatistics.invalidateUser).toHaveBeenCalledWith(12);
   });
 
   it('passes nullable progress values through as null', async () => {
@@ -110,6 +129,8 @@ describe('ReadingSessionService', () => {
       null,
       'web',
       'UTC',
+      undefined,
+      'read',
     );
   });
 
@@ -139,6 +160,8 @@ describe('ReadingSessionService', () => {
       null,
       'kobo',
       'UTC',
+      undefined,
+      'read',
     );
   });
 
@@ -232,6 +255,7 @@ function makeServiceExtended() {
     mockRepoExtended as unknown as ReadingSessionRepository,
     mockBookServiceExtended as unknown as BookService,
     { emit: vi.fn() } as never,
+    mockUserStatistics as never,
   );
 }
 
@@ -315,6 +339,7 @@ describe('ReadingSessionService - createManualSession', () => {
       mockRepoExtended as unknown as ReadingSessionRepository,
       mockBookServiceExtended as unknown as BookService,
       { emit: achievementEmit } as never,
+      mockUserStatistics as never,
     );
   }
 
@@ -349,6 +374,7 @@ describe('ReadingSessionService - createManualSession', () => {
     const { sessionId } = mockRepoExtended.insertManualSession.mock.calls[0][0] as { sessionId: string };
     expect(sessionId.startsWith('manual:')).toBe(true);
     expect(result).toMatchObject({ id: 555, bookFileId: 42, durationSeconds: 2700, format: 'epub', source: 'manual' });
+    expect(mockUserStatistics.invalidateUser).toHaveBeenCalledWith(5);
   });
 
   it('computes progressDelta from the latest prior endProgress', async () => {
@@ -476,6 +502,7 @@ describe('ReadingSessionService - deleteSessionByBook', () => {
 
     const svc = makeServiceExtended();
     await expect(svc.deleteSessionByBook(10, 5, makeUser())).resolves.toBeUndefined();
+    expect(mockUserStatistics.invalidateUser).toHaveBeenCalledWith(7);
   });
 
   it('rethrows when access check fails', async () => {

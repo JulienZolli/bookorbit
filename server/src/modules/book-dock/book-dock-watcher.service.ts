@@ -5,14 +5,13 @@ import { Dirent } from 'fs';
 import { mkdir, readdir, realpath, stat, unlink } from 'fs/promises';
 import { join, resolve, sep } from 'path';
 
+import { waitForStability } from '../../common/utils/fs-stability.utils';
+import { normalizeWatchEvent, waitForWatcherReady, type WatchEventType as EventType } from '../../common/utils/fs-watch.utils';
 import { isPrimaryFormat } from '../scanner/lib/classify';
-import { waitForStability } from '../scanner/lib/stability';
 import { BookDockIngestService } from './book-dock-ingest.service';
 import { BookDockRepository } from './book-dock.repository';
 import { BookDockGateway } from './book-dock.gateway';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
-
-type EventType = 'delete' | 'create';
 
 const DEBOUNCE_MS = 500;
 const COVERS_DIR = 'covers';
@@ -254,26 +253,4 @@ async function safeUnlink(path: string): Promise<void> {
   } catch {
     // file may already be deleted
   }
-}
-
-function normalizeWatchEvent(eventName: string): EventType | null {
-  if (eventName === 'unlink' || eventName === 'unlinkDir') return 'delete';
-  if (eventName === 'add' || eventName === 'addDir' || eventName === 'change') return 'create';
-  return null;
-}
-
-function waitForWatcherReady(watcher: FSWatcher): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const handleReady = () => {
-      watcher.off('error', handleError);
-      resolve();
-    };
-    const handleError = (error: unknown) => {
-      watcher.off('ready', handleReady);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    };
-
-    watcher.once('ready', handleReady);
-    watcher.once('error', handleError);
-  });
 }

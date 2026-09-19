@@ -10,6 +10,7 @@ const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
 // A chapter-rich audiobook prints far more than execFile's 1 MB default, and an overflow there
 // would surface as a failed read of a perfectly good file.
 const FFPROBE_OUTPUT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const MAX_EMBEDDED_COVER_BYTES = 32 * 1_024 * 1_024;
 
 export interface AudioExtractResult {
   title: string | null;
@@ -179,19 +180,35 @@ async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[])
 
   return new Promise<Buffer | null>((resolve) => {
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
     const proc = spawn(FFMPEG_PATH, ['-y', '-i', absolutePath, '-map', '0:v', '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'], {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    const finish = (value: Buffer | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    proc.stdout.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_EMBEDDED_COVER_BYTES) {
+        proc.kill();
+        chunks.length = 0;
+        finish(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
     proc.on('close', (code) => {
       if (code === 0 && chunks.length > 0) {
-        resolve(Buffer.concat(chunks));
+        finish(Buffer.concat(chunks, totalBytes));
       } else {
-        resolve(null);
+        finish(null);
       }
     });
-    proc.on('error', () => resolve(null));
+    proc.on('error', () => finish(null));
   });
 }
 

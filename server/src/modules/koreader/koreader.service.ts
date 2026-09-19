@@ -423,6 +423,12 @@ export class KoreaderService {
       pageNumber,
     });
     await this.bookService.syncKoboReadingStateForExternalProgress(userId, bookFile.id, bookorbitPercentage).catch(() => undefined);
+    await this.bookService
+      .syncAudioProgressForExternalEbookProgress(userId, bookFile.bookId, bookFile.id, bookorbitPercentage, {
+        cfi,
+        koreaderProgress: data.progress ?? null,
+      })
+      .catch(() => undefined);
     const strongRereadEvidence = previousPercentage !== null && previousPercentage - bookorbitPercentage >= 10;
     await this.bookService.autoUpdateReadStatusForProgress(userId, bookFile, bookorbitPercentage, {
       origin: 'koreader',

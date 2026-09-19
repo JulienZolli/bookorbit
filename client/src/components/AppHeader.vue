@@ -14,6 +14,7 @@ import {
   Trophy,
   MoreVertical,
   BadgeQuestionMark,
+  Headphones,
   ExternalLink,
   Sparkles,
   Languages,
@@ -59,6 +60,7 @@ import { useThemeStore } from '@/stores/theme'
 import { useLocaleStore } from '@/stores/locale'
 import { getFormatColor } from '@/features/book/lib/format-colors'
 import { useLegalNotices } from '@/components/legal/useLegalNotices'
+import { hasReadAlong, isReadAlongFormat, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -356,8 +358,15 @@ function resultFormats(result: GlobalSearchResult): string[] {
   return sortFormats([...formats])
 }
 
-function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
+function formatHasReadAlong(fmt: string, result: GlobalSearchResult): boolean {
+  return isReadAlongFormat(
+    fmt,
+    result.files.some((file) => hasReadAlong(file)),
+  )
+}
+
+function formatBadgeStyle(fmt: string, result?: GlobalSearchResult) {
+  const color = result && formatHasReadAlong(fmt, result) ? READ_ALONG_FORMAT_COLOR : getFormatColor(fmt)
   return {
     color,
     backgroundColor: `color-mix(in oklch, ${color} 10%, transparent)`,
@@ -451,10 +460,12 @@ function formatBadgeStyle(fmt: string) {
                   <span
                     v-for="fmt in resultFormats(row.result)"
                     :key="fmt"
-                    :class="['text-[11px] font-semibold px-1 py-0.5 rounded border uppercase']"
-                    :style="formatBadgeStyle(fmt)"
+                    class="inline-flex items-center gap-0.5 text-[11px] font-semibold px-1 py-0.5 rounded border uppercase"
+                    :style="formatBadgeStyle(fmt, row.result)"
+                    :title="formatHasReadAlong(fmt, row.result) ? READ_ALONG_FORMAT_TITLE : undefined"
                   >
                     {{ fmt }}
+                    <Headphones v-if="formatHasReadAlong(fmt, row.result)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
                   </span>
                 </div>
               </button>
@@ -578,10 +589,12 @@ function formatBadgeStyle(fmt: string) {
                   <span
                     v-for="fmt in resultFormats(row.result)"
                     :key="fmt"
-                    :class="['text-[11px] font-semibold px-1 py-0.5 rounded border uppercase']"
-                    :style="formatBadgeStyle(fmt)"
+                    class="inline-flex items-center gap-0.5 text-[11px] font-semibold px-1 py-0.5 rounded border uppercase"
+                    :style="formatBadgeStyle(fmt, row.result)"
+                    :title="formatHasReadAlong(fmt, row.result) ? READ_ALONG_FORMAT_TITLE : undefined"
                   >
                     {{ fmt }}
+                    <Headphones v-if="formatHasReadAlong(fmt, row.result)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
                   </span>
                 </div>
               </button>

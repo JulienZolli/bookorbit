@@ -67,11 +67,15 @@ import BookEditionsCard from '@/features/book/components/detail/details/BookEdit
 import BookReadingActivityCard from '@/features/book/components/detail/details/BookReadingActivityCard.vue'
 import { useBookReadingLog } from '@/features/book/composables/useBookReadingLog'
 import { useProviderLinkSettings } from '@/features/book/composables/useProviderLinkSettings'
+import { hasReadAlong, isReadAlongFormat, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 type FileProgress = {
   percentage: number
   cfi: string | null
   pageNumber: number | null
+  positionSeconds: number | null
+  mediaOverlayFragment: string | null
+  mediaOverlaySectionIndex: number | null
   updatedAt: string | null
 }
 
@@ -345,6 +349,7 @@ const detailCoverAspectRatio = computed(() => {
   return `${coverImageRatio.value} / 1`
 })
 const primaryFile = computed(() => props.book.files.find((f) => f.role === 'primary') ?? props.book.files[0] ?? null)
+const readAlongFile = computed(() => props.book.files.find((file) => hasReadAlong(file)) ?? null)
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
 const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
 const readableFiles = computed(() => props.book.files.filter((f) => f.format && READER_OPENABLE_FORMATS.has(f.format)))
@@ -750,11 +755,38 @@ const fileProgressRows = computed(() =>
       percentage: 0,
       cfi: null,
       pageNumber: null,
+      positionSeconds: null,
+      mediaOverlayFragment: null,
+      mediaOverlaySectionIndex: null,
       updatedAt: null,
     },
   })),
 )
-const detailProgressRows = computed(() => fileProgressRows.value.filter(({ progress }) => progress.percentage > 0))
+
+function hasMediaOverlayProgress(progress: FileProgress): boolean {
+  return (
+    (progress.positionSeconds != null && progress.positionSeconds > 0) || !!progress.mediaOverlayFragment || progress.mediaOverlaySectionIndex != null
+  )
+}
+
+function effectiveFileProgressPercentage(file: BookDetail['files'][number], progress: FileProgress): number {
+  if (progress.percentage > 0) return progress.percentage
+  const duration = file.mediaOverlay?.durationSeconds
+  if (duration != null && duration > 0 && progress.positionSeconds != null && progress.positionSeconds > 0) {
+    return (progress.positionSeconds / duration) * 100
+  }
+  return progress.percentage
+}
+
+const detailProgressRows = computed(() =>
+  fileProgressRows.value
+    .map(({ file, progress }) => ({
+      file,
+      progress,
+      percentage: effectiveFileProgressPercentage(file, progress),
+    }))
+    .filter(({ progress, percentage }) => percentage > 0 || hasMediaOverlayProgress(progress)),
+)
 
 type ProgressRow = {
   label: string
@@ -770,14 +802,14 @@ const KOBO_COLOR = '#f59e0b'
 const leftColumnProgressRows = computed<ProgressRow[]>(() => {
   const rows: ProgressRow[] = []
 
-  for (const { file, progress } of detailProgressRows.value) {
+  for (const { file, percentage } of detailProgressRows.value) {
     const color = getFormatColor(file.format ?? '?')
     rows.push({
       label: (file.format ?? '?').toUpperCase(),
-      percentage: progress.percentage,
+      percentage,
       color,
       badgeStyle: { color, borderColor: `${color}66`, backgroundColor: `${color}1a` },
-      finished: progress.percentage >= 100,
+      finished: percentage >= 100,
       resetFileId: file.id,
     })
   }
@@ -944,12 +976,16 @@ function formatDate(iso: string): string {
 }
 
 function formatBadgeStyle(fmt: string) {
-  const color = getFormatColor(fmt)
+  const color = formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_COLOR : getFormatColor(fmt)
   return {
     color,
     borderColor: `${color}66`,
     backgroundColor: `${color}1a`,
   }
+}
+
+function formatHasReadAlong(fmt: string): boolean {
+  return isReadAlongFormat(fmt, readAlongFile.value != null)
 }
 
 function providerLinkStyle(provider: string) {
@@ -1119,9 +1155,13 @@ async function loadSupplemental() {
     for (const row of progressRows) {
       if (!Number.isFinite(row.fileId)) continue
       progressMap[row.fileId] = {
-        percentage: row.percentage,
+        percentage: typeof row.percentage === 'number' && Number.isFinite(row.percentage) ? row.percentage : 0,
         cfi: row.cfi,
         pageNumber: row.pageNumber,
+        positionSeconds: typeof row.positionSeconds === 'number' && Number.isFinite(row.positionSeconds) ? row.positionSeconds : null,
+        mediaOverlayFragment: typeof row.mediaOverlayFragment === 'string' ? row.mediaOverlayFragment : null,
+        mediaOverlaySectionIndex:
+          typeof row.mediaOverlaySectionIndex === 'number' && Number.isFinite(row.mediaOverlaySectionIndex) ? row.mediaOverlaySectionIndex : null,
         updatedAt: row.updatedAt,
       }
     }
@@ -1617,6 +1657,7 @@ watch(
           :key="fmt"
           class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
           :style="formatBadgeStyle(fmt)"
+          :title="formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_TITLE : undefined"
         >
           <Tooltip v-if="fmt === primaryFile?.format">
             <TooltipTrigger as-child>
@@ -1625,6 +1666,7 @@ watch(
             <TooltipContent>{{ t('book.detail.details.primaryFormat') }}</TooltipContent>
           </Tooltip>
           {{ fmt }}
+          <Headphones v-if="formatHasReadAlong(fmt)" class="size-3 shrink-0" :stroke-width="2.5" aria-hidden="true" />
         </span>
         <div v-if="providerLinks.length || unlinkedCommunityBadges.length" class="flex items-center flex-wrap gap-2 w-full sm:w-auto sm:shrink-0">
           <div class="hidden sm:block w-px h-3.5 bg-border" />
