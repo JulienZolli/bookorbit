@@ -3306,7 +3306,6 @@
       "searchPlaceholder": "Rechercher des paramètres",
       "clearSearch": "Effacer la recherche",
       "noResults": "Aucun paramètre ne correspond à « {query} ».",
-      "shortcutHint": "Appuyez sur Cmd K pour accéder directement à un paramètre",
       "status": {
         "scanning": "Analyse en cours"
       },

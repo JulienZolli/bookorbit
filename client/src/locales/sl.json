@@ -2509,7 +2509,6 @@
       "searchPlaceholder": "Nastavitve iskanja",
       "clearSearch": "Počisti iskanje",
       "noResults": "Nobena nastavitev ne ustreza {query}.",
-      "shortcutHint": "Pritisnite Cmd K za skok na katero koli nastavitev",
       "groups": {
         "you": "Vi",
         "library": "Knjižnica",

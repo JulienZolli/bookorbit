@@ -2359,7 +2359,6 @@
       "searchPlaceholder": "Setări căutare",
       "clearSearch": "Ștergeți căutarea",
       "noResults": "Nicio setare nu corespunde cu {query}.",
-      "shortcutHint": "Apăsați Cmd K pentru a sări la orice setare",
       "groups": {
         "you": "Tu",
         "library": "Bibliotecă",

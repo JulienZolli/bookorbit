@@ -4,6 +4,7 @@ import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, ChevronRight, Search, X } from '@lucide/vue'
+import { useModifierKey } from '@/composables/useModifierKey'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useSettingsNavStatus } from '../composables/useSettingsNavStatus'
 import { visibleSettingsNav, type SettingsNavGroup, type SettingsNavItem } from '../lib/settings-nav'
@@ -17,6 +18,10 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const { isSuperuser, userPermissions, isDemoRestrictedAccount } = usePermissions()
+const { isMac, modifierKey } = useModifierKey()
+
+/** Apple writes the combo as one glyph pair, everyone else separates the two keys. */
+const shortcutLabel = computed(() => (isMac.value ? `${modifierKey.value}K` : `${modifierKey.value}+K`))
 
 const query = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -296,7 +301,7 @@ defineExpose({ focusSearch })
     </div>
 
     <div class="hidden shrink-0 border-t border-border/70 px-4 py-2 text-[11px] text-muted-foreground md:block">
-      {{ t('settings.nav.shortcutHint') }}
+      {{ t('settings.nav.shortcutHint', { shortcut: shortcutLabel }) }}
     </div>
   </nav>
 </template>

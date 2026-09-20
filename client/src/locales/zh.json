@@ -3015,7 +3015,6 @@
       "searchPlaceholder": "搜索设置",
       "clearSearch": "清空搜索内容",
       "noResults": "没有设置匹配{query}",
-      "shortcutHint": "按 Cmd K 跳转到任何设置",
       "status": {
         "scanning": "扫描中"
       },

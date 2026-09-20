@@ -2946,7 +2946,6 @@
       "searchPlaceholder": "설정 검색",
       "clearSearch": "검색 초기화",
       "noResults": "{query}와 일치하는 설정 항목 없음",
-      "shortcutHint": "설정으로 이동하려면 Cmd K 단축키를 눌러주세요",
       "groups": {
         "you": "개인",
         "library": "라이브러리",

@@ -2262,7 +2262,6 @@
       "searchPlaceholder": "検索設定",
       "clearSearch": "検索をクリア",
       "noResults": "{query} に一致する設定がありません。",
-      "shortcutHint": "Cmd K を押して任意の設定にジャンプします",
       "groups": {
         "you": "あなたです",
         "library": "ライブラリ",

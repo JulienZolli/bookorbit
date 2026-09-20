@@ -3368,7 +3368,7 @@
       "searchPlaceholder": "Search settings",
       "clearSearch": "Clear search",
       "noResults": "No settings match {query}.",
-      "shortcutHint": "Press Cmd K to jump to any setting",
+      "shortcutHint": "Press {shortcut} to jump to any setting",
       "status": {
         "scanning": "Scanning"
       },

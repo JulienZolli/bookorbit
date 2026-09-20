@@ -3238,7 +3238,6 @@
       "searchPlaceholder": "Keresési beállítások",
       "clearSearch": "Keresés törlése",
       "noResults": "Nincsenek a következőnek megfelelő beállítások: {query}.",
-      "shortcutHint": "Nyomd meg a Cmd K billentyűkombinációt bármelyik beállításhoz ugráshoz",
       "status": {
         "scanning": "Beolvasás"
       },

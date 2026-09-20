@@ -3089,7 +3089,6 @@
       "searchPlaceholder": "Sucheinstellungen",
       "clearSearch": "Suche zurücksetzen",
       "noResults": "Keine Einstellungen entsprechen {query}.",
-      "shortcutHint": "Drücke Cmd K um zu einer beliebigen Einstellung zu springen",
       "groups": {
         "you": "Du",
         "library": "Bibliothek",
