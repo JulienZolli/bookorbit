@@ -38,16 +38,26 @@ describe('Docker file-backed environment values', () => {
     expect(result.stdout).toBe('  file-secret-value  |unset');
   });
 
-  it('loads application encryption keys', () => {
-    const secretPath = join(secretDir, 'book-request-key');
-    writeFileSync(secretPath, 'book-request-encryption-key');
+  it.each([
+    'BOOK_REQUEST_ENCRYPTION_KEY',
+    'DATABASE_URL',
+    'EMAIL_ENCRYPTION_KEY',
+    'GITHUB_RELEASES_TOKEN',
+    'JWT_SECRET',
+    'MIGRATION_ENCRYPTION_KEY',
+    'PODCAST_ENCRYPTION_KEY',
+    'POSTGRES_PASSWORD',
+    'SETUP_BOOTSTRAP_TOKEN',
+  ])('loads %s from a mounted file', (name) => {
+    const secretPath = join(secretDir, 'secret-value');
+    writeFileSync(secretPath, `${name}-from-file`);
 
-    const result = runHelper('load_file_env; printf "%s" "$BOOK_REQUEST_ENCRYPTION_KEY"', {
-      BOOK_REQUEST_ENCRYPTION_KEY_FILE: secretPath,
+    const result = runHelper(`load_file_env; printf "%s" "$${name}"`, {
+      [`${name}_FILE`]: secretPath,
     });
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe('book-request-encryption-key');
+    expect(result.stdout).toBe(`${name}-from-file`);
   });
 
   it('rejects non-empty direct and file values together', () => {
