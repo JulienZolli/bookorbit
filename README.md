@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="docs/images/bookorbit-icon.png" alt="BookOrbit icon" width="128" height="128">
-
-# BookOrbit
+<h1>
+  <img src="docs/images/bookorbit-icon.png" alt="" width="128" height="128"><br>
+  BookOrbit
+</h1>
 
 A self-hosted library and reading platform for ebooks, PDFs, audiobooks, and comics.
 
