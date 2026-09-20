@@ -17,9 +17,9 @@ Copyright (C) 2025-2026 neon and BookOrbit contributors.
 
 [![Website](https://img.shields.io/badge/Website-bookorbit.app-blue?style=flat-square&logo=googlechrome&logoColor=white&color=4169E1)](https://bookorbit.app)
 [![Demo](https://img.shields.io/badge/Demo-live-brightgreen?style=flat-square&logo=rocket&logoColor=white&color=40a829)](https://demo.bookorbit.app/magic?token=2d92cb900e184cf0eb8b11f72cffc6011673d1016e1b300d750eb3d76abc1572)
+[![App Store](https://img.shields.io/badge/App_Store-download-0D96F6?style=flat-square&logo=appstore&logoColor=white)](https://apps.apple.com/us/app/bookorbit-the-official-app/id6811807346)
 [![GHCR Pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fbookorbit%2Fbookorbit%2Fbookorbit&query=downloadCount&label=Docker%20Pulls&logo=docker&style=flat-square&color=2496ed)](https://github.com/bookorbit/bookorbit/pkgs/container/bookorbit)
 [![Contributing](https://img.shields.io/badge/Contributing-guide-orange?style=flat-square&logo=handshake&logoColor=white)](https://github.com/bookorbit/bookorbit/blob/main/docs/CONTRIBUTING.md)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square&color=B461B3)](LICENSE)
 
 ![BookOrbit dashboard showing reading stats, widgets, and book shelves](docs/images/dashboard-overview.png)
 
@@ -29,11 +29,38 @@ Copyright (C) 2025-2026 neon and BookOrbit contributors.
 
 ## What is BookOrbit?
 
-**[BookOrbit](https://bookorbit.app)** organizes your books and reads them back to you anywhere: the web reader, a Kobo, or KOReader. Progress, highlights, and reading status move between all three, so you can start a chapter in one place and finish it in another.
+**[BookOrbit](https://bookorbit.app)** organizes your books and lets you enjoy them anywhere: on iPhone, Apple Watch, the web, Kobo, or KOReader. Your reading progress, highlights, and status stay synchronized, so you can start a chapter in one place and continue in another.
 
 Around that core sit 14 metadata providers, reading statistics and achievements, OPDS and Send-to-Kindle delivery, multi-user accounts with OIDC/SSO, and automatic sync out to Hardcover, Readwise, and StoryGraph. All of it runs on infrastructure you control.
 
 [![Visit Website](https://img.shields.io/badge/Visit%20Website-bookorbit.app-4169E1?style=for-the-badge&logo=googlechrome&logoColor=white)](https://bookorbit.app)
+
+## BookOrbit for iPhone and Apple Watch
+
+Take your library anywhere with the official native BookOrbit app. Read ebooks, PDFs, and comics; stream or download audiobooks; use text to speech; and keep reading offline. The app connects directly to your self-hosted BookOrbit server, while Apple Watch brings downloaded audiobooks and synchronized playback progress to your wrist.
+
+![BookOrbit on iPhone showing the home screen, Read Along, and audiobook playback alongside the Apple Watch library](docs/images/ios-app-hero.webp)
+
+<div align="center">
+
+<a href="https://apps.apple.com/us/app/bookorbit-the-official-app/id6811807346"><img src="https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download BookOrbit on the App Store" height="54"></a>
+
+<sub>Requires iOS 26 or later. Apple Watch features require watchOS 26 or later.</sub>
+
+</div>
+
+<details>
+<summary><strong>Explore all 14 screenshots</strong></summary>
+
+### iPhone
+
+![Ten BookOrbit iPhone screens showing the home experience, Read Along, audiobook playback, book requests, appearance customization, text to speech, reading activity, achievements, shelves, and offline downloads](docs/images/ios-app-gallery.webp)
+
+### Apple Watch
+
+![Four BookOrbit Apple Watch screens showing the offline library, the app menu, audiobook playback, and playback settings](docs/images/apple-watch-showcase.webp)
+
+</details>
 
 ## Live Demo
 
@@ -48,6 +75,7 @@ Try the live instance before you install. No account required.
 ### Reading Experience & Sync
 
 - **Built-in Web Readers**: Ebooks (EPUB, KEPUB, MOBI, AZW3, AZW, FB2), PDFs, comics (CBZ, CBR, CB7), and audiobooks (M4B, MP3, M4A, OPUS, OGG, FLAC), with no extra plugins required.
+- **Native iPhone & Apple Watch Apps**: Read, listen, download, upload, and synchronize with your BookOrbit server from a native, offline-capable iPhone app. Send audiobooks to Apple Watch for independent offline playback and later progress reconciliation.
 - **Three-Way Sync (Kobo + KOReader + BookOrbit)**: Progress and annotations flow bidirectionally between Kobo devices, KOReader, and the BookOrbit web reader. Pick up on any surface where you left off on another, including highlights and deletions.
 - **KOReader Plugin**: An on-device catalog browser with search, download, and status and rating management, alongside full progress and annotation sync.
 - **Annotations & Highlights**: Highlights from the web reader, KOReader, and Kobo merge into one searchable hub. Filter by color, style, and source; export as Markdown, CSV, or JSON.
