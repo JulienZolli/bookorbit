@@ -9585,9 +9585,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Paramètres d'analyse",
       "title": "Livres en double",
-      "description": "Analysez les fichiers et les métadonnées à la recherche d'enregistrements en double potentiels. Rien n'est supprimé lors d'une analyse.",
       "scope": "Portée de la bibliothèque",
       "allLibraries": "Toutes les bibliothèques accessibles",
       "similarity": "Seuil de titre similaire",
@@ -9599,7 +9597,6 @@
         "queued": "Analyse en file d'attente",
         "running": "Analyse des livres"
       },
-      "groupsFound": "{count, plural, =0 {Pas de groupes en double} one {Un groupe en double} other {# groupes en double} many {# groupes en double}}",
       "filter": "Type de correspondance",
       "allReasons": "Tous les types de correspondance",
       "reasons": {
@@ -9608,17 +9605,7 @@
         "exact_metadata": "Titre exact et auteurs",
         "fuzzy_metadata": "Titre et auteur similaires"
       },
-      "similarityValue": "{percent} % de similarité du titre",
       "notDuplicates": "Pas de doublons",
-      "keepThis": "Gardez ce livre",
-      "discardThis": "Jeter ce livre",
-      "selectKeeperFirst": "Sélectionnez d'abord le livre à conserver",
-      "noDirectMatch": "Aucune correspondance directe avec le livre à conserver",
-      "moreFiles": "+{count} plus",
-      "showDetails": "Afficher les détails",
-      "hideDetails": "Masquer les détails",
-      "deleteSelected": "Supprimer {count} sélectionné",
-      "openBook": "Ouvrir les détails de {title}",
       "unknownAuthor": "Auteur inconnu",
       "unknown": "Inconnu",
       "none": "Aucun",
@@ -9629,14 +9616,8 @@
         "library": "Bibliothèque",
         "isbn": "ISBN",
         "formats": "Formats",
-        "fileLocation": "Fichier",
-        "files": "Fichiers",
-        "readingStatus": "Statut de lecture",
-        "progress": "Progrès",
-        "path": "Chemin de la bibliothèque",
         "collections": "Collections",
-        "added": "Ajouté",
-        "updated": "Mis à jour"
+        "added": "Ajouté"
       },
       "initial": {
         "title": "Trouver des livres en double",
@@ -9647,8 +9628,6 @@
         "description": "Aucun livre ne correspond à la portée, au niveau de similarité et au filtre de correspondance actuels."
       },
       "deleteDialog": {
-        "title": "Supprimer définitivement les livres en double ?",
-        "description": "{count, plural, =0 {Cela supprimera définitivement # livre sélectionné et ses fichiers.} one {Cela supprimera définitivement # livre sélectionné et ses fichiers.} other {Cela supprimera définitivement # livres sélectionnés et leurs fichiers.} many {Cela supprimera définitivement # livres sélectionnés et leurs fichiers.}}",
         "warning": "Les métadonnées, les collections, les données de lecture et l'état de l'appareil ne sont pas transférés dans le livre tenu. Les données associées aux autres utilisateurs sont également supprimées.",
         "confirm": "{count, plural, =0 {Supprimer # livre} one {Supprimer # livre} other {Supprimer # livres} many {Supprimer # livres}}",
         "success": "{count, plural, =0 {Aucun livre supprimé} one {Un livre en double supprimé} other {# livres en double supprimés} many {# livres en double supprimés}}"

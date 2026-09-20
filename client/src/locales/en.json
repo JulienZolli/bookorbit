@@ -9855,12 +9855,10 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Scan settings",
       "title": "Duplicate Books",
-      "description": "Scan files and metadata for potential duplicate records. Nothing is deleted during a scan.",
       "scope": "Library scope",
       "allLibraries": "All accessible libraries",
-      "similarity": "Similar-title threshold",
+      "similarity": "Similar titles",
       "explainSimilarity": "Explain the similar-title threshold",
       "similarityHelp": "Only for Similar title and author matches. At least one author and the book type must also match. Lower finds more possible duplicates; higher requires closer titles. Identical files, ISBN, and exact metadata are checked separately.",
       "runScan": "Run scan",
@@ -9869,8 +9867,7 @@
         "queued": "Scan queued",
         "running": "Scanning books"
       },
-      "groupsFound": "{count, plural, =0 {No duplicate groups} one {One duplicate group} other {# duplicate groups}}",
-      "filter": "Match type",
+      "filter": "Filter by match type",
       "allReasons": "All match types",
       "reasons": {
         "file_hash": "Identical file set",
@@ -9878,35 +9875,28 @@
         "exact_metadata": "Exact title and authors",
         "fuzzy_metadata": "Similar title and author"
       },
-      "similarityValue": "{percent}% title similarity",
       "notDuplicates": "Not duplicates",
-      "keepThis": "Keep this book",
-      "discardThis": "Discard this book",
-      "selectKeeperFirst": "Select a keeper first",
-      "noDirectMatch": "No direct match with keeper",
-      "moreFiles": "+{count} more",
-      "showDetails": "Show details",
-      "hideDetails": "Hide details",
-      "deleteSelected": "Delete {count} selected",
-      "openBook": "Open details for {title}",
       "unknownAuthor": "Unknown author",
       "unknown": "Unknown",
       "none": "None",
       "accessDenied": "You do not have permission to use the duplicate book tool.",
-      "pairDetails": "Match details",
+      "pairDetails": "Why these matched",
       "pairLabel": "{first} and {second}",
       "fields": {
         "library": "Library",
         "isbn": "ISBN",
         "formats": "Formats",
-        "fileLocation": "File",
-        "files": "Files",
-        "readingStatus": "Reading status",
-        "progress": "Progress",
-        "path": "Library path",
         "collections": "Collections",
         "added": "Added",
-        "updated": "Updated"
+        "size": "Size",
+        "metadata": "Metadata",
+        "reading": "Reading",
+        "folder": "Folder",
+        "noIsbn": "Not set",
+        "notStarted": "Not started",
+        "outOfHundred": "/100",
+        "percentRead": "{percent} read",
+        "fileCount": "{count, plural, one {# file} other {# files}}"
       },
       "initial": {
         "title": "Find duplicate books",
@@ -9917,8 +9907,6 @@
         "description": "No books matched the current scope, similarity level, and match filter."
       },
       "deleteDialog": {
-        "title": "Permanently delete duplicate books?",
-        "description": "{count, plural, =0 {This will permanently delete # selected book and its files.} one {This will permanently delete # selected book and its files.} other {This will permanently delete # selected books and their files.}}",
         "warning": "Metadata, collections, reading data, and device state are not transferred to the kept book. Associated data for other users is also removed.",
         "confirm": "{count, plural, =0 {Delete # book} one {Delete # book} other {Delete # books}}",
         "success": "{count, plural, =0 {No books deleted} one {One duplicate book deleted} other {# duplicate books deleted}}"
@@ -9928,11 +9916,101 @@
         "status": "Could not load scan progress.",
         "scan": "The duplicate scan failed. Try running it again.",
         "results": "Could not load duplicate groups.",
-        "delete": "Could not delete the selected duplicate books."
+        "delete": "Could not delete the selected duplicate books.",
+        "dismiss": "Could not dismiss that group.",
+        "restore": "Could not restore that pair."
       },
       "pagination": {
         "label": "Duplicate groups pages",
         "page": "Page {page} of {total}"
+      },
+      "similarityOption": "{percent} and up",
+      "scannedBooks": "{count} books · checked {when}",
+      "scanProgress": "{processed} of {total} books",
+      "recommended": "Recommended",
+      "keeping": "Keeping",
+      "willDelete": "Delete",
+      "keepCopy": "Keep {name}",
+      "selectGroup": "Select {title}",
+      "selectAll": "Select every group on this page",
+      "compareCopies": "Compare the copies of {title}",
+      "compareCaption": "Field by field comparison of {count} copies",
+      "fieldColumn": "Field",
+      "filesEach": "{count, plural, one {# file each} other {# files each}}",
+      "moreFilesCount": "{count, plural, one {and # more file} other {and # more files}}",
+      "identicalAcross": "{count, plural, one {Identical in both copies:} other {Identical in all # copies:}}",
+      "deleteGroup": "{count, plural, one {Delete # copy, free {size}} other {Delete # copies, free {size}}}",
+      "confidence": {
+        "file_hash": "Identical",
+        "isbn": "Same ISBN",
+        "exact_metadata": "Exact match",
+        "fuzzy_metadata": "Similar",
+        "withSimilarity": "{label} {percent}"
+      },
+      "summary": {
+        "groups": "{count, plural, one {group} other {groups}}",
+        "extraCopies": "{count, plural, one {extra copy} other {extra copies}}",
+        "reclaimable": "reclaimable"
+      },
+      "columns": {
+        "match": "Match",
+        "book": "Book",
+        "copies": "Copies",
+        "libraries": "Libraries",
+        "frees": "Frees",
+        "keeping": "Keeping"
+      },
+      "keepRule": {
+        "label": "Keep",
+        "metadata": "Best metadata",
+        "size": "Largest files",
+        "formats": "Most formats",
+        "oldest": "Oldest copy",
+        "newest": "Newest copy",
+        "hint": "Picks a keeper in every group. You can override any row."
+      },
+      "sort": {
+        "label": "Sort",
+        "reclaimable": "Most space freed",
+        "copies": "Most copies",
+        "confidence": "Strongest match",
+        "title": "Title A to Z"
+      },
+      "keeper": {
+        "yourChoice": "Your choice",
+        "reading": "you are {percent} through it",
+        "collection": "it is in {name}",
+        "metadata": "metadata {score}",
+        "largest": "largest at {size}",
+        "formats": "{count} formats",
+        "isbn": "has an ISBN",
+        "added": "added {date}",
+        "riskReading": "deletes a copy you are {percent} through",
+        "riskCollection": "deletes a copy in {name}"
+      },
+      "selection": {
+        "summary": "{groups} groups selected, {copies} copies to delete, frees {size}",
+        "clear": "Clear",
+        "review": "{count, plural, one {Review # copy} other {Review # copies}}",
+        "hint": "Tick the groups you trust, or open one to compare the copies."
+      },
+      "keys": {
+        "move": "move",
+        "expand": "expand",
+        "keep": "keep",
+        "select": "select"
+      },
+      "review": {
+        "title": "{count, plural, one {Delete # copy} other {Delete # copies}}",
+        "description": "Across {groups} groups, freeing {size}. Nothing is deleted until you confirm.",
+        "riskWarning": "{count, plural, one {# group deletes a copy carrying your reading data.} other {# groups delete a copy carrying your reading data.}}",
+        "footer": "Frees {size}"
+      },
+      "dismissed": {
+        "show": "{count, plural, one {Show # dismissed pair} other {Show # dismissed pairs}}",
+        "hide": "Hide dismissed pairs",
+        "restore": "Restore this pair",
+        "restored": "Pair restored. It can match again on the next scan."
       }
     },
     "entityManager": {

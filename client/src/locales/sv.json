@@ -6372,9 +6372,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Skanna inställningar",
       "title": "Duplicera böcker",
-      "description": "Skanna filer och metadata för potentiella dubbletter poster. Ingenting tas bort under en skanning.",
       "scope": "Bibliotekets omfattning",
       "allLibraries": "Alla tillgängliga bibliotek",
       "similarity": "Motsvarande titel tröskel",
@@ -6386,7 +6384,6 @@
         "queued": "Skanna köad",
         "running": "Skannar böcker"
       },
-      "groupsFound": "{count, plural, =0 {Inga dubblettgrupper} one {En dubblettgrupp} other {# dubblettgrupper}}",
       "filter": "Matchande typ",
       "allReasons": "Alla matchningstyper",
       "reasons": {
@@ -6395,17 +6392,7 @@
         "exact_metadata": "Exakt titel och författare",
         "fuzzy_metadata": "Liknande titel och författare"
       },
-      "similarityValue": "{percent}% titel likhet",
       "notDuplicates": "Inte dubbletter",
-      "keepThis": "Behåll denna bok",
-      "discardThis": "Ignorera denna bok",
-      "selectKeeperFirst": "Välj en målvakt först",
-      "noDirectMatch": "Ingen direktmatch med målvakten",
-      "moreFiles": "+{count} fler",
-      "showDetails": "Visa detaljer",
-      "hideDetails": "Dölj detaljer",
-      "deleteSelected": "Ta bort {count} markerat",
-      "openBook": "Öppna detaljer för {title}",
       "unknownAuthor": "Okänd författare",
       "unknown": "Okänd",
       "none": "Ingen",
@@ -6416,14 +6403,8 @@
         "library": "Bibliotek",
         "isbn": "ISBN",
         "formats": "Format",
-        "fileLocation": "Fil",
-        "files": "Filer",
-        "readingStatus": "Läser status",
-        "progress": "Förlopp",
-        "path": "Sökväg till bibliotek",
         "collections": "Samlingar",
-        "added": "Tillagd",
-        "updated": "Uppdaterad"
+        "added": "Tillagd"
       },
       "initial": {
         "title": "Hitta dubblettböcker",
@@ -6434,8 +6415,6 @@
         "description": "Inga böcker matchade nuvarande omfattning, likhetsnivå och matcha filter."
       },
       "deleteDialog": {
-        "title": "Ta bort dubbla böcker permanent?",
-        "description": "{count, plural, =0 {Detta kommer permanent radera # vald bok och dess filer.} one {Detta kommer att permanent ta bort # vald bok och dess filer.} other {Detta raderar permanent # utvalda böcker och deras filer.}}",
         "warning": "Metadata, insamlingar, läsning av data och enhetstillstånd överförs inte till den bevarade boken. Kopplade data för andra användare tas också bort.",
         "confirm": "{count, plural, =0 {Ta bort # bok} one {Ta bort # bok} other {Ta bort # böcker}}",
         "success": "{count, plural, =0 {Inga böcker raderade} one {En duplicerad bok raderad} other {# duplicerade böcker raderade}}"

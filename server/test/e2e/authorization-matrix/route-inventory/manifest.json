@@ -1,5 +1,5 @@
 {
-  "totalRoutes": 595,
+  "totalRoutes": 598,
   "byPermission": {
     "(none)": 259,
     "Permission.ManageMetadataConfig": 34,
@@ -17,7 +17,7 @@
     "Permission.OpdsAccess": 4,
     "Permission.ViewAuditLog": 1,
     "Permission.ViewUserActivity": 6,
-    "Permission.LibraryDeleteBooks": 11,
+    "Permission.LibraryDeleteBooks": 14,
     "Permission.LibraryDownload": 4,
     "Permission.LibraryUpload": 2,
     "Permission.ManageBookDock": 3,

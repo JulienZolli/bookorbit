@@ -7708,7 +7708,6 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Scan-Einstellungen",
       "title": "Doppelte Bücher",
       "scope": "Bibliotheksumfang",
       "allLibraries": "Alle verfügbaren Bibliotheken",
@@ -7718,7 +7717,6 @@
         "queued": "Scan in Warteschlange",
         "running": "Scanne Bücher"
       },
-      "groupsFound": "{count, plural, =0 {Keine duplizierten Gruppen} one {Eine duplizierte Gruppe} other {# duplizierte Gruppen}}",
       "filter": "Übereinstimmungstyp",
       "allReasons": "Alle Übereinstimmungstypen",
       "reasons": {
@@ -7726,15 +7724,7 @@
         "exact_metadata": "Exakter Titel und Autoren",
         "fuzzy_metadata": "Ähnlicher Titel und Autor"
       },
-      "similarityValue": "{percent}% Titel-Ähnlichkeit",
       "notDuplicates": "Keine Duplikate",
-      "keepThis": "Dieses Buch behalten",
-      "discardThis": "Dieses Buch verwerfen",
-      "moreFiles": "+{count} weitere",
-      "showDetails": "Details anzeigen",
-      "hideDetails": "Details ausblenden",
-      "deleteSelected": "Ausgewählte {count} löschen",
-      "openBook": "Details für {title} öffnen",
       "unknownAuthor": "Unbekannter Autor",
       "unknown": "Unbekannt",
       "none": "Keine",
@@ -7744,21 +7734,13 @@
         "library": "Bibliothek",
         "isbn": "ISBN",
         "formats": "Formate",
-        "fileLocation": "Datei",
-        "files": "Dateien",
-        "readingStatus": "Lesestatus",
-        "progress": "Fortschritt",
-        "path": "Bibliothekspfad",
         "collections": "Sammlungen",
-        "added": "Hinzugefügt",
-        "updated": "Aktualisiert"
+        "added": "Hinzugefügt"
       },
       "initial": {
         "title": "Doppelte Bücher finden"
       },
       "deleteDialog": {
-        "title": "Doppelte Bücher dauerhaft löschen?",
-        "description": "{count, plural, =0 {This will permanently delete # selected book and its files.} one {This will permanently delete # selected book and its files.} other {This will permanently delete # selected books and their files.}}",
         "confirm": "{count, plural, =0 {# Buch löschen} one {# Buch löschen} other {Lösche # Bücher}}",
         "success": "{count, plural, =0 {Keine Bücher gelöscht} one {Ein doppeltes Buch gelöscht} other {# doppelte Bücher gelöscht}}"
       },

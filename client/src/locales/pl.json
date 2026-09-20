@@ -6657,9 +6657,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Ustawienia skanowania",
       "title": "Duplikaty książek",
-      "description": "Skanuj pliki i metadane w poszukiwaniu potencjalnych duplikatów rekordów. Podczas skanowania nic nie jest usuwane.",
       "scope": "Zakres biblioteki",
       "allLibraries": "Wszystkie dostępne biblioteki",
       "similarity": "Próg podobnego tytułu",
@@ -6671,7 +6669,6 @@
         "queued": "Skanowanie w kolejce",
         "running": "Skanowanie książek"
       },
-      "groupsFound": "{count, plural, =0 {Brak zduplikowanych grup} one {Jedna zduplikowana grupa} other {# zduplikowanej grupy} few {# zduplikowane grupy} many {# zduplikowanych grup}}",
       "filter": "Typ dopasowania",
       "allReasons": "Wszystkie typy dopasowań",
       "reasons": {
@@ -6680,17 +6677,7 @@
         "exact_metadata": "Dokładny tytuł i autorzy",
         "fuzzy_metadata": "Podobny tytuł i autor"
       },
-      "similarityValue": "{percent}% podobieństwa tytułów",
       "notDuplicates": "Nie duplikaty",
-      "keepThis": "Zachowaj tę książkę",
-      "discardThis": "Wyrzuć tę książkę",
-      "selectKeeperFirst": "Najpierw wybierz książkę do zachowania",
-      "noDirectMatch": "Brak bezpośredniego dopasowania do książki wybranej do zachowania",
-      "moreFiles": "+{count} więcej",
-      "showDetails": "Pokaż szczegóły",
-      "hideDetails": "Ukryj szczegóły",
-      "deleteSelected": "Usuń wybrane {count}",
-      "openBook": "Otwórz szczegóły {title}",
       "unknownAuthor": "Nieznany autor",
       "unknown": "Nieznany",
       "none": "Żadne",
@@ -6701,14 +6688,8 @@
         "library": "Biblioteka",
         "isbn": "ISBN",
         "formats": "Formaty",
-        "fileLocation": "Plik",
-        "files": "Pliki",
-        "readingStatus": "Stan odczytu",
-        "progress": "Postęp",
-        "path": "Ścieżka biblioteczna",
         "collections": "Kolekcje",
-        "added": "Dodano",
-        "updated": "Zaktualizowano"
+        "added": "Dodano"
       },
       "initial": {
         "title": "Znajdź duplikaty książek",
@@ -6719,8 +6700,6 @@
         "description": "Żadne książki nie odpowiadały bieżącemu zakresowi, poziomowi podobieństwa i filtrowi dopasowania."
       },
       "deleteDialog": {
-        "title": "Trwale usunąć zduplikowane książki?",
-        "description": "{count, plural, =0 {Spowoduje to trwałe usunięcie # wybranych książek i ich plików.} one {Spowoduje to trwałe usunięcie # wybranej książki i jej plików.} other {Spowoduje to trwałe usunięcie # wybranej książki i jej plików.} few {Spowoduje to trwałe usunięcie # wybranych książek i ich plików.} many {Spowoduje to trwałe usunięcie # wybranych książek i ich plików.}}",
         "warning": "Metadane, zbiory, dane odczytowe i stan urządzenia nie są przenoszone do prowadzonej księgi. Powiązane dane innych użytkowników są również usuwane.",
         "confirm": "{count, plural, =0 {Usuń # książka} one {Usuń # książka} other {Usuń # książki} few {Usuń # książki} many {Usuń # książek}}",
         "success": "{count, plural, =0 {Żadne książki nie zostały usunięte} one {Usunięto jedną zduplikowaną książkę} other {# usunięte zdublowane książki} few {Usunięto # zduplikowane książki} many {Usunięto # zduplikowanych książek}}"

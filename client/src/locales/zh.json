@@ -7648,9 +7648,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "扫描设置",
       "title": "复制书",
-      "description": "扫描可能重复记录的文件和元数据。扫描时没有删除任何记录。",
       "scope": "书库范围",
       "allLibraries": "所有可用库",
       "similarity": "相似标题阈值",
@@ -7662,7 +7660,6 @@
         "queued": "扫描队列",
         "running": "扫描书"
       },
-      "groupsFound": "{count, plural, =0 {没有重复的组} one {一个重复的组} other {# 重复的组}}",
       "filter": "匹配类型",
       "allReasons": "所有匹配类型",
       "reasons": {
@@ -7671,17 +7668,7 @@
         "exact_metadata": "确切的标题和作者",
         "fuzzy_metadata": "相似的头衔和作者"
       },
-      "similarityValue": "标题相似度：{percent}%",
       "notDuplicates": "不重复",
-      "keepThis": "保留这本书",
-      "discardThis": "丢弃这本书",
-      "selectKeeperFirst": "请先勾选保留版本",
-      "noDirectMatch": "没有与管理员的直接匹配",
-      "moreFiles": "另有 {count} 个文件",
-      "showDetails": "显示详细信息",
-      "hideDetails": "隐藏详细信息",
-      "deleteSelected": "删除选中的 {count} 项",
-      "openBook": "查看《{title}》详情",
       "unknownAuthor": "未知作者",
       "unknown": "未知的",
       "none": "无",
@@ -7692,14 +7679,8 @@
         "library": "书库",
         "isbn": "ISBN",
         "formats": "格式",
-        "fileLocation": "文件",
-        "files": "文件",
-        "readingStatus": "正在阅读状态",
-        "progress": "进展情况",
-        "path": "库路径",
         "collections": "收藏夹",
-        "added": "已添加",
-        "updated": "已更新"
+        "added": "已添加"
       },
       "initial": {
         "title": "查找重复的书",
@@ -7710,8 +7691,6 @@
         "description": "没有匹配当前范围、相似度和匹配过滤器的书籍。"
       },
       "deleteDialog": {
-        "title": "永久删除重复的书？",
-        "description": "{count, plural, =0 {这将永久删除 # 选定的书及其文件} other {这将永久删除 # 选定的书籍及其文件}}",
         "warning": "元数据、采集、阅读数据和设备状态不会传输到保存的书。其他用户的相关数据也会被删除。",
         "confirm": "{count, plural, =0 {删除# 书} one {删除# 书} other {删除# 书}}",
         "success": "{count, plural, =0 {没有已删除的书} one {删除了一个重复的书} other {# 已删除的重复书}}"

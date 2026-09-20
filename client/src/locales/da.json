@@ -6390,9 +6390,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Scan indstillinger",
       "title": "Dupliker Bøger",
-      "description": "Scan filer og metadata for potentielle duplikerede poster. Intet slettes under en scanning.",
       "scope": "Biblioteks anvendelsesområde",
       "allLibraries": "Alle tilgængelige biblioteker",
       "similarity": "Tilsvarende titel tærskel",
@@ -6404,7 +6402,6 @@
         "queued": "Skan i kø",
         "running": "Scanner bøger"
       },
-      "groupsFound": "{count, plural, =0 {Ingen dublerede grupper} one {En dubleret gruppe} other {# dublerede grupper}}",
       "filter": "Match type",
       "allReasons": "Alle matchtyper",
       "reasons": {
@@ -6413,17 +6410,7 @@
         "exact_metadata": "Præcis titel og forfattere",
         "fuzzy_metadata": "Lignende titel og forfatter"
       },
-      "similarityValue": "{percent}% titellighed",
       "notDuplicates": "Ikke dubletter",
-      "keepThis": "Behold denne bog",
-      "discardThis": "Kassér denne bog",
-      "selectKeeperFirst": "Vælg en bruger først",
-      "noDirectMatch": "Ingen direkte match med keeper",
-      "moreFiles": "+{count} mere",
-      "showDetails": "Vis detaljer",
-      "hideDetails": "Skjul detaljer",
-      "deleteSelected": "Slet {count} valgt",
-      "openBook": "Åbn detaljer for {title}",
       "unknownAuthor": "Ukendt forfatter",
       "unknown": "Ukendt",
       "none": "Ingen",
@@ -6434,14 +6421,8 @@
         "library": "Bibliotek",
         "isbn": "ISBN",
         "formats": "Formater",
-        "fileLocation": "Fil",
-        "files": "Filer",
-        "readingStatus": "Læser status",
-        "progress": "Fremskridt",
-        "path": "Biblioteks sti",
         "collections": "Samlinger",
-        "added": "Tilføjet",
-        "updated": "Opdateret"
+        "added": "Tilføjet"
       },
       "initial": {
         "title": "Find duplikerede bøger",
@@ -6452,8 +6433,6 @@
         "description": "Ingen bøger matchede det aktuelle omfang, lighed niveau, og match filter."
       },
       "deleteDialog": {
-        "title": "Slet duplikerede bøger permanent?",
-        "description": "{count, plural, =0 {Dette vil permanent slette # valgte bog og dens filer.} one {Dette vil permanent slette # valgte bog og dens filer.} other {Dette vil permanent slette # valgte bøger og deres filer.}}",
         "warning": "Metadata, samlinger, læsedata og enhedstilstand overføres ikke til den gemte bog. Tilknyttede data for andre brugere fjernes også.",
         "confirm": "{count, plural, =0 {Slet # bog} one {Slet # bog} other {Slet # bøger}}",
         "success": "{count, plural, =0 {Ingen bøger slettet} one {En duplikeret bog slettet} other {# duplikerede bøger slettet}}"

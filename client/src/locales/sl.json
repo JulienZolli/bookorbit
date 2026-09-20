@@ -7128,9 +7128,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Nastavitve skeniranja",
       "title": "Podvojene knjige",
-      "description": "Preglej datoteke in metapodatke za morebitne podvojene zapise. Med pregledovanjem se nič ne izbriše.",
       "scope": "Obseg knjižnice",
       "allLibraries": "Vse dostopne knjižnice",
       "similarity": "Prag podobnih naslovov",
@@ -7142,7 +7140,6 @@
         "queued": "Pregledovanje v čakalni vrsti",
         "running": "Pregledujem knjige"
       },
-      "groupsFound": "{count, plural, =0 {No duplicate groups} one {One duplicate group} two {# duplicate groups} few {# duplicate groups} other {# duplicate groups}}",
       "filter": "Tip ujemanja",
       "allReasons": "Vse vrste ujemanja",
       "reasons": {
@@ -7151,17 +7148,7 @@
         "exact_metadata": "Točen naslov in avtorji",
         "fuzzy_metadata": "Podoben naslov in avtor"
       },
-      "similarityValue": "{percent}% podobnost naslova",
       "notDuplicates": "Ni dvojnikov",
-      "keepThis": "Obdrži to knjigo",
-      "discardThis": "Zavrzi to knjigo",
-      "selectKeeperFirst": "Najprej izberi kaj želiš obdržati",
-      "noDirectMatch": "Ni neposrednega ujemanja z obdržano knjigo",
-      "moreFiles": "+{count} več",
-      "showDetails": "Prikaži podrobnosti",
-      "hideDetails": "Skrij podrobnosti",
-      "deleteSelected": "Izbriši izbrane: {count}",
-      "openBook": "Odpri podrobnosti za {title}",
       "unknownAuthor": "Neznan avtor",
       "unknown": "Neznan",
       "none": "Brez",
@@ -7172,14 +7159,8 @@
         "library": "Knjižnica",
         "isbn": "ISBN",
         "formats": "Oblike",
-        "fileLocation": "Datoteka",
-        "files": "Datoteke",
-        "readingStatus": "Status branja",
-        "progress": "Napredek",
-        "path": "Pot do knjižnice",
         "collections": "Zbirke",
-        "added": "Dodano",
-        "updated": "Posodobljeno"
+        "added": "Dodano"
       },
       "initial": {
         "title": "Poišči podvojene knjige",
@@ -7190,8 +7171,6 @@
         "description": "Nobena knjiga se ni ujemala s trenutnim obsegom, stopnjo podobnosti in filtrom ujemanja."
       },
       "deleteDialog": {
-        "title": "Trajno brisanje podvojenih knjig?",
-        "description": "{count, plural, =0 {This will permanently delete # selected book and its files.} one {This will permanently delete # selected book and its files.} two {This will permanently delete # selected books and their files.} few {This will permanently delete # selected books and their files.} other {This will permanently delete # selected books and their files.}}",
         "warning": "Metapodatki, zbirke, podatki o branju in stanje naprave se ne prenesejo na obdržano knjigo. Odstranjeni so tudi povezani podatki drugih uporabnikov.",
         "confirm": "{count, plural, =0 {Delete # book} one {Delete # book} two {Delete # books} few {Delete # books} other {Delete # books}}",
         "success": "{count, plural, =0 {No books deleted} one {One duplicate book deleted} two {# duplicate books deleted} few {# duplicate books deleted} other {# duplicate books deleted}}"

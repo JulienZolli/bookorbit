@@ -9739,9 +9739,7 @@
       }
     },
     "bookDuplicates": {
-      "scanSettings": "Configuración de escaneo",
       "title": "Libros duplicados",
-      "description": "Escanee archivos y metadatos en busca de posibles registros duplicados. No se elimina nada durante un escaneo.",
       "scope": "Alcance de la biblioteca",
       "allLibraries": "Todas las bibliotecas accesibles",
       "similarity": "Umbral de títulos similares",
@@ -9753,7 +9751,6 @@
         "queued": "Escaneo en cola",
         "running": "Escaneando libros"
       },
-      "groupsFound": "{count, plural, =0 {No hay grupos duplicados} one {Un grupo duplicado} other {# grupos duplicados} many {# grupos duplicados}}",
       "filter": "Tipo de coincidencia",
       "allReasons": "Todos los tipos de coincidencia",
       "reasons": {
@@ -9762,17 +9759,7 @@
         "exact_metadata": "Título exacto y autores.",
         "fuzzy_metadata": "Título y autor similares"
       },
-      "similarityValue": "{percent}% similitud del título",
       "notDuplicates": "No duplicados",
-      "keepThis": "Guarde este libro",
-      "discardThis": "Descartar este libro",
-      "selectKeeperFirst": "Seleccione primero el libro que desea conservar",
-      "noDirectMatch": "No hay ninguna coincidencia directa con el libro que se conservará",
-      "moreFiles": "+{count} más",
-      "showDetails": "Mostrar detalles",
-      "hideDetails": "Ocultar detalles",
-      "deleteSelected": "Eliminar {count} seleccionado",
-      "openBook": "Abrir detalles para {title}",
       "unknownAuthor": "Autor desconocido",
       "unknown": "Desconocido",
       "none": "Ninguno",
@@ -9783,14 +9770,8 @@
         "library": "Biblioteca",
         "isbn": "ISBN",
         "formats": "Formatos",
-        "fileLocation": "Archivo",
-        "files": "Archivos",
-        "readingStatus": "Estado de lectura",
-        "progress": "Progreso",
-        "path": "Ruta de la biblioteca",
         "collections": "Colecciones",
-        "added": "Añadido",
-        "updated": "Actualizado"
+        "added": "Añadido"
       },
       "initial": {
         "title": "Encuentra libros duplicados",
@@ -9801,8 +9782,6 @@
         "description": "Ningún libro coincidió con el alcance, el nivel de similitud y el filtro de coincidencia actuales."
       },
       "deleteDialog": {
-        "title": "¿Eliminar permanentemente libros duplicados?",
-        "description": "{count, plural, =0 {Esto eliminará permanentemente # libro seleccionado y sus archivos.} one {Esto eliminará permanentemente # libro seleccionado y sus archivos.} other {Esto eliminará permanentemente # libros seleccionados y sus archivos.} many {Esto eliminará permanentemente # libros seleccionados y sus archivos.}}",
         "warning": "Los metadatos, las colecciones, los datos de lectura y el estado del dispositivo no se transfieren al libro llevado. También se eliminan los datos asociados de otros usuarios.",
         "confirm": "{count, plural, =0 {Eliminar # libro} one {Eliminar # libro} other {Eliminar # libros} many {Eliminar # libros}}",
         "success": "{count, plural, =0 {No se eliminaron libros} one {Se ha eliminado un libro duplicado.} other {# libros duplicados eliminados} many {# libros duplicados eliminados}}"
