@@ -2154,12 +2154,11 @@ export class BookService {
       sourceUpdatedAt: saved.capturedAt,
     });
     const strongRereadEvidence = previous != null && previous.percentage - dto.percentage >= 10;
-    await this.autoUpdateReadStatusForProgress(
-      userId,
-      { bookId, libraryId },
-      dto.percentage,
-      strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
-    );
+    await this.autoUpdateReadStatusForProgress(userId, { bookId, libraryId }, dto.percentage, {
+      origin: 'bookorbit',
+      timeZone: this.resolveUserTimeZone(user),
+      strongRereadEvidence,
+    });
   }
 
   async syncEbookProgressForAudiobookPlayback(
@@ -2190,18 +2189,14 @@ export class BookService {
     const startedAt = Date.now();
     try {
       const library = await this.libraryService.findOne(file.libraryId);
-      if (Object.keys(activity).length > 0) {
-        await this.userBookStatusService.autoUpdate(
-          userId,
-          file.bookId,
-          percentage,
-          library.readingThreshold,
-          library.markAsFinishedPercentComplete,
-          activity,
-        );
-      } else {
-        await this.userBookStatusService.autoUpdate(userId, file.bookId, percentage, library.readingThreshold, library.markAsFinishedPercentComplete);
-      }
+      await this.userBookStatusService.autoUpdate(
+        userId,
+        file.bookId,
+        percentage,
+        library.readingThreshold,
+        library.markAsFinishedPercentComplete,
+        activity,
+      );
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       this.logger.warn(
@@ -2290,12 +2285,11 @@ export class BookService {
       syncSiblingEpubs: text.moved,
     });
     const strongRereadEvidence = previous != null && previous.percentage - text.percentage >= 10;
-    await this.autoUpdateReadStatusForProgress(
-      userId,
-      file,
-      text.percentage,
-      strongRereadEvidence ? { origin: 'bookorbit', strongRereadEvidence: true } : {},
-    );
+    await this.autoUpdateReadStatusForProgress(userId, file, text.percentage, {
+      origin: 'bookorbit',
+      timeZone: this.resolveUserTimeZone(user),
+      strongRereadEvidence,
+    });
   }
 
   async syncAudioProgressForExternalEbookProgress(

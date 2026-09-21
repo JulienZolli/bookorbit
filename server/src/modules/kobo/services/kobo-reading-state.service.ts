@@ -209,7 +209,7 @@ export class KoboReadingStateService {
 
     if ((bookmarkChanged || statusChanged) && mergedPercent !== null) {
       await this.autoUpdateReadStatus(userId, bookId, mergedPercent, readingThreshold, finishedThreshold, {
-        occurredOn: effectiveLastModified.slice(0, 10),
+        occurredAt: new Date(effectiveLastModified),
         strongRereadEvidence,
       });
     }
@@ -333,13 +333,14 @@ export class KoboReadingStateService {
     percent: number,
     readingThreshold: number,
     finishedThreshold: number,
-    activity: { occurredOn: string; strongRereadEvidence: boolean },
+    activity: { occurredAt: Date; strongRereadEvidence: boolean },
   ): Promise<void> {
     const startedAt = Date.now();
     try {
       await this.userBookStatusService.autoUpdate(userId, bookId, percent, readingThreshold, finishedThreshold, {
         origin: 'kobo',
-        occurredOn: activity.occurredOn,
+        occurredAt: activity.occurredAt,
+        timeZone: await this.findUserTimeZone(userId),
         strongRereadEvidence: activity.strongRereadEvidence,
       });
     } catch (error: unknown) {

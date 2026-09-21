@@ -524,3 +524,64 @@ describe('ReadingSessionService - deleteSessionByBook', () => {
     expect(bookAccessOrder).toBeLessThan(repoOrder);
   });
 });
+
+/**
+ * Issue #1458: the session itself was filed on the reader's local day while the read status it
+ * triggers was filed on UTC's, so an evening finish showed a session on one date and a Finish
+ * Date on the next. Both now come off the same timezone.
+ */
+describe('ReadingSessionService - read status activity', () => {
+  const repo = { saveSession: vi.fn() };
+  const bookService = {
+    verifyFileAccess: vi.fn(),
+    autoUpdateReadStatusForProgress: vi.fn(),
+  };
+  let service: ReadingSessionService;
+
+  // 8:08 PM on the 19th in Chicago, which is already the 20th in UTC.
+  const ENDED_AT = '2026-09-20T01:08:15.815Z';
+  const chicagoReader = makeUser({ id: 12, settings: { timezone: 'America/Chicago' } });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    repo.saveSession.mockResolvedValue({ kind: 'saved' });
+    bookService.verifyFileAccess.mockResolvedValue({ id: 6558, bookId: 2179, libraryId: 1 });
+    bookService.autoUpdateReadStatusForProgress.mockResolvedValue(undefined);
+    service = new ReadingSessionService(repo as never, bookService as never, { emit: vi.fn() } as never, { invalidateUser: vi.fn() } as never);
+  });
+
+  async function saveFinishingSession(user: RequestUser) {
+    await service.save(
+      6558,
+      { sessionId: 'session-1', startedAt: '2026-09-20T01:02:15.815Z', endedAt: ENDED_AT, durationSeconds: 360, progressDelta: 58, endProgress: 100 },
+      user,
+    );
+  }
+
+  it('hands the status update the instant, not a pre-truncated UTC day', async () => {
+    await saveFinishingSession(chicagoReader);
+
+    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(
+      12,
+      expect.objectContaining({ bookId: 2179 }),
+      100,
+      expect.objectContaining({ occurredAt: new Date(ENDED_AT), origin: 'bookorbit', meaningfulActivity: true }),
+    );
+  });
+
+  it('files the session and the status against the same timezone', async () => {
+    await saveFinishingSession(chicagoReader);
+
+    const sessionTimeZone = repo.saveSession.mock.calls[0]?.[9];
+    const statusTimeZone = bookService.autoUpdateReadStatusForProgress.mock.calls[0]?.[3]?.timeZone;
+    expect(sessionTimeZone).toBe('America/Chicago');
+    expect(statusTimeZone).toBe(sessionTimeZone);
+  });
+
+  it('falls back to UTC for a reader who has set no timezone', async () => {
+    await saveFinishingSession(makeUser({ id: 12 }));
+
+    expect(bookService.autoUpdateReadStatusForProgress.mock.calls[0]?.[3]?.timeZone).toBe('UTC');
+  });
+});

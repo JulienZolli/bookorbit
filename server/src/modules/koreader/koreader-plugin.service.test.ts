@@ -16,8 +16,8 @@ const DEVICE_ID = 'abcdef12-3456-7890-abcd-ef1234567890';
 const HASH_A = 'a'.repeat(32);
 const HASH_B = 'b'.repeat(32);
 
-function makeUser(): RequestUser {
-  return { id: 7, settings: {} } as unknown as RequestUser;
+function makeUser(settings: Record<string, unknown> = {}): RequestUser {
+  return { id: 7, settings } as unknown as RequestUser;
 }
 
 function deviceFields() {
@@ -279,8 +279,17 @@ describe('KoreaderPluginService', () => {
     it('applies a status when no server status exists', async () => {
       const result = await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-01' }]));
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'read');
+      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'read', 'UTC');
       expect(result.results[0]).toMatchObject({ hash: HASH_A, statusApplied: true, ratingApplied: false, reviewApplied: false });
+    });
+
+    it('files a batched status change on the reader own calendar, resolved once for the batch', async () => {
+      await service.uploadBookStates(
+        makeUser({ timezone: 'America/Chicago' }),
+        statesDto([{ hash: HASH_A, status: 'complete', statusModified: '2026-06-01' }]),
+      );
+
+      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'read', 'America/Chicago');
     });
 
     it('treats an identical status as applied without writing', async () => {
@@ -297,7 +306,7 @@ describe('KoreaderPluginService', () => {
 
       await service.uploadBookStates(makeUser(), statesDto([{ hash: HASH_A, status: 'abandoned', statusModified: '2026-06-06' }]));
 
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'abandoned');
+      expect(userBookStatusService.setManual).toHaveBeenCalledWith(7, 20, 'abandoned', 'UTC');
     });
 
     it('keeps the server status on a same-day tie or older device date', async () => {
@@ -520,6 +529,7 @@ describe('KoreaderPluginService', () => {
           { bookFile: { id: 11, bookId: 21, libraryId: 1 }, percentage: 0.1, progress: undefined, timestamp: undefined },
         ],
         { device: 'Kobo Libra 2', deviceId: DEVICE_ID },
+        'UTC',
       );
       expect(result.results).toEqual([
         { hash: HASH_A, accepted: true },
@@ -542,7 +552,23 @@ describe('KoreaderPluginService', () => {
         7,
         [{ bookFile: { id: 10, bookId: 20, libraryId: 1 }, percentage: 0.4, progress: undefined, timestamp: undefined }],
         expect.any(Object),
+        'UTC',
       );
+    });
+  });
+
+  describe('bulkProgress timezone', () => {
+    it('resolves the reader own timezone once for the whole sweep', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(new Map([[HASH_A, { bookFileId: 10, bookId: 20, libraryId: 1, format: 'epub' }]]));
+      koreaderService.applyBulkProgress.mockResolvedValue({ shared: 1, stale: 0, held: 0 });
+
+      await service.bulkProgress(makeUser({ timezone: 'America/Chicago' }), {
+        ...deviceFields(),
+        items: [{ hash: HASH_A, percentage: 0.4 }],
+      } as BulkProgressDto);
+
+      expect(koreaderService.applyBulkProgress).toHaveBeenCalledTimes(1);
+      expect(koreaderService.applyBulkProgress.mock.calls[0]![3]).toBe('America/Chicago');
     });
   });
 

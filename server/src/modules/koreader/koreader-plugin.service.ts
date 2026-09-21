@@ -5,6 +5,7 @@ import type { ReadStatus, UserBookStatus } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import { ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED, AchievementEventsService } from '../achievement/achievement-events.service';
 import { UserBookNoteService, type UserBookNoteDto } from '../user-book-note/user-book-note.service';
 import { BookService } from '../book/book.service';
@@ -75,6 +76,8 @@ interface BookStateBatch {
   ratingWrites: Map<number, number | null>;
   noteWrites: Map<number, string | null>;
   appliedAt: Date;
+  /** Resolved once for the request so a large batch does not look the reader's day up per book. */
+  timeZone: string;
 }
 
 export interface BulkProgressResult {
@@ -172,6 +175,7 @@ export class KoreaderPluginService {
         ratingWrites: new Map<number, number | null>(),
         noteWrites: new Map<number, string | null>(),
         appliedAt: new Date(),
+        timeZone: resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC'),
       };
 
       // Several input entries can resolve to one book (duplicate hashes, or different
@@ -239,10 +243,12 @@ export class KoreaderPluginService {
         results.push({ hash, accepted: true });
       }
 
-      const applied = await this.koreaderService.applyBulkProgress(user.id, entries, {
-        device: dto.deviceModel,
-        deviceId: dto.deviceId,
-      });
+      const applied = await this.koreaderService.applyBulkProgress(
+        user.id,
+        entries,
+        { device: dto.deviceModel, deviceId: dto.deviceId },
+        resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC'),
+      );
 
       this.logger.log(
         `[${BULK_PROGRESS_EVENT}] [end] userId=${user.id} deviceId=${dto.deviceId.slice(0, 8)} durationMs=${Date.now() - startedAtMs} accepted=${results.length} shared=${applied.shared} stale=${applied.stale} held=${applied.held} unmatched=${unmatched.length} - bulk progress completed`,
@@ -436,7 +442,7 @@ export class KoreaderPluginService {
       if (!statusModified || statusModified <= serverDate) return false;
     }
 
-    await this.userBookStatusService.setManual(userId, bookId, mapped);
+    await this.userBookStatusService.setManual(userId, bookId, mapped, state.timeZone);
     state.staleStatusBookIds.add(bookId);
     return true;
   }

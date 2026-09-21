@@ -342,6 +342,12 @@ describe('KoboReadingStateService', () => {
       99,
       expect.objectContaining({ origin: 'kobo', strongRereadEvidence: false }),
     );
+    // Issue #1458: the activity instant travels intact so the day is resolved on the reader's
+    // calendar downstream, rather than being pre-truncated to a UTC date key here.
+    const koboActivity = userBookStatusService.autoUpdate.mock.calls[0]![5] as { occurredAt: Date; timeZone: string };
+    expect(koboActivity.occurredAt).toBeInstanceOf(Date);
+    expect(Number.isNaN(koboActivity.occurredAt.getTime())).toBe(false);
+    expect(typeof koboActivity.timeZone).toBe('string');
     expect(progressInsert.values).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 1,
