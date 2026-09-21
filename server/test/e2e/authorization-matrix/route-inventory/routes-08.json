@@ -793,6 +793,66 @@
     "useGuards": []
   },
   {
+    "file": "server/src/modules/book-request/indexers/indexer.controller.ts",
+    "className": "IndexerController",
+    "methodName": "listPluginUpdates",
+    "httpMethod": "GET",
+    "path": "/admin/request-indexers/plugins/updates",
+    "permissions": ["Permission.ManageAppSettings"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-request/indexers/indexer.controller.ts",
+    "className": "IndexerController",
+    "methodName": "checkPluginUpdates",
+    "httpMethod": "POST",
+    "path": "/admin/request-indexers/plugins/updates/check",
+    "permissions": ["Permission.ManageAppSettings"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-request/indexers/indexer.controller.ts",
+    "className": "IndexerController",
+    "methodName": "inspectPluginUpdate",
+    "httpMethod": "POST",
+    "path": "/admin/request-indexers/plugins/:type/update/inspect",
+    "permissions": ["Permission.ManageAppSettings"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-request/indexers/indexer.controller.ts",
+    "className": "IndexerController",
+    "methodName": "installPluginUpdate",
+    "httpMethod": "POST",
+    "path": "/admin/request-indexers/plugins/:type/update",
+    "permissions": ["Permission.ManageAppSettings"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
+    "file": "server/src/modules/book-request/indexers/indexer.controller.ts",
+    "className": "IndexerController",
+    "methodName": "setPluginAutomaticUpdate",
+    "httpMethod": "PUT",
+    "path": "/admin/request-indexers/plugins/:type/auto-update",
+    "permissions": ["Permission.ManageAppSettings"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": []
+  },
+  {
     "file": "server/src/modules/book-request/indexers/indexer-manager.controller.ts",
     "className": "IndexerManagerController",
     "methodName": "findAll",

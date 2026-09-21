@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from 'vue'
 import { AlertCircle, Loader2, Pencil, Plus, RefreshCw, Square, Trash2, Volume2, X } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import * as ttsApi from './api/tts.api'
 import type { TtsDbProvider, StaticVoiceConfig } from './api/tts.api'
@@ -15,7 +16,15 @@ const emit = defineEmits<{
   close: []
 }>()
 
+const { t } = useI18n()
+
 const GENDER_OPTIONS = ['', 'Male', 'Female', 'Unknown'] as const
+function genderLabel(gender: string): string {
+  if (gender === 'Male') return t('settings.admin.tts.curation.genderMale')
+  if (gender === 'Female') return t('settings.admin.tts.curation.genderFemale')
+  if (gender === 'Unknown') return t('settings.admin.tts.curation.genderUnknown')
+  return '-'
+}
 
 const voices = ref<StaticVoiceConfig[]>(props.provider.staticVoices ? [...props.provider.staticVoices] : [])
 const savedVoices = ref<StaticVoiceConfig[]>(props.provider.staticVoices ? [...props.provider.staticVoices] : [])
@@ -40,17 +49,17 @@ const importDisabledReason = computed<string | null>(() => {
   if (props.provider.supportsVoiceDiscovery) return null
   const presetLabel = presetKey.value === 'kokoro' ? 'Kokoro' : presetKey.value === 'openai' ? 'OpenAI' : null
   return presetLabel
-    ? `This provider does not support voice discovery. Use the "Load ${presetLabel} preset" button instead.`
-    : 'This provider does not support voice discovery.'
+    ? t('settings.admin.tts.curation.importUnsupportedWithPreset', { preset: presetLabel })
+    : t('settings.admin.tts.curation.importUnsupported')
 })
 
-const emptyStateHint = computed(() => {
+const emptyStateMessage = computed(() => {
   const canImport = props.provider.supportsVoiceDiscovery
   const hasPreset = !!presetKey.value
-  if (canImport && hasPreset) return 'Import from provider or load a preset.'
-  if (canImport) return 'Import from provider.'
-  if (hasPreset) return 'Load a preset to get started.'
-  return 'Add voices manually.'
+  if (canImport && hasPreset) return t('settings.admin.tts.curation.emptyImportOrPreset')
+  if (canImport) return t('settings.admin.tts.curation.emptyImport')
+  if (hasPreset) return t('settings.admin.tts.curation.emptyPreset')
+  return t('settings.admin.tts.curation.emptyManual')
 })
 
 const hasUnsavedChanges = computed(() => {
@@ -76,12 +85,12 @@ async function handleDiscover() {
   try {
     const result = await ttsApi.discoverVoices(props.provider.id)
     if (!result.supported) {
-      discoverError.value = 'This provider does not expose a voice list endpoint.'
+      discoverError.value = t('settings.admin.tts.curation.discoveryUnsupported')
       return
     }
     voices.value = mergeVoices(voices.value, result.voices)
   } catch (e: unknown) {
-    discoverError.value = e instanceof Error ? e.message : 'Failed to discover voices'
+    discoverError.value = e instanceof Error ? e.message : t('settings.admin.tts.curation.discoverFailed')
   } finally {
     discovering.value = false
   }
@@ -196,13 +205,16 @@ function handleClose() {
       <!-- Header -->
       <div class="flex items-center justify-between p-5 border-b border-border flex-shrink-0">
         <div>
-          <h2 class="font-semibold text-foreground">Manage Voices - {{ provider.name }}</h2>
+          <h2 class="font-semibold text-foreground">{{ t('settings.admin.tts.curation.title', { provider: provider.name }) }}</h2>
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ voices.length }} voice{{ voices.length === 1 ? '' : 's' }} configured
-            <span v-if="hasUnsavedChanges"> - Unsaved changes</span>
+            {{
+              hasUnsavedChanges
+                ? t('settings.admin.tts.curation.summaryUnsaved', { count: voices.length })
+                : t('settings.admin.tts.curation.summary', { count: voices.length })
+            }}
           </p>
         </div>
-        <button class="p-1.5 rounded-lg hover:bg-accent" @click="handleClose">
+        <button class="p-1.5 rounded-lg hover:bg-accent" :aria-label="t('common.close')" @click="handleClose">
           <X class="w-4 h-4 text-muted-foreground" />
         </button>
       </div>
@@ -221,7 +233,7 @@ function handleClose() {
                 >
                   <Loader2 v-if="discovering" class="w-3.5 h-3.5 animate-spin" />
                   <RefreshCw v-else class="w-3.5 h-3.5" />
-                  Import from provider
+                  {{ t('settings.admin.tts.curation.importFromProvider') }}
                 </button>
               </span>
             </TooltipTrigger>
@@ -233,22 +245,22 @@ function handleClose() {
             @click="handleLoadPreset"
           >
             <Plus class="w-3.5 h-3.5" />
-            Load {{ presetKey === 'kokoro' ? 'Kokoro' : 'OpenAI' }} preset
+            {{ t('settings.admin.tts.curation.loadPreset', { preset: presetKey === 'kokoro' ? 'Kokoro' : 'OpenAI' }) }}
           </button>
         </div>
-        <p v-if="discoverError" class="text-xs text-destructive">{{ discoverError }}</p>
+        <p v-if="discoverError" role="alert" class="text-xs text-destructive">{{ discoverError }}</p>
       </div>
 
       <!-- Voice table -->
       <div class="flex-1 overflow-y-auto min-h-0">
-        <div v-if="voices.length === 0" class="text-sm text-muted-foreground text-center py-10">No voices configured. {{ emptyStateHint }}</div>
+        <div v-if="voices.length === 0" class="text-sm text-muted-foreground text-center py-10">{{ emptyStateMessage }}</div>
         <template v-else>
           <div class="text-xs border-b border-border bg-muted/50">
             <div class="grid grid-cols-[1fr_1fr_80px_80px_80px] gap-2 px-4 py-2 font-medium text-muted-foreground">
-              <div>ID</div>
-              <div>Name</div>
-              <div>Locale</div>
-              <div>Gender</div>
+              <div>{{ t('settings.admin.tts.curation.columnId') }}</div>
+              <div>{{ t('settings.admin.tts.curation.columnName') }}</div>
+              <div>{{ t('settings.admin.tts.curation.columnLocale') }}</div>
+              <div>{{ t('settings.admin.tts.curation.columnGender') }}</div>
               <div />
             </div>
           </div>
@@ -259,26 +271,36 @@ function handleClose() {
                 <div class="grid grid-cols-[1fr_1fr_80px_80px_80px] gap-2 px-4 py-2 items-center">
                   <input
                     v-model="editForm.id"
+                    :aria-label="t('settings.admin.tts.curation.columnId')"
                     class="px-2 py-1 text-xs bg-background border border-border rounded text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <input
                     v-model="editForm.name"
+                    :aria-label="t('settings.admin.tts.curation.columnName')"
                     class="px-2 py-1 text-xs bg-background border border-border rounded text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <input
                     v-model="editForm.locale"
                     placeholder="en-US"
+                    :aria-label="t('settings.admin.tts.curation.columnLocale')"
                     class="px-2 py-1 text-xs bg-background border border-border rounded text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <select
                     v-model="editForm.gender"
+                    :aria-label="t('settings.admin.tts.curation.columnGender')"
                     class="px-2 py-1 text-xs bg-background border border-border rounded text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                   >
-                    <option v-for="g in GENDER_OPTIONS" :key="g" :value="g">{{ g || '-' }}</option>
+                    <option v-for="g in GENDER_OPTIONS" :key="g" :value="g">{{ genderLabel(g) }}</option>
                   </select>
                   <div class="flex items-center gap-1">
-                    <button class="p-1 rounded text-primary hover:bg-accent text-xs font-medium" @click="handleSaveEdit">Save</button>
-                    <button class="p-1 rounded text-muted-foreground hover:bg-accent text-xs" aria-label="Cancel edit" @click="handleCancelEdit">
+                    <button class="p-1 rounded text-primary hover:bg-accent text-xs font-medium" @click="handleSaveEdit">
+                      {{ t('common.save') }}
+                    </button>
+                    <button
+                      class="p-1 rounded text-muted-foreground hover:bg-accent text-xs"
+                      :aria-label="t('settings.admin.tts.curation.cancelEdit')"
+                      @click="handleCancelEdit"
+                    >
                       <X class="w-3.5 h-3.5" />
                     </button>
                   </div>
@@ -290,12 +312,16 @@ function handleClose() {
                   <span class="text-xs text-muted-foreground font-mono truncate" :title="voice.id">{{ voice.id }}</span>
                   <span class="text-xs text-foreground truncate" :title="voice.name">{{ voice.name }}</span>
                   <span class="text-xs text-muted-foreground">{{ voice.locale || '-' }}</span>
-                  <span class="text-xs text-muted-foreground">{{ voice.gender || '-' }}</span>
+                  <span class="text-xs text-muted-foreground">{{ genderLabel(voice.gender ?? '') }}</span>
                   <div class="flex items-center gap-1">
                     <button
                       type="button"
                       class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
-                      :aria-label="playingVoiceId === voice.id ? `Stop preview for ${voice.name}` : `Preview ${voice.name}`"
+                      :aria-label="
+                        playingVoiceId === voice.id
+                          ? t('settings.admin.tts.curation.stopPreview', { name: voice.name })
+                          : t('settings.admin.tts.curation.previewVoice', { name: voice.name })
+                      "
                       @click="handlePreview(voice)"
                     >
                       <Loader2 v-if="previewingVoiceId === voice.id" class="w-3.5 h-3.5 animate-spin" />
@@ -305,12 +331,16 @@ function handleClose() {
                     </button>
                     <button
                       class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
-                      :aria-label="`Edit ${voice.name}`"
+                      :aria-label="t('settings.admin.tts.curation.editVoice', { name: voice.name })"
                       @click="handleStartEdit(idx)"
                     >
                       <Pencil class="w-3.5 h-3.5" />
                     </button>
-                    <button class="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10" @click="handleDeleteVoice(idx)">
+                    <button
+                      class="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                      :aria-label="t('settings.admin.tts.curation.deleteVoice', { name: voice.name })"
+                      @click="handleDeleteVoice(idx)"
+                    >
                       <Trash2 class="w-3.5 h-3.5" />
                     </button>
                   </div>
@@ -324,7 +354,7 @@ function handleClose() {
       <!-- Footer -->
       <div class="flex justify-end gap-3 p-4 border-t border-border flex-shrink-0">
         <button class="px-4 py-2 rounded-lg border border-border text-sm font-medium text-foreground hover:bg-accent" @click="handleClose">
-          Cancel
+          {{ t('common.cancel') }}
         </button>
         <button
           class="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
@@ -332,7 +362,7 @@ function handleClose() {
           @click="handleSave"
         >
           <Loader2 v-if="saving" class="w-4 h-4 animate-spin" />
-          Save {{ voices.length }} voice{{ voices.length === 1 ? '' : 's' }}
+          {{ t('settings.admin.tts.curation.saveVoices', { count: voices.length }) }}
         </button>
       </div>
     </div>

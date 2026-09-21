@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ChevronDown, ChevronUp, Headphones, Pause, Play, SkipBack, SkipForward, X } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { useMediaOverlay } from '../composables/useMediaOverlay'
 import { useTtsMiniPlayerUi } from '@/features/tts/composables/useTtsMiniPlayerUi'
 import TtsSpeedControl from '@/features/tts/components/TtsSpeedControl.vue'
 import TtsSleepTimerPicker from '@/features/tts/components/TtsSleepTimerPicker.vue'
 
+const { t } = useI18n()
 const { isActive, isPlaying, rate, currentBook, error, sleepTimer, toggle, nextSentence, prevSentence, setRate, stop } = useMediaOverlay()
 const { isReaderFooterVisible } = useTtsMiniPlayerUi()
 
@@ -43,45 +45,58 @@ function handleStop() {
         </div>
 
         <div class="flex items-center gap-2 px-3 py-2.5">
-          <button class="flex-shrink-0 w-8 h-10 rounded bg-muted overflow-hidden flex items-center justify-center" @click="togglePanel">
-            <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" :alt="currentBook?.title" class="w-full h-full object-cover" />
+          <button
+            class="flex-shrink-0 w-8 h-10 rounded bg-muted overflow-hidden flex items-center justify-center"
+            :aria-label="t('reader.narration.openControls')"
+            :aria-expanded="showPanel"
+            @click="togglePanel"
+          >
+            <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" alt="" class="w-full h-full object-cover" />
             <Headphones v-else class="w-4 h-4 text-muted-foreground" />
           </button>
 
-          <button class="flex-1 min-w-0 text-left" @click="togglePanel">
-            <div class="text-sm font-medium truncate text-foreground">{{ currentBook?.title ?? 'Narration' }}</div>
-            <div class="text-xs text-muted-foreground truncate">Audio narration - {{ rate }}x</div>
+          <button class="flex-1 min-w-0 text-left" :aria-label="t('reader.narration.openControls')" :aria-expanded="showPanel" @click="togglePanel">
+            <div class="text-sm font-medium truncate text-foreground">{{ currentBook?.title ?? t('reader.narration.fallbackTitle') }}</div>
+            <div class="text-xs text-muted-foreground truncate">{{ t('reader.narration.meta', { speed: rate }) }}</div>
           </button>
 
-          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" aria-label="Previous sentence" @click="prevSentence">
+          <button
+            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground"
+            :aria-label="t('reader.narration.previousSentence')"
+            @click="prevSentence"
+          >
             <SkipBack class="w-4 h-4" />
           </button>
           <button
             class="p-2 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
-            :aria-label="isPlaying ? 'Pause narration' : 'Play narration'"
+            :aria-label="isPlaying ? t('reader.narration.pause') : t('reader.narration.play')"
             @click="toggle"
           >
             <Pause v-if="isPlaying" class="w-4 h-4" />
             <Play v-else class="w-4 h-4" />
           </button>
-          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" aria-label="Next sentence" @click="nextSentence">
+          <button
+            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground"
+            :aria-label="t('reader.narration.nextSentence')"
+            @click="nextSentence"
+          >
             <SkipForward class="w-4 h-4" />
           </button>
 
           <button
             class="p-1.5 rounded-md hover:bg-accent text-muted-foreground"
-            :aria-label="showPanel ? 'Hide controls' : 'Show controls'"
+            :aria-label="showPanel ? t('reader.narration.hideControls') : t('reader.narration.showControls')"
             @click="togglePanel"
           >
             <ChevronDown v-if="showPanel" class="w-4 h-4" />
             <ChevronUp v-else class="w-4 h-4" />
           </button>
-          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" aria-label="Stop narration" @click="handleStop">
+          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" :aria-label="t('reader.narration.stop')" @click="handleStop">
             <X class="w-4 h-4" />
           </button>
         </div>
 
-        <div v-if="error" class="px-3 pb-2 text-xs text-destructive">{{ error }}</div>
+        <div v-if="error" role="alert" class="px-3 pb-2 text-xs text-destructive">{{ error }}</div>
       </div>
     </div>
   </Transition>

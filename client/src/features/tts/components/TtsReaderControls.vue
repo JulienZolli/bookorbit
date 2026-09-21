@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Headphones } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { useTtsPlayer } from '../composables/useTtsPlayer'
 
 const props = defineProps<{
@@ -13,6 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ startTts: [] }>()
 
+const { t } = useI18n()
 const { playbackState, currentBook, isActive } = useTtsPlayer()
 
 const isPlayingThisBook = () => isActive.value && currentBook.value?.bookFileId === props.bookFileId
@@ -29,6 +31,6 @@ function handleClick() {
     @click="handleClick"
   >
     <Headphones class="w-4 h-4" :class="{ 'animate-pulse': isPlayingThisBook() && playbackState === 'playing' }" />
-    <span>{{ isPlayingThisBook() ? 'Playing' : 'Listen' }}</span>
+    <span>{{ isPlayingThisBook() ? t('tts.readerControls.playing') : t('tts.readerControls.listen') }}</span>
   </button>
 </template>

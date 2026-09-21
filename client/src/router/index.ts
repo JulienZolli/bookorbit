@@ -457,7 +457,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'tts',
             name: 'settings-tts',
             component: () => import('@/features/tts/TtsSettings.vue'),
-            meta: { title: 'Text-to-Speech' },
+            meta: { title: () => t('titles.tts') },
           },
           ...PODCAST_SETTINGS_ROUTES,
 

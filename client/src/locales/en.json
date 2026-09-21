@@ -1423,7 +1423,35 @@
         "formModel": "Default model",
         "formModelPlaceholder": "tts-1",
         "formDiscovery": "This provider can list its own voices",
-        "formRequired": "Name and base URL are required"
+        "formRequired": "Name and base URL are required",
+        "curation": {
+          "title": "Manage Voices - {provider}",
+          "summary": "{count, plural, one {# voice configured} other {# voices configured}}",
+          "summaryUnsaved": "{count, plural, one {# voice configured} other {# voices configured}} - Unsaved changes",
+          "importFromProvider": "Import from provider",
+          "loadPreset": "Load {preset} preset",
+          "importUnsupported": "This provider does not support voice discovery.",
+          "importUnsupportedWithPreset": "This provider does not support voice discovery. Use the “Load {preset} preset” button instead.",
+          "discoveryUnsupported": "This provider does not expose a voice list endpoint.",
+          "discoverFailed": "Failed to discover voices",
+          "emptyImportOrPreset": "No voices configured. Import from provider or load a preset.",
+          "emptyImport": "No voices configured. Import from provider.",
+          "emptyPreset": "No voices configured. Load a preset to get started.",
+          "emptyManual": "No voices configured. Add voices manually.",
+          "columnId": "ID",
+          "columnName": "Name",
+          "columnLocale": "Locale",
+          "columnGender": "Gender",
+          "genderMale": "Male",
+          "genderFemale": "Female",
+          "genderUnknown": "Unknown",
+          "cancelEdit": "Cancel edit",
+          "editVoice": "Edit {name}",
+          "deleteVoice": "Delete {name}",
+          "previewVoice": "Preview {name}",
+          "stopPreview": "Stop preview for {name}",
+          "saveVoices": "{count, plural, one {Save # voice} other {Save # voices}}"
+        }
       },
       "serverFonts": {
         "title": "Server Fonts",
@@ -1444,6 +1472,7 @@
         "opds": "OPDS",
         "kobo": "Kobo",
         "koreader": "KOReader",
+        "tts": "Text-to-Speech",
         "integrations": "Integrations",
         "hardcover": "Hardcover",
         "admin": "Admin",
@@ -9397,6 +9426,19 @@
     "sheet": {
       "expand": "Expand panel",
       "collapse": "Collapse panel"
+    },
+    "narration": {
+      "fallbackTitle": "Narration",
+      "meta": "Audio narration - {speed}x",
+      "openControls": "Open narration controls",
+      "previousSentence": "Previous sentence",
+      "nextSentence": "Next sentence",
+      "play": "Play narration",
+      "pause": "Pause narration",
+      "showControls": "Show controls",
+      "hideControls": "Hide controls",
+      "stop": "Stop narration",
+      "error": "Narration playback error"
     }
   },
   "scanner": {
@@ -11443,6 +11485,88 @@
     "missingResources": "Missing Resources",
     "bookRequests": "Requests",
     "bookRequestDetail": "Request",
-    "bookRequestReleases": "Pick a release"
+    "bookRequestReleases": "Pick a release",
+    "tts": "Text-to-Speech"
+  },
+  "tts": {
+    "readerControls": {
+      "listen": "Listen",
+      "playing": "Playing"
+    },
+    "player": {
+      "fallbackTitle": "TTS Playback",
+      "play": "Play TTS",
+      "pause": "Pause TTS",
+      "openMiniPlayer": "Open mini player",
+      "shrinkPlayer": "Shrink player",
+      "expandPlayer": "Expand player",
+      "collapsePlayer": "Collapse player",
+      "openDetails": "Open player details",
+      "previousSentence": "Previous sentence",
+      "nextSentence": "Next sentence",
+      "meta": "Ch {chapter} - Sent {sentence} - {voice} - {speed}x",
+      "metaWithoutVoice": "Ch {chapter} - Sent {sentence} - {speed}x",
+      "position": "Chapter {chapter} - Sentence {sentence}",
+      "playbackError": "Playback error - tap play to retry",
+      "voice": "Voice",
+      "sleep": "Sleep",
+      "sleepRemaining": "{count}m",
+      "currentVoice": "Current Voice",
+      "chooseVoice": "Choose voice",
+      "saveForBook": "Save for this book",
+      "setAsDefault": "Set as global default",
+      "bookVoiceSaved": "Voice saved for this book",
+      "bookVoiceSaveFailed": "Failed to save book voice",
+      "defaultVoiceSaved": "Default TTS voice updated",
+      "defaultVoiceSaveFailed": "Failed to update default voice",
+      "stop": "Stop"
+    },
+    "speed": {
+      "label": "Playback speed",
+      "value": "{speed}x"
+    },
+    "sleepTimer": {
+      "title": "Sleep Timer",
+      "preset": "{count}m",
+      "presetLabel": "Stop playback after {count} minutes",
+      "cancel": "Cancel",
+      "cancelLabel": "Cancel sleep timer",
+      "remaining": "Stops in {minutes}m {seconds}s"
+    },
+    "resume": {
+      "title": "Resume TTS?",
+      "description": "You have a saved TTS position",
+      "descriptionWithChapter": "You have a saved TTS position (Chapter {chapter})",
+      "resume": "Resume",
+      "startHere": "Start this page",
+      "dismiss": "Dismiss",
+      "clearing": "Clearing...",
+      "confirmClear": "Confirm clear",
+      "clearSavedPosition": "Clear saved position"
+    },
+    "voicePicker": {
+      "search": "Search voices...",
+      "allProviders": "All",
+      "allLanguages": "All languages",
+      "allCountries": "All countries",
+      "filterByLanguage": "Filter by language",
+      "filterByCountry": "Filter by country",
+      "empty": "No voices found",
+      "select": "Select {name}",
+      "preview": "Preview {name}",
+      "voiceWithLocale": "{voice} - {locale}"
+    },
+    "settings": {
+      "description": "Configure your default TTS voice and playback settings.",
+      "defaultVoice": "Default Voice",
+      "selectVoice": "Select a voice...",
+      "change": "Change",
+      "defaultSpeed": "Default Speed",
+      "saved": "TTS preferences saved",
+      "saveFailed": "Failed to save TTS preferences"
+    },
+    "errors": {
+      "generic": "TTS error"
+    }
   }
 }

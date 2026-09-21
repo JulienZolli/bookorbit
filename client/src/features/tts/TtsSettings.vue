@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
+import { useI18n } from 'vue-i18n'
 import { Loader2, Save } from '@lucide/vue'
 import { useTtsPreferences } from './composables/useTtsPreferences'
 import { useTtsVoices } from './composables/useTtsVoices'
@@ -8,6 +9,7 @@ import TtsVoicePicker from './components/TtsVoicePicker.vue'
 import TtsSpeedControl from './components/TtsSpeedControl.vue'
 import { formatVoiceDisplayName, formatVoiceLocaleLabel } from './lib/voice-display'
 
+const { t } = useI18n()
 const { userPrefs, loadUserPreferences, saveUserPreferences } = useTtsPreferences()
 const { allVoices, loadProviders, loadVoices } = useTtsVoices()
 
@@ -51,9 +53,9 @@ async function handleSave() {
       voiceId: selectedVoiceId.value ?? undefined,
       speed: selectedSpeed.value,
     })
-    toast.success('TTS preferences saved')
+    toast.success(t('tts.settings.saved'))
   } catch {
-    toast.error('Failed to save TTS preferences')
+    toast.error(t('tts.settings.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -72,6 +74,10 @@ function handleSpeedUpdate(speed: number) {
   selectedSpeed.value = speed
 }
 
+function handleCloseVoicePicker() {
+  showVoicePicker.value = false
+}
+
 function handleToggleVoicePicker() {
   showVoicePicker.value = !showVoicePicker.value
 }
@@ -80,24 +86,26 @@ function handleToggleVoicePicker() {
 <template>
   <div class="space-y-4 max-w-2xl">
     <div>
-      <p class="text-sm text-muted-foreground mt-1">Configure your default TTS voice and playback settings.</p>
+      <p class="text-sm text-muted-foreground mt-1">{{ t('tts.settings.description') }}</p>
     </div>
 
     <div class="bg-card border border-border rounded-xl p-5 space-y-5">
       <div>
-        <label class="block text-sm font-medium text-foreground mb-1">Default Voice</label>
+        <label id="tts-default-voice-label" class="block text-sm font-medium text-foreground mb-1">{{ t('tts.settings.defaultVoice') }}</label>
         <button
           class="w-full flex items-center justify-between px-3 py-2.5 rounded-lg border border-border bg-background hover:bg-accent text-sm"
+          aria-labelledby="tts-default-voice-label"
+          :aria-expanded="showVoicePicker"
           @click="handleToggleVoicePicker"
         >
           <div class="min-w-0 text-left">
             <div v-if="selectedVoiceLabel" class="text-foreground truncate">{{ selectedVoiceLabel }}</div>
-            <div v-else class="text-muted-foreground">Select a voice...</div>
+            <div v-else class="text-muted-foreground">{{ t('tts.settings.selectVoice') }}</div>
             <div v-if="selectedVoiceLocaleLabel" class="text-xs text-muted-foreground truncate mt-0.5">
               {{ selectedVoiceLocaleLabel }}
             </div>
           </div>
-          <span class="text-muted-foreground text-xs">{{ showVoicePicker ? 'Hide' : 'Change' }}</span>
+          <span class="text-muted-foreground text-xs">{{ showVoicePicker ? t('common.hide') : t('tts.settings.change') }}</span>
         </button>
         <div v-if="showVoicePicker" class="mt-2 border border-border rounded-xl overflow-hidden">
           <TtsVoicePicker
@@ -105,13 +113,13 @@ function handleToggleVoicePicker() {
             :selected-voice-id="selectedVoiceId"
             @update:selected-voice-id="handleVoiceSelected"
             @update:selected-provider-id="handleProviderSelected"
-            @close="showVoicePicker = false"
+            @close="handleCloseVoicePicker"
           />
         </div>
       </div>
 
       <div>
-        <label class="block text-sm font-medium text-foreground mb-3">Default Speed</label>
+        <p class="block text-sm font-medium text-foreground mb-3">{{ t('tts.settings.defaultSpeed') }}</p>
         <TtsSpeedControl :speed="selectedSpeed" @update:speed="handleSpeedUpdate" />
       </div>
 
@@ -123,7 +131,7 @@ function handleToggleVoicePicker() {
         >
           <Loader2 v-if="saving" class="w-4 h-4 animate-spin" />
           <Save v-else class="w-4 h-4" />
-          Save
+          {{ t('common.save') }}
         </button>
       </div>
     </div>

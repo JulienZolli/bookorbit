@@ -45,13 +45,22 @@ describe('DirectDownloadService', () => {
     return new Response(body, { headers: { 'content-type': 'application/epub+zip', ...headers } });
   }
 
-  /** Waits for the fire-and-forget download, which `add` deliberately does not await. */
+  /**
+   * Waits for the fire-and-forget download, which `add` deliberately does not await.
+   *
+   * The budget has to be passed: `vi.waitFor` defaults to one second, and a redirect chain pays a
+   * real `dns.lookup` per hop through `ensureSafeUrl`, so six hops on a slow resolver outlast it
+   * and the case fails in CI while passing on a warm cache.
+   */
   async function settle() {
-    return vi.waitFor(async () => {
-      const [status] = await service.status([HASH]);
-      expect(status.state === 'completed' || status.state === 'failed').toBe(true);
-      return status;
-    });
+    return vi.waitFor(
+      async () => {
+        const [status] = await service.status([HASH]);
+        expect(status.state === 'completed' || status.state === 'failed').toBe(true);
+        return status;
+      },
+      { timeout: SETTLE_MS },
+    );
   }
 
   it('writes the file into its staging directory and reports where it landed', async () => {

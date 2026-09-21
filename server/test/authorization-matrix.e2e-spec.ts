@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import { ConfigService } from '@nestjs/config';
-import { Permission } from '@bookorbit/types';
+import { APP_FEATURES, Permission } from '@bookorbit/types';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { and, eq, inArray } from 'drizzle-orm';
 
@@ -99,6 +99,16 @@ interface Personas {
 }
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
+const PODCAST_MODULE_DIR = 'server/src/modules/podcast/';
+
+/**
+ * Podcast permissions are only ever carried by PodcastModule's guards, so while
+ * APP_FEATURES.podcasts is off no registered route can prove them and the inventory holds none.
+ */
+function isFeatureGatedPermission(permission: Permission): boolean {
+  return !APP_FEATURES.podcasts && permission.startsWith('podcast_');
+}
+
 const routeInventory = loadRouteInventory();
 const uncoveredRoutes = loadUncoveredRoutes();
 
@@ -111,12 +121,17 @@ function isSupportedMethod(method: string): method is SupportedHttpMethod {
 function loadRouteInventory(): RouteInventory {
   const inventoryDir = join(currentDir, 'e2e/authorization-matrix/route-inventory');
   const manifest = JSON.parse(readFileSync(join(inventoryDir, 'manifest.json'), 'utf8')) as RouteInventoryManifest;
-  const routes = manifest.routeChunks.flatMap(
+  const inventoried = manifest.routeChunks.flatMap(
     (chunkFile) => JSON.parse(readFileSync(join(inventoryDir, chunkFile), 'utf8')) as RouteInventoryRoute[],
   );
 
+  // PodcastModule registers its controllers only when APP_FEATURES.podcasts is on, so with the
+  // feature off Nest never mounts these paths and every probe below would read the resulting 404
+  // as a missing guard. The inventory keeps the entries so they return with the feature.
+  const routes = APP_FEATURES.podcasts ? inventoried : inventoried.filter((route) => !route.file.startsWith(PODCAST_MODULE_DIR));
+
   return {
-    totalRoutes: manifest.totalRoutes,
+    totalRoutes: manifest.totalRoutes - (inventoried.length - routes.length),
     byPermission: manifest.byPermission,
     byLibraryAccess: manifest.byLibraryAccess,
     routes,
@@ -660,7 +675,9 @@ describe('Authorization matrix (e2e)', () => {
       // so they legitimately never appear on a guard. Every entry needs a service-level test
       // proving the capability is actually enforced; keep this list as short as it can be.
       const serviceEnforcedPermissions: Permission[] = [Permission.BookRequestAutoApprove];
-      const enumPermissions = [...Object.values(Permission)].filter((permission) => !serviceEnforcedPermissions.includes(permission)).sort();
+      const enumPermissions = [...Object.values(Permission)]
+        .filter((permission) => !serviceEnforcedPermissions.includes(permission) && !isFeatureGatedPermission(permission))
+        .sort();
       expect(inventoryPermissions).toEqual(enumPermissions);
 
       const probes: Record<
@@ -845,7 +862,7 @@ describe('Authorization matrix (e2e)', () => {
       const failures: MatrixFailure[] = [];
 
       for (const permission of Object.values(Permission)) {
-        if (serviceEnforcedPermissions.includes(permission)) continue;
+        if (serviceEnforcedPermissions.includes(permission) || isFeatureGatedPermission(permission)) continue;
         const probe = probes[permission];
         const inventoryRoute = routeInventory.routes.find((route) => route.httpMethod === probe.method && route.path === probe.path);
         expect(inventoryRoute).toBeTruthy();
@@ -885,6 +902,25 @@ describe('Authorization matrix (e2e)', () => {
       const guardedRoutes = routeInventory.routes.filter(
         (route) => !route.isPublic && route.libraryAccess.length > 0 && isSupportedMethod(route.httpMethod),
       );
+      const podcastGuardedRoutes = [
+        'GET /podcast-libraries/:libraryId/podcasts',
+        'GET /podcast-libraries/:libraryId/episodes',
+        'POST /podcast-libraries/:libraryId/queue-episodes',
+        'POST /podcast-libraries/:libraryId/feed-preview',
+        'POST /podcast-libraries/:libraryId/podcasts',
+        'POST /podcast-libraries/:libraryId/opml/import',
+        'POST /podcast-libraries/:libraryId/import-scan',
+        'GET /podcast-libraries/:libraryId/import-scan/latest',
+        'POST /podcast-libraries/:libraryId/shows/bulk-purge-preview',
+        'POST /podcast-libraries/:libraryId/shows/bulk-delete',
+        'GET /podcast-libraries/:libraryId/opml/export',
+        'GET /podcast-libraries/:libraryId/settings',
+        'PATCH /podcast-libraries/:libraryId/settings',
+        'GET /podcast-libraries/:libraryId/health',
+        'GET /podcast-libraries/:libraryId/activity',
+        'GET /podcast-libraries/:libraryId/jobs',
+        'GET /podcast-libraries/:libraryId/jobs/:jobId',
+      ];
       expect(guardedRoutes.map(routeLabel).sort()).toEqual(
         [
           'GET /libraries/:id',
@@ -898,23 +934,7 @@ describe('Authorization matrix (e2e)', () => {
           'GET /libraries/:id/bulk-rename/preview',
           'GET /libraries/:id/bulk-rename/status',
           'POST /libraries/:id/bulk-rename/execute',
-          'GET /podcast-libraries/:libraryId/podcasts',
-          'GET /podcast-libraries/:libraryId/episodes',
-          'POST /podcast-libraries/:libraryId/queue-episodes',
-          'POST /podcast-libraries/:libraryId/feed-preview',
-          'POST /podcast-libraries/:libraryId/podcasts',
-          'POST /podcast-libraries/:libraryId/opml/import',
-          'POST /podcast-libraries/:libraryId/import-scan',
-          'GET /podcast-libraries/:libraryId/import-scan/latest',
-          'POST /podcast-libraries/:libraryId/shows/bulk-purge-preview',
-          'POST /podcast-libraries/:libraryId/shows/bulk-delete',
-          'GET /podcast-libraries/:libraryId/opml/export',
-          'GET /podcast-libraries/:libraryId/settings',
-          'PATCH /podcast-libraries/:libraryId/settings',
-          'GET /podcast-libraries/:libraryId/health',
-          'GET /podcast-libraries/:libraryId/activity',
-          'GET /podcast-libraries/:libraryId/jobs',
-          'GET /podcast-libraries/:libraryId/jobs/:jobId',
+          ...(APP_FEATURES.podcasts ? podcastGuardedRoutes : []),
         ].sort(),
       );
 
@@ -952,12 +972,14 @@ describe('Authorization matrix (e2e)', () => {
       });
       expect(bypassResponse.statusCode).toBe(200);
 
-      const podcastBypassResponse = await ctx.app.inject({
-        method: 'GET',
-        url: `/api/v1/podcast-libraries/${podcastLibrary.libraryId}/settings`,
-        headers: authHeader(ctx.adminToken),
-      });
-      expect(podcastBypassResponse.statusCode).toBe(200);
+      if (APP_FEATURES.podcasts) {
+        const podcastBypassResponse = await ctx.app.inject({
+          method: 'GET',
+          url: `/api/v1/podcast-libraries/${podcastLibrary.libraryId}/settings`,
+          headers: authHeader(ctx.adminToken),
+        });
+        expect(podcastBypassResponse.statusCode).toBe(200);
+      }
     }, 120_000);
 
     it('enforces default-password lock with allow-list exceptions', async () => {
@@ -989,7 +1011,7 @@ describe('Authorization matrix (e2e)', () => {
     });
   });
 
-  describe('custom public guards - podcast stream tickets', () => {
+  describe.skipIf(!APP_FEATURES.podcasts)('custom public guards - podcast stream tickets', () => {
     it('rejects an unauthenticated stream request that carries no ticket', async () => {
       const response = await ctx.app.inject({ method: 'GET', url: '/api/v1/podcast-episodes/1/stream' });
       expect(response.statusCode).toBe(401);

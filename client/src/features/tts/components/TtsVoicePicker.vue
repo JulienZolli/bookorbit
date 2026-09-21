@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Search, Volume2, Loader2, Check } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { useTtsVoices } from '../composables/useTtsVoices'
 import type { TtsVoice } from '@bookorbit/types'
 import { formatVoiceDisplayName, parseVoiceLanguageCountry } from '../lib/voice-display'
@@ -22,6 +23,7 @@ const emit = defineEmits<{
   close: []
 }>()
 
+const { t } = useI18n()
 const { allVoices, providers, voicesLoading, loadVoices, loadProviders, previewVoice } = useTtsVoices()
 
 const searchQuery = ref('')
@@ -118,6 +120,14 @@ function handleSelectVoice(voice: TtsVoice) {
   emit('update:selectedProviderId', voice.providerId)
 }
 
+function handleSelectProvider(providerId: string) {
+  activeProviderId.value = providerId
+}
+
+function handleShowAllProviders() {
+  handleSelectProvider('')
+}
+
 function handleSearchInput(event: Event) {
   searchQuery.value = (event.target as HTMLInputElement).value
 }
@@ -133,7 +143,8 @@ void loadVoices()
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <input
           type="text"
-          placeholder="Search voices..."
+          :placeholder="t('tts.voicePicker.search')"
+          :aria-label="t('tts.voicePicker.search')"
           class="w-full pl-9 pr-3 py-1.5 text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary transition-shadow"
           :value="searchQuery"
           @input="handleSearchInput"
@@ -144,16 +155,18 @@ void loadVoices()
           <button
             class="px-2.5 py-1 rounded text-xs font-medium transition-colors"
             :class="activeProviderId === '' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
-            @click="activeProviderId = ''"
+            :aria-pressed="activeProviderId === ''"
+            @click="handleShowAllProviders"
           >
-            All
+            {{ t('tts.voicePicker.allProviders') }}
           </button>
           <button
             v-for="provider in providers"
             :key="provider.id"
             class="px-2.5 py-1 rounded text-xs font-medium transition-colors"
             :class="activeProviderId === provider.id ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
-            @click="activeProviderId = provider.id"
+            :aria-pressed="activeProviderId === provider.id"
+            @click="handleSelectProvider(provider.id)"
           >
             {{ provider.name }}
           </button>
@@ -161,16 +174,18 @@ void loadVoices()
         <div class="flex flex-1 items-center gap-2 min-w-[200px]">
           <select
             v-model="languageFilter"
+            :aria-label="t('tts.voicePicker.filterByLanguage')"
             class="flex-1 w-full px-2 py-1.5 text-xs bg-background border border-border rounded-md text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
           >
-            <option value="">All languages</option>
+            <option value="">{{ t('tts.voicePicker.allLanguages') }}</option>
             <option v-for="language in languageOptions" :key="language" :value="language">{{ language }}</option>
           </select>
           <select
             v-model="countryFilter"
+            :aria-label="t('tts.voicePicker.filterByCountry')"
             class="flex-1 w-full px-2 py-1.5 text-xs bg-background border border-border rounded-md text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
           >
-            <option value="">All countries</option>
+            <option value="">{{ t('tts.voicePicker.allCountries') }}</option>
             <option v-for="country in countryOptions" :key="country" :value="country">{{ country }}</option>
           </select>
         </div>
@@ -181,7 +196,9 @@ void loadVoices()
       <div v-if="voicesLoading" class="flex items-center justify-center py-12">
         <Loader2 class="w-6 h-6 animate-spin text-muted-foreground" />
       </div>
-      <div v-else-if="filteredGroups.size === 0" class="text-center py-12 text-muted-foreground text-sm">No voices found</div>
+      <div v-else-if="filteredGroups.size === 0" class="text-center py-12 text-muted-foreground text-sm">
+        {{ t('tts.voicePicker.empty') }}
+      </div>
       <div v-else>
         <div
           v-for="[locale, voices] in filteredGroups"
@@ -202,7 +219,12 @@ void loadVoices()
               <div class="text-sm font-medium truncate flex-1 min-w-0">{{ entry.displayName }}</div>
               <div class="flex items-center gap-2 flex-shrink-0">
                 <span v-if="entry.voice.gender" class="text-xs text-muted-foreground">{{ entry.voice.gender }}</span>
-                <button class="p-1.5 rounded-md hover:bg-background text-muted-foreground" @click.stop="handlePreview(entry.voice)">
+                <button
+                  type="button"
+                  class="p-1.5 rounded-md hover:bg-background text-muted-foreground"
+                  :aria-label="t('tts.voicePicker.preview', { name: entry.displayName })"
+                  @click.stop="handlePreview(entry.voice)"
+                >
                   <Loader2 v-if="previewingVoiceId === entry.voice.id" class="w-4 h-4 animate-spin" />
                   <Volume2 v-else class="w-4 h-4" />
                 </button>

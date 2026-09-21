@@ -1,3 +1,5 @@
+import { APP_FEATURES } from '@bookorbit/types';
+
 import { validateEnv } from './env.validation';
 
 const BASE_ENV = {
@@ -200,15 +202,22 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...BASE_ENV, NODE_ENV: 'test' })).not.toThrow();
   });
 
-  it('requires a dedicated podcast encryption key in production', () => {
-    const productionEnv = {
-      ...BASE_ENV,
-      NODE_ENV: 'production',
-      SETUP_BOOTSTRAP_TOKEN: '1234567890abcdef',
-    };
+  const PRODUCTION_ENV = {
+    ...BASE_ENV,
+    NODE_ENV: 'production',
+    SETUP_BOOTSTRAP_TOKEN: '1234567890abcdef',
+  };
 
-    expect(() => validateEnv(productionEnv)).toThrow('PODCAST_ENCRYPTION_KEY is required in production');
-    expect(() => validateEnv({ ...productionEnv, PODCAST_ENCRYPTION_KEY: '1234567890abcdef' })).not.toThrow();
+  it.runIf(APP_FEATURES.podcasts)('requires a dedicated podcast encryption key in production while podcasts are enabled', () => {
+    expect(() => validateEnv(PRODUCTION_ENV)).toThrow('PODCAST_ENCRYPTION_KEY is required in production');
+  });
+
+  it.skipIf(APP_FEATURES.podcasts)('starts in production without a podcast encryption key while podcasts are disabled', () => {
+    expect(() => validateEnv(PRODUCTION_ENV)).not.toThrow();
+  });
+
+  it('accepts a dedicated podcast encryption key in production either way', () => {
+    expect(() => validateEnv({ ...PRODUCTION_ENV, PODCAST_ENCRYPTION_KEY: '1234567890abcdef' })).not.toThrow();
   });
 
   it.each([

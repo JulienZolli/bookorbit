@@ -3,6 +3,8 @@ import { isAbsolute } from 'node:path';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 
+import { APP_FEATURES } from '@bookorbit/types';
+
 const BOOLEAN_ENV_VALUES = ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off'];
 const TRUST_PROXY_BOOLEAN_VALUES = ['true', 'false', 'yes', 'no', 'on', 'off'];
 
@@ -146,7 +148,10 @@ export function validateEnv(config: Record<string, unknown>) {
   if (result.data.NODE_ENV === 'production' && !result.data.SETUP_BOOTSTRAP_TOKEN?.trim()) {
     throw new Error('Environment validation failed:\n  SETUP_BOOTSTRAP_TOKEN: SETUP_BOOTSTRAP_TOKEN is required in production');
   }
-  if (result.data.NODE_ENV === 'production' && !result.data.PODCAST_ENCRYPTION_KEY) {
+  // Only gate startup on the key once podcast controllers are actually registered. Requiring it
+  // while the feature is off turns every existing deployment's upgrade into a boot failure for a
+  // feature its users cannot reach, and podcastConfig already falls back when it is absent.
+  if (APP_FEATURES.podcasts && result.data.NODE_ENV === 'production' && !result.data.PODCAST_ENCRYPTION_KEY) {
     throw new Error('Environment validation failed:\n  PODCAST_ENCRYPTION_KEY: PODCAST_ENCRYPTION_KEY is required in production');
   }
   return result.data;

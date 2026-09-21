@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { i18n } from '@/i18n'
 import { registerAudioFocusOwner, requestAudioFocus } from '@/lib/audio-focus'
 import type { FoliateMediaOverlay } from '@/features/reader/epub/composables/useFoliate'
 import { useTtsMediaSession } from '@/features/tts/composables/useTtsMediaSession'
@@ -102,7 +103,7 @@ export function useMediaOverlay() {
     }
     errorListener = (e: Event) => {
       const detail = (e as CustomEvent).detail
-      error.value = detail instanceof Error ? detail.message : 'Narration playback error'
+      error.value = detail instanceof Error ? detail.message : i18n.global.t('reader.narration.error')
     }
     instance.addEventListener('highlight', highlightListener)
     instance.addEventListener('error', errorListener)

@@ -7,6 +7,7 @@ import { useTtsMediaSession } from './useTtsMediaSession'
 import { useTtsSleepTimer } from './useTtsSleepTimer'
 import { useTtsReadingSession } from './useTtsReadingSession'
 import type { TtsCurrentBook } from '../lib/tts-state'
+import { i18n } from '@/i18n'
 
 const PREFETCH_AHEAD = 3
 const MIN_SPEED = 0.25
@@ -401,7 +402,7 @@ export function useTtsPlayer() {
 
   function handleError(err: unknown) {
     flushCurrentPositionSave()
-    const message = err instanceof Error ? err.message : 'TTS error'
+    const message = err instanceof Error ? err.message : i18n.global.t('tts.errors.generic')
     error.value = message
     playbackState.value = 'error'
     mediaSession.setPlaybackState('none')

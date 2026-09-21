@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
+import { useI18n } from 'vue-i18n'
 import { ChevronDown, Pause, Play, SkipForward, SkipBack, Headphones, Moon, Gauge, Mic2, Loader2, Book, Star } from '@lucide/vue'
 import { useTtsPlayer } from '../composables/useTtsPlayer'
 import { useTtsPreferences } from '../composables/useTtsPreferences'
@@ -11,6 +12,8 @@ import TtsVoicePicker from './TtsVoicePicker.vue'
 import { formatVoiceDisplayName, formatVoiceLocaleLabel } from '../lib/voice-display'
 
 const emit = defineEmits<{ close: [] }>()
+
+const { t } = useI18n()
 
 const {
   playbackState,
@@ -43,8 +46,11 @@ const selectedVoice = computed(() =>
   allVoices.value.find((voice) => voice.id === currentVoiceId.value && voice.providerId === currentProviderId.value),
 )
 const selectedVoiceLabel = computed(() => {
-  if (!selectedVoice.value) return currentVoiceId.value || 'Choose voice'
-  return `${formatVoiceDisplayName(selectedVoice.value)} - ${formatVoiceLocaleLabel(selectedVoice.value)}`
+  if (!selectedVoice.value) return currentVoiceId.value || t('tts.player.chooseVoice')
+  return t('tts.voicePicker.voiceWithLocale', {
+    voice: formatVoiceDisplayName(selectedVoice.value),
+    locale: formatVoiceLocaleLabel(selectedVoice.value),
+  })
 })
 
 async function fetchBookPrefs() {
@@ -110,6 +116,10 @@ function handleToggleSleepTimer() {
   showVoicePicker.value = false
 }
 
+function handleCloseVoicePicker() {
+  showVoicePicker.value = false
+}
+
 function handleToggleVoicePicker() {
   showVoicePicker.value = !showVoicePicker.value
   showSpeedControl.value = false
@@ -141,9 +151,9 @@ async function handleSaveBookVoice() {
       providerId: currentProviderId.value,
       voiceId: currentVoiceId.value,
     }
-    toast.success('Voice saved for this book')
+    toast.success(t('tts.player.bookVoiceSaved'))
   } catch {
-    toast.error('Failed to save book voice')
+    toast.error(t('tts.player.bookVoiceSaveFailed'))
   } finally {
     savingBookVoice.value = false
   }
@@ -157,9 +167,9 @@ async function handleSaveDefaultVoice() {
       providerId: currentProviderId.value,
       voiceId: currentVoiceId.value,
     })
-    toast.success('Default TTS voice updated')
+    toast.success(t('tts.player.defaultVoiceSaved'))
   } catch {
-    toast.error('Failed to update default voice')
+    toast.error(t('tts.player.defaultVoiceSaveFailed'))
   } finally {
     savingDefaultVoice.value = false
   }
@@ -170,32 +180,45 @@ async function handleSaveDefaultVoice() {
   <div class="bg-card border border-border rounded-xl shadow-2xl p-4 space-y-4">
     <div class="flex items-start gap-3">
       <div class="flex-shrink-0 w-16 h-20 rounded-lg bg-muted overflow-hidden flex items-center justify-center">
-        <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" :alt="currentBook?.title" class="w-full h-full object-cover" />
+        <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" alt="" class="w-full h-full object-cover" />
         <Headphones v-else class="w-8 h-8 text-muted-foreground" />
       </div>
       <div class="flex-1 min-w-0">
-        <div class="font-semibold text-foreground truncate">{{ currentBook?.title ?? 'TTS Playback' }}</div>
+        <div class="font-semibold text-foreground truncate">{{ currentBook?.title ?? t('tts.player.fallbackTitle') }}</div>
         <div class="text-sm text-muted-foreground">{{ currentBook?.author ?? '' }}</div>
-        <div class="text-xs text-muted-foreground mt-1">Chapter {{ currentChapterIndex + 1 }} - Sentence {{ currentBlockIndex + 1 }}</div>
+        <div class="text-xs text-muted-foreground mt-1">
+          {{ t('tts.player.position', { chapter: currentChapterIndex + 1, sentence: currentBlockIndex + 1 }) }}
+        </div>
       </div>
-      <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" @click="handleCollapse">
+      <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" :aria-label="t('tts.player.collapsePlayer')" @click="handleCollapse">
         <ChevronDown class="w-5 h-5" />
       </button>
     </div>
 
     <div class="flex items-center justify-center gap-4 py-1">
-      <button class="p-2 rounded-lg hover:bg-accent text-foreground disabled:opacity-50" :disabled="playbackState === 'loading'" @click="prevBlock">
+      <button
+        class="p-2 rounded-lg hover:bg-accent text-foreground disabled:opacity-50"
+        :disabled="playbackState === 'loading'"
+        :aria-label="t('tts.player.previousSentence')"
+        @click="prevBlock"
+      >
         <SkipBack class="w-5 h-5" />
       </button>
       <button
         class="p-3 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 w-12 h-12 flex items-center justify-center"
         :disabled="playbackState === 'loading'"
+        :aria-label="playbackState === 'playing' ? t('tts.player.pause') : t('tts.player.play')"
         @click="togglePlayPause"
       >
         <Pause v-if="playbackState === 'playing'" class="w-6 h-6" />
         <Play v-else class="w-6 h-6" />
       </button>
-      <button class="p-2 rounded-lg hover:bg-accent text-foreground disabled:opacity-50" :disabled="playbackState === 'loading'" @click="nextBlock">
+      <button
+        class="p-2 rounded-lg hover:bg-accent text-foreground disabled:opacity-50"
+        :disabled="playbackState === 'loading'"
+        :aria-label="t('tts.player.nextSentence')"
+        @click="nextBlock"
+      >
         <SkipForward class="w-5 h-5" />
       </button>
     </div>
@@ -207,7 +230,7 @@ async function handleSaveDefaultVoice() {
         @click="handleToggleVoicePicker"
       >
         <Mic2 class="w-4 h-4 flex-shrink-0" />
-        <span class="truncate">{{ selectedVoice ? formatVoiceDisplayName(selectedVoice) : 'Voice' }}</span>
+        <span class="truncate">{{ selectedVoice ? formatVoiceDisplayName(selectedVoice) : t('tts.player.voice') }}</span>
       </button>
       <button
         class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm hover:bg-accent text-foreground border border-transparent"
@@ -215,7 +238,7 @@ async function handleSaveDefaultVoice() {
         @click="handleToggleSpeed"
       >
         <Gauge class="w-4 h-4" />
-        <span>{{ speed }}x</span>
+        <span>{{ t('tts.speed.value', { speed }) }}</span>
       </button>
       <button
         class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm hover:bg-accent text-foreground border border-transparent"
@@ -224,9 +247,9 @@ async function handleSaveDefaultVoice() {
       >
         <Moon class="w-4 h-4" />
         <span v-if="sleepTimer.activeMinutes.value !== null && sleepTimer.remainingSeconds.value !== null">
-          {{ Math.ceil(sleepTimer.remainingSeconds.value / 60) }}m
+          {{ t('tts.player.sleepRemaining', { count: Math.ceil(sleepTimer.remainingSeconds.value / 60) }) }}
         </span>
-        <span v-else>Sleep</span>
+        <span v-else>{{ t('tts.player.sleep') }}</span>
       </button>
     </div>
 
@@ -234,7 +257,7 @@ async function handleSaveDefaultVoice() {
       <div class="rounded-lg border border-border bg-muted/20 p-2.5 flex items-center justify-between gap-3">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 mb-0.5">
-            <div class="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Current Voice</div>
+            <div class="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{{ t('tts.player.currentVoice') }}</div>
             <Loader2 v-if="voicesLoading" class="w-3 h-3 animate-spin text-muted-foreground" />
           </div>
           <div class="truncate text-sm font-medium text-foreground">{{ selectedVoiceLabel }}</div>
@@ -247,7 +270,8 @@ async function handleSaveDefaultVoice() {
                 ? 'border-primary/30 text-primary bg-primary/10 hover:bg-primary/20'
                 : 'border-border text-muted-foreground bg-background hover:bg-accent hover:text-foreground'
             "
-            title="Save for this book"
+            :title="t('tts.player.saveForBook')"
+            :aria-label="t('tts.player.saveForBook')"
             :disabled="savingBookVoice || !currentVoiceId"
             @click="handleSaveBookVoice"
           >
@@ -261,7 +285,8 @@ async function handleSaveDefaultVoice() {
                 ? 'border-amber-500/30 text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
                 : 'border-border text-muted-foreground bg-background hover:bg-accent hover:text-foreground'
             "
-            title="Set as global default"
+            :title="t('tts.player.setAsDefault')"
+            :aria-label="t('tts.player.setAsDefault')"
             :disabled="savingDefaultVoice || !currentVoiceId"
             @click="handleSaveDefaultVoice"
           >
@@ -278,7 +303,7 @@ async function handleSaveDefaultVoice() {
           height-class="h-[min(52vh,360px)]"
           @update:selected-voice-id="handleVoiceSelected"
           @update:selected-provider-id="handleProviderSelected"
-          @close="showVoicePicker = false"
+          @close="handleCloseVoicePicker"
         />
       </div>
     </div>
@@ -287,10 +312,10 @@ async function handleSaveDefaultVoice() {
 
     <div class="flex items-center justify-between border-t border-border pt-3">
       <div class="text-xs text-muted-foreground">
-        <span class="font-medium text-foreground">{{ speed }}x</span>
+        <span class="font-medium text-foreground">{{ t('tts.speed.value', { speed }) }}</span>
         <span> - {{ selectedVoiceLabel }}</span>
       </div>
-      <button class="px-3 py-1.5 rounded-lg text-sm hover:bg-accent text-destructive" @click="handleStop">Stop</button>
+      <button class="px-3 py-1.5 rounded-lg text-sm hover:bg-accent text-destructive" @click="handleStop">{{ t('tts.player.stop') }}</button>
     </div>
   </div>
 </template>

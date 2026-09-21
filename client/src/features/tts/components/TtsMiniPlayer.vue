@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Headphones, Pause, Play, ChevronDown, ChevronUp } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { useTtsPlayer } from '../composables/useTtsPlayer'
 import { useTtsMiniPlayerUi } from '../composables/useTtsMiniPlayerUi'
 import { useTtsVoices } from '../composables/useTtsVoices'
@@ -10,6 +11,7 @@ import { formatVoiceDisplayName } from '../lib/voice-display'
 const { playbackState, currentBook, currentBlockIndex, currentChapterIndex, speed, currentProviderId, currentVoiceId, togglePlayPause } =
   useTtsPlayer()
 
+const { t } = useI18n()
 const { mode, isReaderFooterVisible, setMode } = useTtsMiniPlayerUi()
 const { allVoices, loadVoices } = useTtsVoices()
 const isVisible = computed(() => playbackState.value !== 'idle')
@@ -52,8 +54,9 @@ const selectedVoice = computed(() =>
 )
 
 const compactMeta = computed(() => {
-  const voiceName = selectedVoice.value ? formatVoiceDisplayName(selectedVoice.value) : currentVoiceId.value
-  return [`Ch ${currentChapterIndex.value + 1}`, `Sent ${currentBlockIndex.value + 1}`, voiceName, `${speed.value}x`].filter(Boolean).join(' - ')
+  const voice = selectedVoice.value ? formatVoiceDisplayName(selectedVoice.value) : currentVoiceId.value
+  const values = { chapter: currentChapterIndex.value + 1, sentence: currentBlockIndex.value + 1, speed: speed.value }
+  return voice ? t('tts.player.meta', { ...values, voice }) : t('tts.player.metaWithoutVoice', values)
 })
 
 function updateIsMobileViewport() {
@@ -201,13 +204,13 @@ onUnmounted(() => {
         <button
           class="w-14 h-14 rounded-full border border-border bg-card text-foreground shadow-2xl flex items-center justify-center hover:bg-accent disabled:opacity-50"
           :disabled="playbackState === 'loading'"
-          :aria-label="playbackState === 'playing' ? 'Pause TTS' : 'Play TTS'"
+          :aria-label="playbackState === 'playing' ? t('tts.player.pause') : t('tts.player.play')"
           @click="togglePlayPause"
         >
           <img
             v-if="currentBook?.coverUrl"
             :src="currentBook.coverUrl"
-            :alt="currentBook?.title"
+            alt=""
             class="absolute inset-0 w-full h-full object-cover rounded-full opacity-20"
           />
           <Pause v-if="playbackState === 'playing'" class="relative w-6 h-6" />
@@ -215,7 +218,7 @@ onUnmounted(() => {
         </button>
         <button
           class="absolute -top-1 -left-1 w-6 h-6 rounded-full border border-border bg-card text-muted-foreground shadow-md hover:text-foreground hover:bg-accent flex items-center justify-center"
-          aria-label="Open mini player"
+          :aria-label="t('tts.player.openMiniPlayer')"
           @click="setCompactMode('mini')"
         >
           <ChevronUp class="w-3.5 h-3.5" />
@@ -227,28 +230,38 @@ onUnmounted(() => {
 
       <div v-else-if="isMiniMode" class="bg-card border border-border rounded-xl shadow-2xl overflow-hidden">
         <div class="flex items-center gap-2 px-3 py-2.5">
-          <button class="flex-shrink-0 w-8 h-10 rounded bg-muted overflow-hidden flex items-center justify-center" @click="openExpanded">
-            <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" :alt="currentBook?.title" class="w-full h-full object-cover" />
+          <button
+            class="flex-shrink-0 w-8 h-10 rounded bg-muted overflow-hidden flex items-center justify-center"
+            :aria-label="t('tts.player.openDetails')"
+            @click="openExpanded"
+          >
+            <img v-if="currentBook?.coverUrl" :src="currentBook.coverUrl" alt="" class="w-full h-full object-cover" />
             <Headphones v-else class="w-4 h-4 text-muted-foreground" />
           </button>
 
-          <button class="flex-1 min-w-0 text-left" @click="openExpanded">
-            <div class="text-sm font-medium truncate text-foreground">{{ currentBook?.title ?? 'TTS Playback' }}</div>
+          <button class="flex-1 min-w-0 text-left" :aria-label="t('tts.player.openDetails')" @click="openExpanded">
+            <div class="text-sm font-medium truncate text-foreground">{{ currentBook?.title ?? t('tts.player.fallbackTitle') }}</div>
             <div class="text-xs text-muted-foreground truncate">{{ compactMeta }}</div>
           </button>
 
           <button
             class="p-2 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             :disabled="playbackState === 'loading'"
+            :aria-label="playbackState === 'playing' ? t('tts.player.pause') : t('tts.player.play')"
             @click="togglePlayPause"
           >
             <Pause v-if="playbackState === 'playing'" class="w-4 h-4" />
             <Play v-else class="w-4 h-4" />
           </button>
-          <button v-if="isMobileViewport" class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" @click="setCompactMode('micro')">
+          <button
+            v-if="isMobileViewport"
+            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground"
+            :aria-label="t('tts.player.shrinkPlayer')"
+            @click="setCompactMode('micro')"
+          >
             <ChevronDown class="w-4 h-4" />
           </button>
-          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" @click="openExpanded">
+          <button class="p-1.5 rounded-md hover:bg-accent text-muted-foreground" :aria-label="t('tts.player.expandPlayer')" @click="openExpanded">
             <ChevronUp class="w-4 h-4" />
           </button>
         </div>
@@ -256,7 +269,7 @@ onUnmounted(() => {
         <div v-if="playbackState === 'loading'" class="h-0.5 bg-muted overflow-hidden">
           <div class="h-full bg-primary animate-pulse w-1/2" />
         </div>
-        <div v-if="playbackState === 'error'" class="px-3 pb-2 text-xs text-destructive">Playback error - tap play to retry</div>
+        <div v-if="playbackState === 'error'" role="alert" class="px-3 pb-2 text-xs text-destructive">{{ t('tts.player.playbackError') }}</div>
       </div>
 
       <TtsMiniPlayerExpanded v-else @close="handleCloseExpanded" />
