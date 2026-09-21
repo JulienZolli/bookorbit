@@ -46,7 +46,7 @@ Take your library anywhere with the official native BookOrbit app. Read ebooks, 
 
 <a href="https://apps.apple.com/us/app/bookorbit-the-official-app/id6811807346"><img src="https://toolbox.marketingtools.apple.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download BookOrbit on the App Store" height="54"></a>
 
-<sub>Requires iOS 26 or later. Apple Watch features require watchOS 26 or later.</sub>
+<sub>Requires BookOrbit v3.0.0 or later and iOS 26 or later. Apple Watch features require watchOS 26 or later.</sub>
 
 </div>
 

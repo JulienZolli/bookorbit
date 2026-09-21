@@ -276,7 +276,9 @@ export function useFoliateInput(
         isNavigating = true
         navigateRight()
         setTimeout(() => (isNavigating = false), 300)
-      } else {
+      } else if (isMobile) {
+        // Touch has no page zones: any tap that is not a double tap toggles the chrome. On a
+        // pointer device the middle zone is deliberately inert, so it must not fall through here.
         onMiddleTap?.()
       }
     }, DOUBLE_CLICK_MS)
