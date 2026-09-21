@@ -7364,6 +7364,10 @@
       },
       "support": "Support BookOrbit",
       "supportAria": "Support BookOrbit on Ko-fi",
+      "appLinks": {
+        "ios": "Get the iOS app",
+        "android": "Android app coming soon"
+      },
       "sectionHeader": {
         "add": "Add",
         "showAll": "Show all",

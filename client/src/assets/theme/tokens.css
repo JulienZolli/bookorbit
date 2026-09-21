@@ -59,6 +59,9 @@
 
   --star-highlight: oklch(0.76 0.18 90);
 
+  /* Android brand green, darkened in light mode so the mark still separates from the sidebar. */
+  --android-highlight: oklch(0.72 0.16 154);
+
   /* Series volume track. Kept apart from --success / --warning / --destructive because those are
      tuned to clear AA as text: as fills these only have to separate from each other and from the
      card, so light mode wants a brighter amber and a distinctly darker neutral than the text set. */
@@ -321,6 +324,8 @@
   --info: oklch(0.72 0.12 255);
 
   --star-highlight: oklch(0.84 0.17 95);
+
+  --android-highlight: oklch(0.82 0.17 154);
 
   --volume-read: oklch(0.7 0.16 148);
   --volume-reading: oklch(0.78 0.14 75);

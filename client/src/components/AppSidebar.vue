@@ -14,6 +14,7 @@ import SidebarEntitySection from '@/components/sidebar/SidebarEntitySection.vue'
 import SidebarModeSwitch from '@/components/sidebar/SidebarModeSwitch.vue'
 import SidebarSectionPopover from '@/components/sidebar/SidebarSectionPopover.vue'
 import SidebarGithubStar from '@/components/sidebar/SidebarGithubStar.vue'
+import SidebarAppLinks from '@/components/sidebar/SidebarAppLinks.vue'
 import { buildSidebarVersionUi } from '@/components/sidebar/versionUi'
 import { mergedMediaOrder, ownedInOrder, type DisplayOrderEntry } from '@/components/sidebar/sidebar-order'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -647,9 +648,28 @@ onUnmounted(() => stopLibraryUploadListener())
 
     <SidebarFooter v-if="!isSettingsRoute" class="border-t border-sidebar-border px-4 py-2 group-data-[collapsible=icon]:px-2">
       <div
-        class="grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)_1.75rem] items-center gap-2 group-data-[collapsible=icon]:grid-cols-1 group-data-[collapsible=icon]:justify-items-center group-data-[collapsible=icon]:gap-1"
+        class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 group-data-[collapsible=icon]:grid-cols-1 group-data-[collapsible=icon]:justify-items-center group-data-[collapsible=icon]:gap-1"
       >
-        <SidebarGithubStar :is-rail="isRail" />
+        <div
+          class="flex items-center justify-self-start group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:justify-self-center"
+        >
+          <SidebarGithubStar :is-rail="isRail" />
+
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <a
+                :href="SUPPORT_URL"
+                target="_blank"
+                rel="noopener noreferrer"
+                :aria-label="t('components.sidebar.supportAria')"
+                class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-destructive outline-hidden transition-colors duration-150 hover:bg-(--shell-accent-wash) focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+              >
+                <Heart :size="16" class="fill-current" aria-hidden="true" />
+              </a>
+            </TooltipTrigger>
+            <TooltipContent :side="isRail ? 'right' : 'top'">{{ t('components.sidebar.support') }}</TooltipContent>
+          </Tooltip>
+        </div>
 
         <div class="flex min-w-0 items-center justify-center gap-1 group-data-[collapsible=icon]:hidden">
           <RouterLink
@@ -682,20 +702,9 @@ onUnmounted(() => stopLibraryUploadListener())
           </Tooltip>
         </div>
 
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <a
-              :href="SUPPORT_URL"
-              target="_blank"
-              rel="noopener noreferrer"
-              :aria-label="t('components.sidebar.supportAria')"
-              class="inline-flex h-7 w-7 shrink-0 items-center justify-center justify-self-end rounded-md text-destructive outline-hidden transition-colors duration-150 hover:bg-(--shell-accent-wash) focus-visible:ring-2 focus-visible:ring-sidebar-ring group-data-[collapsible=icon]:justify-self-center"
-            >
-              <Heart :size="16" class="fill-current" aria-hidden="true" />
-            </a>
-          </TooltipTrigger>
-          <TooltipContent :side="isRail ? 'right' : 'top'">{{ t('components.sidebar.support') }}</TooltipContent>
-        </Tooltip>
+        <div class="justify-self-end group-data-[collapsible=icon]:justify-self-center">
+          <SidebarAppLinks :is-rail="isRail" />
+        </div>
       </div>
     </SidebarFooter>
 
