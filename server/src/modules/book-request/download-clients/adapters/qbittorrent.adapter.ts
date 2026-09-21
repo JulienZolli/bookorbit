@@ -17,6 +17,13 @@ import { endpointUrl, fetchClient, readClientJson, readClientText, throwForClien
 const LABEL = 'qBittorrent';
 /** qBittorrent's SID cookie lasts an hour by default; re-login well before it lapses. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
+/**
+ * qBittorrent 5.2 renamed the session cookie from `SID` to `QBT_SID_<WebUI port>` and dropped the
+ * setting that used to override the name, so both spellings have to be recognised. The port is the
+ * one qBittorrent itself listens on, which is not the port BookOrbit dials when a reverse proxy or
+ * a published container port sits in between.
+ */
+const SESSION_COOKIE_NAME = /^(?:SID|QBT_SID_\d+)$/;
 /** One `torrents/info` URL has to stay a sane length, so very large fleets poll in chunks. */
 const STATUS_BATCH_SIZE = 100;
 /**
@@ -313,13 +320,29 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
 
     if (!response.ok) {
       throwForClientServerError(response, LABEL, 'login');
+      // 5.2 answers a bad password with 401 and the body "Unauthorized"; older clients answer
+      // 200 "Fails.". A ban after repeated failures is its own 403, and says so in its body.
+      if (response.status === 401) throw new BadRequestException('qBittorrent rejected those credentials');
+      if (response.status === 403) {
+        // The client writes this, so it is bounded before it reaches the settings form.
+        const reason = (await readClientText(response, LABEL)).trim().slice(0, 200);
+        throw new BadRequestException(reason ? `qBittorrent refused the login: ${reason}` : 'qBittorrent refused the login with 403');
+      }
       throw new BadRequestException(`qBittorrent refused the login with ${response.status}`);
     }
+    // 5.2 answers a successful login with an empty 204, so the body is only evidence of failure.
     const text = (await readClientText(response, LABEL)).trim();
     if (text.toLowerCase().startsWith('fail')) throw new BadRequestException('qBittorrent rejected those credentials');
 
     const cookie = extractSidCookie(response);
     // A client with authentication disabled for the local subnet answers "Ok." and sets nothing.
+    // So does one whose cookie BookOrbit failed to recognise, and that case is indistinguishable
+    // here but fails on the very next call with a 403, so say which assumption was made.
+    if (!cookie) {
+      this.logger.warn(
+        `[download_client.login] [end] clientId=${config.id} cookie=none - qBittorrent set no session cookie; assuming authentication is disabled for this subnet`,
+      );
+    }
     const resolved = cookie ?? '';
     this.sessions.set(config.id, { cookie: resolved, expiresAt: Date.now() + SESSION_TTL_MS });
     return resolved;
@@ -399,8 +422,10 @@ function extractSidCookie(response: Response): string | null {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
   const raw = headers.getSetCookie?.() ?? [response.headers.get('set-cookie') ?? ''];
   for (const value of raw) {
-    const match = /(?:^|;\s*)(SID=[^;]+)/.exec(value);
-    if (match) return match[1];
+    // One `Set-Cookie` header carries one cookie; everything after the first `;` is its attributes.
+    const pair = value.split(';')[0]!.trim();
+    const separator = pair.indexOf('=');
+    if (separator > 0 && SESSION_COOKIE_NAME.test(pair.slice(0, separator))) return pair;
   }
   return null;
 }

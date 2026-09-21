@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
 
 import type { ResolvedClientConfig } from '../download-client-adapter';
 import { QbittorrentAdapter } from './qbittorrent.adapter';
@@ -25,8 +25,9 @@ function config(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientCo
 function response(body: string | object, init: { status?: number; setCookie?: string } = {}): Response {
   const headers = new Headers();
   if (init.setCookie) headers.append('set-cookie', init.setCookie);
+  const status = init.status ?? 200;
   const payload = typeof body === 'string' ? body : JSON.stringify(body);
-  return new Response(payload, { status: init.status ?? 200, headers });
+  return new Response(status === 204 ? null : payload, { status, headers });
 }
 
 function mockFetch() {
@@ -548,11 +549,77 @@ describe('QbittorrentAdapter', () => {
       expect(calls.filter((call) => call.url.includes('/auth/login'))).toHaveLength(2);
     });
 
+    /**
+     * qBittorrent 5.2 renamed the cookie to `QBT_SID_<WebUI port>` and answers the login with an
+     * empty 204. Reading only `SID` left the session empty, which every later call answered with a
+     * 403 that looked like a permission problem rather than an unrecognised cookie.
+     */
+    it('accepts the 5.2 session cookie and its empty 204 login', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('/auth/login', () =>
+        response('', { status: 204, setCookie: 'QBT_SID_8080=xZE+G8m4; HttpOnly; expires=Mon, 21-Sep-2026 01:34:10 GMT; path=/' }),
+      );
+      handlers.set('/torrents/info', () => response([]));
+
+      await adapter.status([INFO_HASH], config());
+
+      const infoCall = calls.find((call) => call.url.includes('/torrents/info'));
+      expect((infoCall?.init.headers as Record<string, string>).Cookie).toBe('QBT_SID_8080=xZE+G8m4');
+    });
+
+    /** The cookie is named after qBittorrent's own WebUI port, not the port BookOrbit dials. */
+    it('accepts a session cookie whose port differs from the configured one', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('/auth/login', () => response('', { status: 204, setCookie: 'QBT_SID_18022=abc123; HttpOnly; path=/' }));
+      handlers.set('/torrents/info', () => response([]));
+
+      await adapter.status([INFO_HASH], config({ baseUrl: 'http://127.0.0.1:9091' }));
+
+      const infoCall = calls.find((call) => call.url.includes('/torrents/info'));
+      expect((infoCall?.init.headers as Record<string, string>).Cookie).toBe('QBT_SID_18022=abc123');
+    });
+
     it('reports rejected credentials rather than retrying forever', async () => {
       const { handlers } = mockFetch();
       handlers.set('/auth/login', () => response('Fails.'));
 
-      await expect(adapter.test(config())).resolves.toMatchObject({ success: false });
+      await expect(adapter.test(config())).resolves.toMatchObject({ success: false, error: 'qBittorrent rejected those credentials' });
+    });
+
+    /** 5.2 answers a bad password with 401 rather than the older 200 "Fails.". */
+    it('reports rejected credentials when the client answers 401', async () => {
+      const { handlers } = mockFetch();
+      handlers.set('/auth/login', () => response('Unauthorized', { status: 401 }));
+
+      await expect(adapter.test(config())).resolves.toMatchObject({ success: false, error: 'qBittorrent rejected those credentials' });
+    });
+
+    /** A client that bans the caller after repeated failures says so, and the operator needs it. */
+    it('passes on why the client refused the login with a 403', async () => {
+      const { handlers } = mockFetch();
+      handlers.set('/auth/login', () => response('Your IP address has been banned after too many failed authentication attempts.', { status: 403 }));
+
+      await expect(adapter.test(config())).resolves.toMatchObject({
+        success: false,
+        error: 'qBittorrent refused the login: Your IP address has been banned after too many failed authentication attempts.',
+      });
+    });
+
+    /**
+     * A login that sets nothing means authentication is disabled for this subnet, and the adapter
+     * carries on without a cookie. That assumption is also what an unrecognised cookie looks like,
+     * so it is worth a line in the log rather than a 403 three calls later.
+     */
+    it('says so when a successful login sets no session cookie', async () => {
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { calls, handlers } = mockFetch();
+      handlers.set('/auth/login', () => response('Ok.'));
+      handlers.set('/app/version', () => response('v5.2.3'));
+
+      await expect(adapter.test(config())).resolves.toEqual({ success: true, version: 'v5.2.3' });
+
+      expect((calls.at(-1)?.init.headers as Record<string, string>).Cookie).toBe('');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('[download_client.login]'));
     });
   });
 
