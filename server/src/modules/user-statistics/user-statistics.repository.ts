@@ -211,20 +211,19 @@ export class UserStatisticsRepository {
     return rows.map((row) => row.day);
   }
 
-  async getActivityCompletionTimeline(userId: number, libraryIds: number[] | null, timeZone: string): Promise<UserCompletionTimelinePoint[]> {
-    const firstCompletion = this.db
-      .select({
-        bookId: readingSessions.bookId,
-        firstCompletedAt: sql<Date>`min(${readingSessions.endedAt})`.as('first_completed_at'),
-      })
-      .from(readingSessions)
-      .innerJoin(books, eq(books.id, readingSessions.bookId))
-      .where(and(eq(readingSessions.userId, userId), gte(readingSessions.endProgress, 99), this.libraryFilter(libraryIds)))
-      .groupBy(readingSessions.bookId)
-      .as('activity_first_completion');
-    const localCompletion = sql`${firstCompletion.firstCompletedAt} AT TIME ZONE ${timeZone}`;
-    const yearExpr = sql<number>`extract(year from ${localCompletion})::int`;
-    const monthExpr = sql<number>`extract(month from ${localCompletion})::int`;
+  /**
+   * Completed books per month for the activity overview.
+   *
+   * Completed reading attempts are the canonical record, the same source the dashboard's
+   * reading-goal widget counts, so the Home tile and the activity goal card cannot disagree.
+   * Deriving completions from sessions that reached 99 percent instead drops every book marked
+   * read by hand or finished on Kobo, KOReader or an audiobook that stops short of the end, and
+   * collapses a re-read into the year of its first finish. `endedOn` is a calendar date rather
+   * than an instant, so it carries no zone to convert and is bucketed as stored.
+   */
+  async getActivityCompletionTimeline(userId: number, libraryIds: number[] | null): Promise<UserCompletionTimelinePoint[]> {
+    const yearExpr = sql<number>`extract(year from ${readingAttempts.endedOn})::int`;
+    const monthExpr = sql<number>`extract(month from ${readingAttempts.endedOn})::int`;
 
     return this.db
       .select({
@@ -232,9 +231,19 @@ export class UserStatisticsRepository {
         month: monthExpr,
         count: sql<number>`count(*)::int`,
       })
-      .from(firstCompletion)
-      .groupBy(sql`1`, sql`2`)
-      .orderBy(sql`1`, sql`2`);
+      .from(readingAttempts)
+      .innerJoin(books, eq(books.id, readingAttempts.bookId))
+      .where(
+        and(
+          eq(readingAttempts.userId, userId),
+          eq(readingAttempts.outcome, 'completed'),
+          isNotNull(readingAttempts.endedOn),
+          isNull(readingAttempts.deletedAt),
+          this.libraryFilter(libraryIds),
+        ),
+      )
+      .groupBy(yearExpr, monthExpr)
+      .orderBy(yearExpr, monthExpr);
   }
 
   async getActivityPaceSummary(userId: number, libraryIds: number[] | null, days = 1825): Promise<ActivityPaceSummary> {

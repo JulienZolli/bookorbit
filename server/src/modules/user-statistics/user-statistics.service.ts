@@ -309,7 +309,7 @@ export class UserStatisticsService {
 
       const [availableYearsRaw, completionRows, funnel, pace] = await Promise.all([
         this.repo.getActivityAvailableYears(user.id, libraryIds, timeZone),
-        this.repo.getActivityCompletionTimeline(user.id, libraryIds, timeZone),
+        this.repo.getActivityCompletionTimeline(user.id, libraryIds),
         this.getProgressFunnel(user, { libraryIds: query.libraryIds, days: 365, comparePrevious: true }),
         this.repo.getActivityPaceSummary(user.id, libraryIds),
       ]);
