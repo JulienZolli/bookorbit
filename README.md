@@ -63,6 +63,14 @@ Take your library anywhere with the official native BookOrbit app. Read ebooks, 
 
 </details>
 
+## How I Actually Use BookOrbit
+
+One read-along EPUB3 per book: listened to on iPhone, carried offline to Apple Watch for runs, read
+on a Kobo through KOReader, and picked up again on the laptop. One file, one reading position, no
+reconciling an audiobook against an ebook.
+
+Read the full walkthrough at **[bookorbit.app/my-workflow](https://bookorbit.app/my-workflow)**.
+
 ## Live Demo
 
 Try the live instance before you install. No account required.
