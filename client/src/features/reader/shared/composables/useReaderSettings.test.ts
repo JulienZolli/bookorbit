@@ -5,6 +5,12 @@ import { CBX_READER_DEFAULTS, READER_GROUP_DEFAULTS, type PdfReaderSettings } fr
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
 vi.mock('@/lib/api', () => ({ api: apiMock }))
 
+/** The JSON body of a recorded `api()` call, so an assertion can read what was actually sent. */
+function sentBody(call = 0): Record<string, unknown> {
+  const init = apiMock.mock.calls[call]?.[1] as RequestInit | undefined
+  return JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+}
+
 const toastMock = vi.hoisted(() => ({
   success: vi.fn<(...args: unknown[]) => unknown>(),
 }))
@@ -353,7 +359,7 @@ describe('useReaderSettings - updateBookSettings', () => {
     s.updateBookSettings({ fontSize: 22 } as never)
 
     expect(apiMock).toHaveBeenCalledWith(`/api/v1/reader/preferences/${BOOK_FILE_ID}`, expect.objectContaining({ method: 'PATCH' }))
-    expect(JSON.parse(apiMock.mock.calls[0][1].body)).toEqual({ set: { fontSize: 22 } })
+    expect(sentBody()).toEqual({ set: { fontSize: 22 } })
   })
 
   it('sends nothing when the patch is empty, because the server rejects an empty body', () => {
@@ -433,10 +439,9 @@ describe('useReaderSettings - updateDefaultSettings', () => {
     s.updateDefaultSettings({ fontSize: 18 } as never)
 
     expect(apiMock).toHaveBeenCalledWith('/api/v1/reader/defaults/epub', expect.objectContaining({ method: 'PATCH' }))
-    const body = JSON.parse(apiMock.mock.calls[0][1].body)
+    const body = sentBody()
     expect(body).toEqual({ set: { fontSize: 18 } })
     // The whole point: nothing another client owns rides along and overwrites it.
-    expect(body.set.themeName).toBeUndefined()
     expect(body.settings).toBeUndefined()
   })
 
@@ -662,7 +667,7 @@ describe('useReaderDefaultSettings - update', () => {
     s.update({ fontSize: 22 } as never)
 
     expect(apiMock).toHaveBeenCalledWith('/api/v1/reader/defaults/epub', expect.objectContaining({ method: 'PATCH' }))
-    expect(JSON.parse(apiMock.mock.calls[0][1].body)).toEqual({ set: { fontSize: 22 } })
+    expect(sentBody()).toEqual({ set: { fontSize: 22 } })
   })
 
   it('sends nothing when the patch is empty', () => {
