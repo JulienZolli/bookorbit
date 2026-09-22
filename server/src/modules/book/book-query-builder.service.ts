@@ -99,7 +99,7 @@ export class BookQueryBuilder {
         .select({ one: sql`1` })
         .from(bookAuthors)
         .innerJoin(authors, eq(bookAuthors.authorId, authors.id))
-        .where(and(eq(bookAuthors.bookId, books.id), this.buildSearchTextMatch(authors.name, pattern, q))!);
+        .where(and(eq(bookAuthors.bookId, books.id), accentInsensitiveIlike(authors.name, pattern))!);
       return sql`exists (${sq})`;
     })();
 
@@ -108,7 +108,7 @@ export class BookQueryBuilder {
         .select({ one: sql`1` })
         .from(bookNarrators)
         .innerJoin(narrators, eq(bookNarrators.narratorId, narrators.id))
-        .where(and(eq(bookNarrators.bookId, books.id), this.buildSearchTextMatch(narrators.name, pattern, q))!);
+        .where(and(eq(bookNarrators.bookId, books.id), accentInsensitiveIlike(narrators.name, pattern))!);
       return sql`exists (${sq})`;
     })();
 
@@ -117,14 +117,14 @@ export class BookQueryBuilder {
         .select({ one: sql`1` })
         .from(bookSeriesMemberships)
         .innerJoin(bookSeries, eq(bookSeries.id, bookSeriesMemberships.seriesId))
-        .where(and(eq(bookSeriesMemberships.bookId, books.id), this.buildSearchTextMatch(bookSeries.name, pattern, q))!);
+        .where(and(eq(bookSeriesMemberships.bookId, books.id), accentInsensitiveIlike(bookSeries.name, pattern))!);
       return sql`exists (${sq})`;
     })();
 
     return or(
-      this.buildSearchTextMatch(bookMetadata.title, pattern, q),
+      accentInsensitiveIlike(bookMetadata.title, pattern),
       existsAuthor,
-      this.buildSearchTextMatch(bookMetadata.seriesName, pattern, q),
+      accentInsensitiveIlike(bookMetadata.seriesName, pattern),
       existsSeries,
       existsNarrator,
     )!;
@@ -132,12 +132,6 @@ export class BookQueryBuilder {
 
   buildOrderBy(sort: SortSpec[], userId?: number, customFieldTypes?: CustomMetadataFieldTypeMap, context?: BookSortContext): SQL[] {
     return this.sortBuilder.build(sort, userId, customFieldTypes, context);
-  }
-
-  private buildSearchTextMatch(column: AnyColumn, pattern: string, query: string): SQL {
-    const contains = accentInsensitiveIlike(column, pattern);
-    if (query.trim().length < 3) return contains;
-    return or(contains, sql`public.bookorbit_unaccent(${column}) % public.bookorbit_unaccent(${query})`)!;
   }
 
   private groupToSql(node: GroupRule, depth: number, userId?: number, timeZone = 'UTC'): SQL {

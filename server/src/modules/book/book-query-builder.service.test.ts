@@ -786,17 +786,22 @@ describe('buildQuickSearch', () => {
 
     expect(result).toMatchObject({ type: 'or' });
     expect(result.clauses).toHaveLength(5);
-    expect(result.clauses[0]).toMatchObject({
-      type: 'or',
-      clauses: [expect.objectContaining({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' }), expect.objectContaining({ type: 'sql' })],
-    });
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
     expect(result.clauses[1]).toMatchObject({ type: 'sql' });
-    expect(result.clauses[2]).toMatchObject({
-      type: 'or',
-      clauses: [expect.objectContaining({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' }), expect.objectContaining({ type: 'sql' })],
-    });
+    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%tolkien%' });
     expect(result.clauses[3]).toMatchObject({ type: 'sql' });
     expect(result.clauses[4]).toMatchObject({ type: 'sql' });
+  });
+
+  it('uses phrase containment without trigram expansion for multi-word searches', () => {
+    const { builder } = makeBuilder();
+    vi.mocked(accentInsensitiveIlike).mockClear();
+
+    const result = builder.buildQuickSearch('The Wax Child');
+
+    expect(accentInsensitiveIlike).toHaveBeenCalledTimes(5);
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(expect.anything(), '%The Wax Child%');
+    expect(collectSqlText(result).join(' ')).not.toContain(' % ');
   });
 
   it('escapes LIKE special characters in q', () => {
@@ -804,8 +809,8 @@ describe('buildQuickSearch', () => {
 
     const result = builder.buildQuickSearch('50% off') as any;
 
-    expect(result.clauses[0].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
-    expect(result.clauses[2].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
+    expect(result.clauses[2]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%50\\% off%' });
   });
 
   it('escapes underscore in q', () => {
@@ -813,10 +818,10 @@ describe('buildQuickSearch', () => {
 
     const result = builder.buildQuickSearch('book_one') as any;
 
-    expect(result.clauses[0].clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%book\\_one%' });
+    expect(result.clauses[0]).toMatchObject({ type: 'accentInsensitiveIlike', pattern: '%book\\_one%' });
   });
 
-  it('does not add fuzzy predicates for two-character queries', () => {
+  it('uses the same containment predicate for two-character queries', () => {
     const { builder } = makeBuilder();
 
     const result = builder.buildQuickSearch('du') as any;

@@ -572,10 +572,7 @@ export class AuthorsRepository {
     }
     const query = params.q?.trim();
     if (query) {
-      const contains = accentInsensitiveIlike(authors.name, buildSearchPattern(query));
-      clauses.push(
-        query.length >= 3 ? or(contains, sql`public.bookorbit_unaccent(${authors.name}) % public.bookorbit_unaccent(${query})`)! : contains,
-      );
+      clauses.push(accentInsensitiveIlike(authors.name, buildSearchPattern(query)));
     }
     if (params.hasPhoto !== undefined) {
       clauses.push(eq(authors.hasPhoto, params.hasPhoto));

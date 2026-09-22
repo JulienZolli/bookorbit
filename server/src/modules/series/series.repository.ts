@@ -79,14 +79,11 @@ export class SeriesRepository {
     return inArray(books.libraryId, libraryIds);
   }
 
-  private buildAuthorNameMatchCondition(pattern: string, query?: string): SQL {
-    const contains = accentInsensitiveIlike(authors.name, pattern);
-    const nameMatch =
-      query && query.length >= 3 ? or(contains, sql`public.bookorbit_unaccent(${authors.name}) % public.bookorbit_unaccent(${query})`)! : contains;
+  private buildAuthorNameMatchCondition(pattern: string): SQL {
     return sql`${books.id} IN (
       SELECT ${bookAuthors.bookId} FROM ${bookAuthors}
       INNER JOIN ${authors} ON ${authors.id} = ${bookAuthors.authorId}
-      WHERE ${nameMatch}
+      WHERE ${accentInsensitiveIlike(authors.name, pattern)}
     )`;
   }
 
@@ -109,18 +106,13 @@ export class SeriesRepository {
 
     if (params.q) {
       const qPattern = buildSearchPattern(params.q);
-      const authorNameMatch = this.buildAuthorNameMatchCondition(qPattern, params.q);
-      const nameContains = accentInsensitiveIlike(bookSeries.name, qPattern);
-      const nameMatch =
-        params.q.length >= 3
-          ? or(nameContains, sql`public.bookorbit_unaccent(${bookSeries.name}) % public.bookorbit_unaccent(${params.q})`)!
-          : nameContains;
-      conditions.push(sql`(${nameMatch} OR ${authorNameMatch})`);
+      const authorNameMatch = this.buildAuthorNameMatchCondition(qPattern);
+      conditions.push(sql`(${accentInsensitiveIlike(bookSeries.name, qPattern)} OR ${authorNameMatch})`);
     }
 
     if (params.author) {
       const authorPattern = buildSearchPattern(params.author);
-      conditions.push(this.buildAuthorNameMatchCondition(authorPattern, params.author));
+      conditions.push(this.buildAuthorNameMatchCondition(authorPattern));
     }
 
     const baseWhere = and(...conditions)!;
