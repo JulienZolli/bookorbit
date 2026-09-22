@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { MEDIA_OVERLAY_HIGHLIGHT_CSS_VARIABLE } from '../../../media-overlay/lib/media-overlay-highlight'
 import { useReaderState } from '../useReaderState'
 
 describe('useReaderState', () => {
@@ -71,6 +72,28 @@ describe('useReaderState', () => {
     expect(light).toEqual(state.currentTheme.value.light)
     expect(dark).toEqual(state.currentTheme.value.dark)
     expect(dark.bg).not.toBe(light.bg)
+  })
+
+  it('provides a theme-aware media-overlay highlight whenever the page background is forced', () => {
+    const state = useReaderState()
+
+    for (const theme of state.themes) {
+      state.setThemeName(theme.name)
+      for (const dark of [false, true]) {
+        state.setIsDark(dark)
+        const css = state.generateCSS()
+        const shouldForceBackground = dark || theme.light.bg !== '#ffffff'
+
+        expect(css.includes(`${MEDIA_OVERLAY_HIGHLIGHT_CSS_VARIABLE}:`), `${theme.name} ${dark ? 'dark' : 'light'}`).toBe(shouldForceBackground)
+      }
+    }
+  })
+
+  it('does not couple media-overlay highlighting to a hard-coded active class', () => {
+    const state = useReaderState()
+    state.setThemeName('sepia')
+
+    expect(state.generateCSS()).not.toContain('.media-active')
   })
 
   it('applies renderer attributes and CSS in paginated flow', () => {

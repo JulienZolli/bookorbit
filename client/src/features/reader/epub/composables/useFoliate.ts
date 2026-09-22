@@ -3,6 +3,7 @@ import { api, getAccessToken } from '@/lib/api'
 import { useFoliateAnnotations } from './useFoliateAnnotations'
 import { useFoliateSelection } from './useFoliateSelection'
 import { useFoliateInput } from './useFoliateInput'
+import { ensureMediaOverlayActiveClass } from '../../media-overlay/lib/media-overlay-highlight'
 import type { EpubBookInfo, EpubReaderSettings } from '@bookorbit/types'
 
 export interface RelocateDetail {
@@ -302,6 +303,7 @@ export function useFoliate(
           | undefined
         if (!makeStreamingBook) throw new Error('makeStreamingBook not available')
         const book = await makeStreamingBook(bookId, '/api/v1/epub', bookInfo, makeFoliateFetchFile(), null, fileId)
+        ensureMediaOverlayActiveClass(book)
         applyEpubOpenOptions(book, options)
         shouldRestoreByFraction = isFixedLayoutBook(book)
         isFixedLayout.value = shouldRestoreByFraction

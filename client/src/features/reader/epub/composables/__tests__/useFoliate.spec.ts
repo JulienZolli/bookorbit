@@ -135,6 +135,28 @@ describe('useFoliate.open', () => {
     expect(`${fetchFile}`).toBe('fresh-reader-token')
   })
 
+  it('applies the EPUB default media-overlay active class before Foliate opens the book', async () => {
+    const book = { media: {}, sections: [{ mediaOverlay: { id: 'overlay' } }] }
+    ;(window as unknown as { makeStreamingBook: ReturnType<typeof vi.fn> }).makeStreamingBook.mockResolvedValueOnce(book)
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 2, 'epub', null, undefined)
+
+    expect(book.media).toEqual({ activeClass: '-epub-media-overlay-active' })
+    expect(mockOpen).toHaveBeenCalledWith(book)
+  })
+
+  it('preserves a book-defined media-overlay active class', async () => {
+    const book = { media: { activeClass: 'book-active' }, sections: [{ mediaOverlay: { id: 'overlay' } }] }
+    ;(window as unknown as { makeStreamingBook: ReturnType<typeof vi.fn> }).makeStreamingBook.mockResolvedValueOnce(book)
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 2, 'epub', null, undefined)
+
+    expect(book.media.activeClass).toBe('book-active')
+    expect(mockOpen).toHaveBeenCalledWith(book)
+  })
+
   it('forces fixed-layout EPUB spreads off before opening when requested', async () => {
     const book = { type: 'book', rendition: { layout: 'pre-paginated', spread: 'both' } }
     ;(window as unknown as { makeStreamingBook: ReturnType<typeof vi.fn> }).makeStreamingBook.mockResolvedValueOnce(book)

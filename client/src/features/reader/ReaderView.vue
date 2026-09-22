@@ -31,6 +31,7 @@ import { useTtsKeyboard } from '@/features/tts/composables/useTtsKeyboard'
 import { getProviders, getVoices } from '@/features/tts/api/tts.api'
 import { useMediaOverlay } from './media-overlay/composables/useMediaOverlay'
 import { resolveMediaOverlayResume, type MediaOverlayResumePosition } from './media-overlay/lib/media-overlay-resume'
+import { injectMediaOverlayHighlightCss, MEDIA_OVERLAY_DEFAULT_ACTIVE_CLASS } from './media-overlay/lib/media-overlay-highlight'
 import TtsResumePrompt from '@/features/tts/components/TtsResumePrompt.vue'
 import ReaderHeader from './epub/components/ReaderHeader.vue'
 import ReaderFooter from './epub/components/ReaderFooter.vue'
@@ -322,21 +323,6 @@ function applySavedTtsResumeHighlight() {
   void showResumeHighlightFromBlock(savedChapterIdx, savedBlockIdx, sectionIndex.value)
 }
 
-const MEDIA_OVERLAY_STYLE_ID = 'bo-media-overlay-highlight'
-
-// Foliate's media-overlay engine only toggles the book's active class on the
-// current element; styling that class is the host app's job. Inject a themed
-// highlight rule (matching the TTS highlight colour) into each chapter document
-// so narration highlighting is visible even when the EPUB ships no CSS for it.
-function injectMediaOverlayHighlightCss(doc: Document) {
-  if (!doc?.head || doc.getElementById(MEDIA_OVERLAY_STYLE_ID)) return
-  const activeClass = getMediaActiveClass() ?? '-epub-media-overlay-active'
-  const style = doc.createElement('style')
-  style.id = MEDIA_OVERLAY_STYLE_ID
-  style.textContent = `.${CSS.escape(activeClass)} { background-color: rgba(79, 195, 247, 0.3); border-radius: 0.15em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }`
-  doc.head.appendChild(style)
-}
-
 // The most recently loaded chapter document, used to re-mark the resume sentence
 // after narration stops (foliate clears its own highlight on stop).
 let currentChapterDoc: Document | null = null
@@ -363,7 +349,7 @@ function showResumeNarrationHighlight(doc: Document) {
   if (!id) return
   const el = doc.getElementById(id)
   if (!el) return
-  const cls = getMediaActiveClass() ?? '-epub-media-overlay-active'
+  const cls = getMediaActiveClass() ?? MEDIA_OVERLAY_DEFAULT_ACTIVE_CLASS
   el.classList.add(cls)
   resumeNarrationHighlight = { el, cls }
 }
@@ -372,7 +358,7 @@ function onChapterLoadHandler(doc: Document, viewEl: HTMLElement) {
   currentChapterDoc = doc
   setFoliateSource(doc, viewEl)
   if (getMediaOverlay()) {
-    injectMediaOverlayHighlightCss(doc)
+    injectMediaOverlayHighlightCss(doc, getMediaActiveClass())
     showResumeNarrationHighlight(doc)
   }
 }
