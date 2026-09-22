@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { load } from 'cheerio';
 import * as unzipper from 'unzipper';
 import { XMLParser } from 'fast-xml-parser';
 
@@ -35,9 +36,6 @@ export function htmlToBlocks(html: string): string[] {
   // server-side audio blocks and client-side highlight blocks stay in sync.
   const BLOCK_SPLIT_RE =
     /<(?:article|aside|audio|blockquote|caption|details|dialog|div|dl|dt|dd|figure|footer|form|figcaption|h[1-6]|header|hgroup|hr|li|main|math|nav|ol|p|pre|section|tr)[^>]*>/gi;
-  const TAG_RE = /<[^>]+>/g;
-  const ENTITY_RE = /&(?:amp|lt|gt|quot|apos|nbsp);/g;
-  const ENTITY_MAP: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' ' };
 
   // Foliate's getBlocks() starts the first block at the first block-level
   // element and discards any content before it. Anchor extraction at the same
@@ -52,16 +50,30 @@ export function htmlToBlocks(html: string): string[] {
   // inside a paragraph (common in pretty-printed EPUB HTML) never splits one
   // paragraph into several blocks and desyncs the indices.
   const chunks = fromFirstBlock.split(BLOCK_SPLIT_RE);
-  return chunks
-    .map((chunk) => {
-      const text = chunk
-        .replace(TAG_RE, '')
-        .replace(ENTITY_RE, (m) => ENTITY_MAP[m] ?? m)
-        .replace(/\s+/g, ' ')
-        .trim();
-      return text;
-    })
-    .filter((t) => t.length > 0);
+
+  // Only the text conversion below changed: the split above still decides block
+  // boundaries, so block indices stay aligned with Foliate's highlight blocks.
+  return chunks.map((chunk) => blockText(chunk)).filter((t) => t.length > 0);
+}
+
+/**
+ * A block's spoken text, which has to be the text the reader displays for that block,
+ * because the narration is read against the page.
+ *
+ * Each chunk is still an HTML fragment, so it is parsed rather than stripped and unescaped
+ * by hand. The hand-written table this replaced knew six named entities and no numeric
+ * ones, so a reference like `&#39;` survived into the block text and providers read it out
+ * verbatim ("hash thirty-nine") where the page showed a normal apostrophe. Parsing decodes
+ * whatever the reader's own DOM decodes, and decodes once, so a book that quotes `&amp;#39;`
+ * is still narrated as `&#39;`.
+ *
+ * `htmlToPlainText` is deliberately not used here. It strips tag-shaped text a second time
+ * after decoding, which is right for scraped metadata that gets displayed but would silence
+ * content in a book: a code sample written `&lt;div&gt;hi&lt;/div&gt;` would narrate as
+ * "hi", and "5 &lt; 6" would lose its operator.
+ */
+function blockText(chunk: string): string {
+  return load(chunk, undefined, false).root().text().replace(/\s+/g, ' ').trim();
 }
 
 @Injectable()
