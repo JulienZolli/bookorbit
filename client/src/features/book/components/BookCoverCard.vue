@@ -518,9 +518,10 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
           <!-- Reading progress bar - bottom edge -->
           <div
             v-if="showProgressBar && !selectionMode"
+            data-testid="reading-progress-bar"
             class="absolute bottom-0 left-0 z-10 h-0.75 transition-[width,opacity] duration-500 [box-shadow:0_-1px_0_rgba(255,255,255,0.25)]"
             style="transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1)"
-            :class="[book.readingProgress === 100 ? 'bg-green-500/80' : 'bg-primary/70', overlayFadeClass]"
+            :class="[localReadStatus === 'read' ? 'bg-green-500/80' : 'bg-primary/70', overlayFadeClass]"
             :style="{ width: `${book.readingProgress}%` }"
           />
 

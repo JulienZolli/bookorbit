@@ -168,6 +168,16 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
   }
 }
 
+function makeReadStatus(status: NonNullable<BookCard['readStatus']>['status']): NonNullable<BookCard['readStatus']> {
+  return {
+    status,
+    source: 'auto',
+    startedAt: null,
+    finishedAt: status === 'read' ? '2026-09-21T00:00:00.000Z' : null,
+    updatedAt: '2026-09-21T00:00:00.000Z',
+  }
+}
+
 function mountCard(
   props: Partial<{ book: BookCard; selectionMode: boolean; selected: boolean; showLabel: boolean; onSelect: (e: MouseEvent) => void }> = {},
 ) {
@@ -637,6 +647,57 @@ describe('BookCoverCard', () => {
       // The cover wrapper has style with aspectRatio
       const coverWrapper = wrapper.find('[style*="aspect-ratio"]')
       expect(coverWrapper.exists()).toBe(true)
+    })
+  })
+
+  // ── reading progress bar ──────────────────────────────────────────────────
+
+  describe('reading progress bar', () => {
+    it.each([
+      { percentage: 98, status: 'read' as const },
+      { percentage: 99.99974, status: 'read' as const },
+    ])('uses the completed color at $percentage percent when status is $status', ({ percentage, status }) => {
+      mockCardOverlays.value = ['progress-bar']
+      const wrapper = mountCard({
+        book: makeBook({
+          files: [makeFile({ format: 'mp3' })],
+          readingProgress: percentage,
+          readStatus: makeReadStatus(status),
+        }),
+      })
+
+      const progressBar = wrapper.get('[data-testid="reading-progress-bar"]')
+      expect(progressBar.classes()).toContain('bg-green-500/80')
+      expect(progressBar.classes()).not.toContain('bg-primary/70')
+    })
+
+    it('uses the in-progress color below 100 percent when status is not read', () => {
+      mockCardOverlays.value = ['progress-bar']
+      const wrapper = mountCard({
+        book: makeBook({
+          readingProgress: 99.99974,
+          readStatus: makeReadStatus('reading'),
+        }),
+      })
+
+      const progressBar = wrapper.get('[data-testid="reading-progress-bar"]')
+      expect(progressBar.classes()).toContain('bg-primary/70')
+      expect(progressBar.classes()).not.toContain('bg-green-500/80')
+    })
+
+    it('updates the color when the read status changes', async () => {
+      mockCardOverlays.value = ['progress-bar']
+      const book = makeBook({
+        readingProgress: 99.99974,
+        readStatus: makeReadStatus('reading'),
+      })
+      const wrapper = mountCard({ book })
+
+      await wrapper.setProps({ book: { ...book, readStatus: makeReadStatus('read') } })
+
+      const progressBar = wrapper.get('[data-testid="reading-progress-bar"]')
+      expect(progressBar.classes()).toContain('bg-green-500/80')
+      expect(progressBar.classes()).not.toContain('bg-primary/70')
     })
   })
 
