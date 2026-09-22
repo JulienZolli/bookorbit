@@ -16,6 +16,7 @@ const BOOK_FIELDS = `
   subtitle
   description
   cached_contributors
+  cached_tags
   featured_book_series { series { name books_count } position }
   rating
   ratings_count

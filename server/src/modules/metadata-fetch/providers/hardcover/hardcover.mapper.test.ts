@@ -29,6 +29,12 @@ const baseBook: HardcoverBookWithEditions = {
   subtitle: 'Book Subtitle',
   description: 'A story about a wizard.',
   cached_contributors: [{ author: { id: 1, name: 'Patrick Rothfuss' }, contribution: null }],
+  cached_tags: {
+    Genre: [
+      { tag: 'Fantasy', count: 10 },
+      { tag: 'Fiction', count: 8 },
+    ],
+  },
   featured_book_series: { series: { name: 'The Kingkiller Chronicle', books_count: 3 }, position: 1 },
   rating: 4.42,
   ratings_count: 12345,
@@ -289,6 +295,7 @@ describe('mapBookWithEditions', () => {
       publishedYear: 2007,
       isbn10: '0756404079',
       isbn13: '9780756404079',
+      genres: ['Fantasy', 'Fiction'],
       seriesName: 'The Kingkiller Chronicle',
       seriesIndex: '1',
       seriesTotalBooks: 3,
@@ -354,6 +361,42 @@ describe('mapBookWithEditions', () => {
     expect(results[0].hardcoverEditionId).toBe('1001');
     expect(results[1].isbn13).toBe('9780000000002');
     expect(results[1].hardcoverEditionId).toBe('1002');
+  });
+
+  describe('genres', () => {
+    it('maps the Genre cached-tag bucket to every edition candidate', () => {
+      const book: HardcoverBookWithEditions = {
+        ...baseBook,
+        editions: [
+          { ...baseBook.editions![0], id: 1001 },
+          { ...baseBook.editions![0], id: 1002 },
+        ],
+      };
+
+      expect(mapBookWithEditions(book).map((candidate) => candidate.genres)).toEqual([
+        ['Fantasy', 'Fiction'],
+        ['Fantasy', 'Fiction'],
+      ]);
+    });
+
+    it('trims, de-duplicates, and ignores malformed cached tags', () => {
+      const book: HardcoverBookWithEditions = {
+        ...baseBook,
+        cached_tags: {
+          Genre: [null, 'Fantasy', {}, { tag: null }, { tag: 42 }, { tag: '  ' }, { tag: 'Fantasy' }, { tag: ' fantasy ' }, { tag: 'Sci-Fi' }],
+        },
+      };
+
+      expect(mapBookWithEditions(book)[0].genres).toEqual(['Fantasy', 'Sci-Fi']);
+    });
+
+    it.each([undefined, null, {}, { Genre: null }, { Genre: { tag: 'Fantasy' } }, { Genre: [] }])(
+      'omits genres for an absent or invalid Genre bucket',
+      (cachedTags) => {
+        const book: HardcoverBookWithEditions = { ...baseBook, cached_tags: cachedTags };
+        expect(mapBookWithEditions(book)[0].genres).toBeUndefined();
+      },
+    );
   });
 
   it('uses edition authors when present', () => {

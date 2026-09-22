@@ -52,6 +52,7 @@ export interface HardcoverBookWithEditions {
   subtitle?: string;
   description?: string;
   cached_contributors?: HardcoverCachedContributor[];
+  cached_tags?: HardcoverCachedTags | null;
   featured_book_series?: {
     series?: {
       name?: string;
@@ -66,6 +67,11 @@ export interface HardcoverBookWithEditions {
   release_year?: number;
   image?: HardcoverImage;
   editions?: HardcoverEdition[];
+}
+
+export interface HardcoverCachedTags {
+  Genre?: unknown;
+  [category: string]: unknown;
 }
 
 export interface HardcoverEdition {

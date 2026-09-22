@@ -2,7 +2,13 @@ import { MetadataCandidate, MetadataProviderKey, parseSeriesIndex } from '@booko
 
 import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
 import { normalizeSeriesTotalBooks } from '../../../../common/utils/series-total-books.utils';
-import { HardcoverBookWithEditions, HardcoverCachedContributor, HardcoverEdition, HardcoverSearchDocument } from './hardcover.types';
+import {
+  HardcoverBookWithEditions,
+  HardcoverCachedContributor,
+  HardcoverCachedTags,
+  HardcoverEdition,
+  HardcoverSearchDocument,
+} from './hardcover.types';
 
 function parseYear(releaseYear: number | undefined | null, releaseDate: string | undefined): number | undefined {
   return parsePublishedYear(releaseYear) ?? parsePublishedYear(releaseDate);
@@ -25,6 +31,22 @@ function extractAuthorsFromContributors(contributors: HardcoverCachedContributor
     )
     .map((contributor) => contributor.author?.name)
     .filter((name): name is string => typeof name === 'string' && name.trim().length > 0);
+}
+
+function extractGenresFromCachedTags(cachedTags: HardcoverCachedTags | null | undefined): string[] | undefined {
+  if (!Array.isArray(cachedTags?.Genre)) return undefined;
+
+  const genres: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of cachedTags.Genre) {
+    if (typeof entry !== 'object' || entry === null || !('tag' in entry) || typeof entry.tag !== 'string') continue;
+    const genre = entry.tag.trim();
+    const token = genre.toLowerCase();
+    if (!genre || seen.has(token)) continue;
+    seen.add(token);
+    genres.push(genre);
+  }
+  return genres.length ? genres : undefined;
 }
 
 function pickIsbn(isbns: string[] | undefined): { isbn10?: string; isbn13?: string } {
@@ -125,6 +147,7 @@ function mapEdition(edition: HardcoverEdition, book: HardcoverBookWithEditions):
   const authors = editionAuthors.length > 0 ? editionAuthors : extractAuthorsFromContributors(book.cached_contributors);
   const communityRating = normalizeCommunityRating(book.rating);
   const communityRatingCount = normalizeCommunityRatingCount(book.ratings_count);
+  const genres = extractGenresFromCachedTags(book.cached_tags);
   const { title, subtitle } = splitEmbeddedSubtitle(edition.title ?? book.title, edition.subtitle ?? book.subtitle);
 
   return {
@@ -142,6 +165,7 @@ function mapEdition(edition: HardcoverEdition, book: HardcoverBookWithEditions):
     publishedYear: resolveEditionPublishedYear(edition, book),
     isbn10: edition.isbn_10,
     isbn13: edition.isbn_13,
+    ...(genres ? { genres } : {}),
     seriesName: book.featured_book_series?.series?.name,
     seriesIndex: parseSeriesIndex(book.featured_book_series?.position) ?? undefined,
     seriesTotalBooks: normalizeSeriesTotalBooks(book.featured_book_series?.series?.books_count),
