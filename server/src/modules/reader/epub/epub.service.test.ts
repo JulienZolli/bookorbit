@@ -158,13 +158,13 @@ const SMIL_XML = `
 </smil>
 `;
 
-function makeMediaOverlayArchive() {
+function makeMediaOverlayArchive(smil = SMIL_XML) {
   return makeArchive([
     { path: 'META-INF/container.xml', content: CONTAINER_XML },
     { path: 'OPS/content.opf', content: OPF_MEDIA_OVERLAY_XML },
     { path: 'OPS/nav.xhtml', content: NAV_XHTML },
     { path: 'OPS/text/ch1.xhtml', content: '<h1>ch1</h1>' },
-    { path: 'OPS/smil/ch1.smil', content: SMIL_XML },
+    { path: 'OPS/smil/ch1.smil', content: smil },
     { path: 'OPS/audio/ch1.mp3', content: Buffer.from('0123456789') },
   ]);
 }
@@ -329,6 +329,24 @@ describe('EpubService', () => {
         durationSeconds: 1.5,
       }),
     ]);
+  });
+
+  it('preserves a zero-length SMIL clip as a known zero-width playlist item', async () => {
+    const smil = SMIL_XML.replace('clipBegin="3s" clipEnd="4500ms"', 'clipBegin="3s" clipEnd="3s"');
+    mockOpenFile.mockResolvedValueOnce(makeMediaOverlayArchive(smil) as any).mockResolvedValueOnce(makeMediaOverlayArchive(smil) as any);
+
+    const playlist = await service.getMediaOverlayPlaylist(99, undefined, user);
+
+    expect(playlist.durationSeconds).toBe(1.5);
+    expect(playlist.sections).toEqual([expect.objectContaining({ durationSeconds: 1.5 })]);
+    expect(playlist.items[1]).toEqual(
+      expect.objectContaining({
+        textFragment: 's2',
+        clipBeginSeconds: 3,
+        clipEndSeconds: 3,
+        durationSeconds: 0,
+      }),
+    );
   });
 
   it('streams only playlist audio resources and supports byte ranges', async () => {

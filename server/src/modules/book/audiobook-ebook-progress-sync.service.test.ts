@@ -87,6 +87,31 @@ function makePlaylist() {
   };
 }
 
+function makePlaylistWithZeroLengthClip() {
+  const playlist = makePlaylist();
+  return {
+    ...playlist,
+    items: [
+      { ...playlist.items[0]!, textFragment: 'before', clipEndSeconds: 40, durationSeconds: 40 },
+      {
+        ...playlist.items[1]!,
+        textFragment: 'zero',
+        clipBeginSeconds: 40,
+        clipEndSeconds: 40,
+        durationSeconds: 0,
+      },
+      {
+        ...playlist.items[1]!,
+        index: 2,
+        textFragment: 'after',
+        clipBeginSeconds: 40,
+        clipEndSeconds: 100,
+        durationSeconds: 60,
+      },
+    ],
+  };
+}
+
 function makeFixture(audioDuration = 100) {
   const bookRepo = {
     findReadAloudSyncMode: vi.fn().mockResolvedValue('auto'),
@@ -145,6 +170,46 @@ describe('AudiobookEbookProgressSyncService', () => {
     );
   });
 
+  it.each([40, 75, 100])('skips a zero-length media-overlay clip when mapping %s seconds', async (positionSeconds) => {
+    const { service, bookRepo, positionConverter } = makeFixture();
+    mockBuildPlaylist.mockResolvedValueOnce(makePlaylistWithZeroLengthClip());
+
+    await expect(
+      service.syncFromAudioProgress({
+        userId: 7,
+        bookId: 5,
+        currentFileId: 10,
+        positionSeconds,
+        percentage: positionSeconds,
+        syncKobo: false,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    expect(positionConverter.fragmentToPositions).toHaveBeenCalledTimes(2);
+    expect(positionConverter.fragmentToPositions).toHaveBeenNthCalledWith(1, expect.objectContaining({ fragment: 'after' }));
+    expect(positionConverter.fragmentToPositions).toHaveBeenNthCalledWith(2, expect.objectContaining({ fragment: 'after' }));
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledTimes(2);
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        fileId: 20,
+        percentage: positionSeconds,
+        positionSeconds,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#after',
+      }),
+    );
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        fileId: 30,
+        percentage: positionSeconds,
+        positionSeconds,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#after',
+      }),
+    );
+  });
+
   it('does not replace or forward a newer EPUB position', async () => {
     const { service, bookRepo } = makeFixture();
     bookRepo.upsertSyncedEpubProgressIfNewer.mockResolvedValue(false);
@@ -183,6 +248,32 @@ describe('AudiobookEbookProgressSyncService', () => {
       expect.objectContaining({ fileId: 30, percentage: 50, positionSeconds: 50, sourceUpdatedAt: SOURCE_TIME }),
     );
     expect(positionConverter.nearestFragmentForPosition).toHaveBeenCalledWith(expect.objectContaining({ bookFileId: 20, sourceBookFileId: 30 }));
+  });
+
+  it('skips a zero-length clip when propagating an EPUB narration position to a sibling', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture();
+    mockBuildPlaylist.mockResolvedValueOnce(makePlaylistWithZeroLengthClip());
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 20,
+        percentage: 75,
+        positionSeconds: 75,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#after',
+        mediaOverlaySectionIndex: 0,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(7, 5, 10, 75, 75, SOURCE_TIME);
+    expect(positionConverter.fragmentToPositions).toHaveBeenCalledWith(
+      expect.objectContaining({ bookFileId: 30, sourceBookFileId: 30, fragment: 'after' }),
+    );
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith(
+      expect.objectContaining({ fileId: 30, positionSeconds: 75, mediaOverlayFragment: 'OPS/chapter.xhtml#after' }),
+    );
   });
 
   it('stops sibling propagation when a newer audiobook state rejects the source write', async () => {

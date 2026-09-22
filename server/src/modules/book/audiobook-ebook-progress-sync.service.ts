@@ -379,6 +379,7 @@ export class AudiobookEbookProgressSyncService {
     for (const item of playlist.items) {
       const duration = item.durationSeconds;
       const start = elapsed;
+      if (typeof duration === 'number' && Number.isFinite(duration) && duration <= 0) continue;
       const end = this.isPositiveFinite(duration) ? start + duration : null;
 
       if (positionSeconds <= start) return item;
