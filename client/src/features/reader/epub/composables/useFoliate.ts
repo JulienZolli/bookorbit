@@ -74,7 +74,7 @@ function makeFoliateFetchFile(): FoliateFetchFile {
 }
 
 export interface FoliateMediaOverlay extends EventTarget {
-  start: (index?: number, filter?: (item: { text: string }, i: number, items: { text: string }[]) => boolean) => unknown
+  start: (index?: number, filter?: (item: { text: string }, i: number, items: { text: string }[]) => boolean) => Promise<boolean>
   pause: () => void
   resume: () => void
   stop: () => void

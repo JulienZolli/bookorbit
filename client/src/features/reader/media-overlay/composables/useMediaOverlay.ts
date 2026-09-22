@@ -83,7 +83,7 @@ export function useMediaOverlay() {
 
   // `mo` is the foliate MediaOverlay instance (view.mediaOverlay) and `startFn`
   // is view.startMediaOverlay - both obtained from useFoliate in the reader.
-  function start(mo: FoliateMediaOverlay, startFn: () => void, book: TtsCurrentBook) {
+  function start<T>(mo: FoliateMediaOverlay, startFn: () => T, book: TtsCurrentBook): T {
     stop()
     requestAudioFocus('media-overlay')
     instance = mo
@@ -117,7 +117,7 @@ export function useMediaOverlay() {
       stop,
     })
 
-    startFn()
+    return startFn()
   }
 
   function toggle() {

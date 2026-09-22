@@ -14,7 +14,7 @@ function makeFakeMediaOverlay() {
     setRate: ReturnType<typeof vi.fn>
     setVolume: ReturnType<typeof vi.fn>
   }
-  mo.start = vi.fn<() => void>()
+  mo.start = vi.fn<FoliateMediaOverlay['start']>().mockResolvedValue(true)
   mo.pause = vi.fn<() => void>()
   mo.resume = vi.fn<() => void>()
   mo.stop = vi.fn<() => void>()
@@ -52,6 +52,15 @@ describe('useMediaOverlay', () => {
     expect(mo.setRate).toHaveBeenCalledWith(player.rate.value)
     expect(mo.setVolume).toHaveBeenCalledWith(player.volume.value)
     expect(startFn).toHaveBeenCalledOnce()
+  })
+
+  it('returns the start function result', async () => {
+    const mo = makeFakeMediaOverlay()
+    const player = useMediaOverlay()
+    const result = Promise.resolve('started')
+
+    expect(player.start(mo, () => result, book)).toBe(result)
+    await result
   })
 
   it('toggle pauses then resumes the underlying instance', () => {

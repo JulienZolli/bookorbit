@@ -32,6 +32,7 @@ import { getProviders, getVoices } from '@/features/tts/api/tts.api'
 import { useMediaOverlay } from './media-overlay/composables/useMediaOverlay'
 import { resolveMediaOverlayResume, type MediaOverlayResumePosition } from './media-overlay/lib/media-overlay-resume'
 import { injectMediaOverlayHighlightCss, MEDIA_OVERLAY_DEFAULT_ACTIVE_CLASS } from './media-overlay/lib/media-overlay-highlight'
+import { startMediaOverlayWithFallback } from './media-overlay/lib/media-overlay-start'
 import TtsResumePrompt from '@/features/tts/components/TtsResumePrompt.vue'
 import ReaderHeader from './epub/components/ReaderHeader.vue'
 import ReaderFooter from './epub/components/ReaderFooter.vue'
@@ -258,6 +259,7 @@ const { setExpanded: setMiniPlayerExpanded, setReaderFooterVisible } = useTtsMin
 const { loadBookPreferences, loadUserPreferences, defaultProviderId, defaultVoiceId, defaultSpeed } = useTtsPreferences()
 const ttsPosition = useTtsPosition()
 const mediaOverlay = useMediaOverlay()
+let mediaOverlayStartId = 0
 
 const isMediaOverlayAvailable = computed(() => isTtsAvailable && hasMediaOverlay.value)
 const isTtsActive = computed(() => isActive.value && currentBook.value?.bookFileId === fileId)
@@ -605,6 +607,7 @@ watch(
 // element id when byId=true); if no matching <par> plays, it falls back to the
 // start of the section instead of staying silent.
 async function beginNarration(sectionIdx: number, target: string | null, byId: boolean) {
+  const startId = ++mediaOverlayStartId
   const mo = getMediaOverlay()
   if (!mo) {
     toast.error('This book has no embedded narration')
@@ -621,16 +624,9 @@ async function beginNarration(sectionIdx: number, target: string | null, byId: b
       : (item: { text: string }) => item.text === target
     : null
 
-  mediaOverlay.start(
+  await mediaOverlay.start(
     mo,
-    () => {
-      mo.start(sectionIdx, matches ?? undefined)
-      if (matches) {
-        window.setTimeout(() => {
-          if (mediaOverlay.isActive.value && !mediaOverlay.currentFragment.value) mo.start(sectionIdx)
-        }, 700)
-      }
-    },
+    () => startMediaOverlayWithFallback(mo, sectionIdx, matches, () => startId === mediaOverlayStartId && mediaOverlay.isActive.value),
     book,
   )
 }
@@ -1243,6 +1239,7 @@ watch(
 )
 
 onUnmounted(() => {
+  mediaOverlayStartId++
   if (pendingManualNavigationClearTimer) clearTimeout(pendingManualNavigationClearTimer)
   setReaderFooterVisible(false)
   mediaOverlay.stop()
