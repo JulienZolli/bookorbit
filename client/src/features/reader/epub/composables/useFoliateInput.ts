@@ -22,6 +22,8 @@ export function useFoliateInput(
   handleSelectionEnd: (doc: Document) => void,
   handleSelectionChange: (doc: Document) => void,
   canNavigate: (() => boolean) | undefined = undefined,
+  handleSelectionInteractionStart: ((doc: Document) => void) | undefined = undefined,
+  handleSelectionInteractionEnd: ((doc: Document) => void) | undefined = undefined,
 ) {
   const clickedDocs = new WeakSet<Document>()
 
@@ -80,8 +82,9 @@ export function useFoliateInput(
     return canNavigate ? canNavigate() : true
   }
 
-  function handleTouchStart(e: TouchEvent) {
+  function handleTouchStart(e: TouchEvent, doc: Document) {
     if (e.touches.length !== 1) return
+    handleSelectionInteractionStart?.(doc)
     const touch = e.touches[0]!
     touchStartX = touch.clientX
     touchStartY = touch.clientY
@@ -108,21 +111,22 @@ export function useFoliateInput(
     if (deltaX > 10 && deltaX > deltaY && !isTextSelectionInProgress) return
   }
 
-  function handleTouchEnd(e: TouchEvent, doc: Document) {
+  function handleTouchEnd(e: TouchEvent, doc: Document, cancelled = false) {
     const touchEndTime = Date.now()
     const touchDuration = touchEndTime - touchStartTime
     lastTouchTime = touchEndTime
+    handleSelectionInteractionEnd?.(doc)
 
     const selection = doc.defaultView?.getSelection()
     const hasSelection = selection && !selection.isCollapsed && selection.rangeCount > 0
 
     if (hasSelection) {
       isTextSelectionInProgress = false
-      setTimeout(() => handleSelectionEnd(doc), 50)
+      if (!handleSelectionInteractionEnd) setTimeout(() => handleSelectionEnd(doc), 50)
       return
     }
 
-    if (!isTextSelectionInProgress && e.changedTouches.length === 1) {
+    if (!cancelled && !isTextSelectionInProgress && e.changedTouches.length === 1) {
       const touch = e.changedTouches[0]!
       const deltaX = touch.clientX - touchStartX
       const deltaY = Math.abs(touch.clientY - touchStartY)
@@ -178,6 +182,7 @@ export function useFoliateInput(
     doc.addEventListener(
       'mousedown',
       () => {
+        handleSelectionInteractionStart?.(doc)
         if (longHoldTimeout) clearTimeout(longHoldTimeout)
         longHoldTimeout = setTimeout(() => {
           longHoldTimeout = null
@@ -187,7 +192,8 @@ export function useFoliateInput(
     )
 
     doc.addEventListener('mouseup', () => {
-      handleSelectionEnd(doc)
+      if (handleSelectionInteractionEnd) handleSelectionInteractionEnd(doc)
+      else handleSelectionEnd(doc)
     })
 
     doc.addEventListener(
@@ -214,9 +220,10 @@ export function useFoliateInput(
       true,
     )
 
-    doc.addEventListener('touchstart', (e: TouchEvent) => handleTouchStart(e), { passive: true })
+    doc.addEventListener('touchstart', (e: TouchEvent) => handleTouchStart(e, doc), { passive: true })
     doc.addEventListener('touchmove', (e: TouchEvent) => handleTouchMove(e, doc), { passive: true })
     doc.addEventListener('touchend', (e: TouchEvent) => handleTouchEnd(e, doc), { passive: true })
+    doc.addEventListener('touchcancel', (e: TouchEvent) => handleTouchEnd(e, doc, true), { passive: true })
 
     doc.addEventListener('selectionchange', () => handleSelectionChange(doc))
   }

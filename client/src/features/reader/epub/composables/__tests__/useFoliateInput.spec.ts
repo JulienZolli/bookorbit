@@ -157,6 +157,78 @@ describe('useFoliateInput', () => {
     input.cleanup()
   })
 
+  it.each(['paginated', 'scrolled'])('brackets a selection gesture in %s flow until touchend', (flow) => {
+    const handleInteractionStart = vi.fn<(doc: Document) => void>()
+    const handleInteractionEnd = vi.fn<(doc: Document) => void>()
+    const selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+    } as Selection
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+      renderer: { getAttribute: (name) => (name === 'flow' ? flow : null) },
+    }
+    const input = useFoliateInput(
+      () => view,
+      undefined,
+      vi.fn<() => void>(),
+      vi.fn<() => void>(),
+      undefined,
+      handleInteractionStart,
+      handleInteractionEnd,
+    )
+    const doc = makeDocTarget(selection)
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [{ clientX: 20, clientY: 30 }]))
+    doc.dispatchEvent(new Event('selectionchange'))
+
+    expect(handleInteractionStart).toHaveBeenCalledWith(doc)
+    expect(handleInteractionEnd).not.toHaveBeenCalled()
+
+    doc.dispatchEvent(makeTouchEvent('touchend', [], [{ clientX: 30, clientY: 40 }]))
+
+    expect(handleInteractionEnd).toHaveBeenCalledWith(doc)
+
+    input.cleanup()
+  })
+
+  it('finishes selection interaction without navigating when touch is cancelled', () => {
+    const goLeft = vi.fn<() => void>()
+    const goRight = vi.fn<() => void>()
+    const handleInteractionEnd = vi.fn<(doc: Document) => void>()
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      goLeft,
+      goRight,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+      renderer: { getAttribute: (name) => (name === 'flow' ? 'paginated' : null) },
+    }
+    const input = useFoliateInput(
+      () => view,
+      undefined,
+      vi.fn<() => void>(),
+      vi.fn<() => void>(),
+      undefined,
+      vi.fn<(doc: Document) => void>(),
+      handleInteractionEnd,
+    )
+    const doc = makeDocTarget()
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [{ clientX: 100, clientY: 100 }]))
+    doc.dispatchEvent(makeTouchEvent('touchcancel', [], [{ clientX: 20, clientY: 100 }]))
+
+    expect(handleInteractionEnd).toHaveBeenCalledWith(doc)
+    expect(goLeft).not.toHaveBeenCalled()
+    expect(goRight).not.toHaveBeenCalled()
+
+    input.cleanup()
+  })
+
   it.each([
     { endX: 40, expectedDirection: 'right' },
     { endX: 160, expectedDirection: 'left' },

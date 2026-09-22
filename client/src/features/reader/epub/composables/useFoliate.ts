@@ -115,7 +115,15 @@ export function useFoliate(
 
   const annotations = useFoliateAnnotations()
   const selection = useFoliateSelection(() => viewRef.value)
-  const input = useFoliateInput(() => viewRef.value, onMiddleTap, selection.handleSelectionEnd, selection.handleSelectionChange, canNavigate)
+  const input = useFoliateInput(
+    () => viewRef.value,
+    onMiddleTap,
+    selection.handleSelectionEnd,
+    selection.handleSelectionChange,
+    canNavigate,
+    selection.handleInteractionStart,
+    selection.handleInteractionEnd,
+  )
 
   async function loadScript() {
     if (customElements.get('foliate-view')) return
@@ -438,6 +446,7 @@ export function useFoliate(
     deleteAnnotation: (cfi: string) => annotations.deleteAnnotation(viewRef.value, cfi),
     redrawAnnotation: (cfi: string, color: string, style: string) => annotations.redrawAnnotation(viewRef.value, cfi, color, style),
     setTextSelectedHandler: selection.setHandler,
+    setSelectionInteractionStartHandler: selection.setInteractionStartHandler,
     setAnnotationClickHandler,
   }
 }

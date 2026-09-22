@@ -849,6 +849,7 @@ const {
   deleteAnnotation,
   redrawAnnotation,
   setTextSelectedHandler,
+  setSelectionInteractionStartHandler,
   setAnnotationClickHandler,
   view: foliateView,
   bookLanguage,
@@ -880,6 +881,7 @@ function handleAnnotationClick(cfi: string, popupPosition: { x: number; y: numbe
 }
 
 setTextSelectedHandler(handleTextSelected)
+setSelectionInteractionStartHandler(selection.dismiss)
 setAnnotationClickHandler(handleAnnotationClick)
 
 onUnmounted(clearFoliateSource)

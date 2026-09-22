@@ -20,8 +20,11 @@ vi.mock('../useFoliateAnnotations', () => ({
 vi.mock('../useFoliateSelection', () => ({
   useFoliateSelection: () => ({
     setHandler: vi.fn<() => void>(),
+    setInteractionStartHandler: vi.fn<() => void>(),
     handleSelectionEnd: vi.fn<() => void>(),
     handleSelectionChange: vi.fn<() => void>(),
+    handleInteractionStart: vi.fn<() => void>(),
+    handleInteractionEnd: vi.fn<() => void>(),
   }),
 }))
 
