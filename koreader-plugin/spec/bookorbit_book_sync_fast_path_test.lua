@@ -8,6 +8,9 @@ local FakeScheduler = require("helpers/fake_scheduler")
 local scheduler
 
 local calls
+local last_match_candidates
+local stats_watermarks
+local page_stat_events
 local match_fresh = false
 local exchange_skippable = false
 
@@ -49,8 +52,9 @@ package.loaded["bookorbit_api"] = {
     new = function()
         return {
             isConfigured = function() return true end,
-            matchCheck = function()
+            matchCheck = function(_, _, candidates)
                 table.insert(calls, "match")
+                last_match_candidates = candidates
                 return {
                     libraryVersion = "lib-v1",
                     matches = { { hash = "abcdef", bookFileId = 2, bookId = 1 } },
@@ -59,6 +63,13 @@ package.loaded["bookorbit_api"] = {
             uploadBookStates = function()
                 table.insert(calls, "state")
                 return { results = {} }
+            end,
+            uploadPageStats = function(_, books)
+                table.insert(calls, "stats")
+                return {
+                    results = { { hash = books[1].hash, watermark = books[1].events[#books[1].events].startTime } },
+                    unmatched = {},
+                }
             end,
             updateProgress = function()
                 table.insert(calls, "progress")
@@ -106,7 +117,10 @@ package.loaded["bookorbit_state"] = {
 }
 package.loaded["bookorbit_stats_reader"] = {
     getBookIds = function() return {} end,
-    getEventsAfter = function() return {} end,
+    getEventsAfter = function(_, watermark)
+        table.insert(stats_watermarks, watermark)
+        return page_stat_events
+    end,
 }
 package.loaded["bookorbit_sweep"] = { isRunning = function() return false end }
 
@@ -121,7 +135,15 @@ end
 local function run(opts)
     scheduler = FakeScheduler.new()
     calls = {}
-    book = { bookId = 1, fileId = 2, file = "/books/a.epub", statsWatermark = 0, annWatermark = "" }
+    stats_watermarks = {}
+    page_stat_events = opts.page_stat_events or {}
+    book = {
+        bookId = 1,
+        fileId = 2,
+        file = "/books/a.epub",
+        statsWatermark = opts.stats_watermark or 0,
+        annWatermark = "",
+    }
     local acknowledged = {}
     local finished
     assert(BookSync.run{
@@ -130,6 +152,7 @@ local function run(opts)
             digest = "abcdef",
             file = "/books/a.epub",
             stats_ids = { 42 },
+            stats_identity_repaired = opts.stats_identity_repaired == true,
             annotations = {},
             ann_count = 0,
             ann_signature = "0::0:0",
@@ -164,6 +187,8 @@ exchange_skippable = false
 local requests, acks = run{}
 assertEqual(requests, "match,annotations,progress",
     "a book with no usable local freshness still performs the full request chain")
+assertEqual(last_match_candidates.abcdef.book_file_id, 2,
+    "current-book recovery carries the previously verified server file id")
 assertEqual(acks, "match,stats,annotations,state,progress", "every phase is acknowledged")
 
 match_fresh = true
@@ -187,5 +212,15 @@ requests = run{}
 assertEqual(requests, "state,progress",
     "a locally changed state uploads without forcing a pull")
 state_payload = nil
+
+match_fresh = true
+exchange_skippable = true
+requests = run{
+    stats_identity_repaired = true,
+    stats_watermark = 900,
+    page_stat_events = { { page = 1, startTime = 500, durationSeconds = 60, totalPages = 100 } },
+}
+assertEqual(stats_watermarks[1], 0, "identity repair replays exact-row history before the stored watermark")
+assertEqual(requests, "stats,progress", "the stranded historical event is uploaded under the repaired digest")
 
 print("bookorbit_book_sync_fast_path_test.lua: ok")

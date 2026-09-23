@@ -138,6 +138,55 @@ describe('KoreaderPluginService', () => {
       expect(result.matches).toEqual([{ hash: HASH_A, bookId: 20, bookFileId: 11 }]);
     });
 
+    it('links an opened file using its previously verified file identity', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(new Map());
+      bookService.verifyFileAccess.mockResolvedValue({ id: 11, bookId: 21, libraryId: 1, format: 'epub', role: 'content' });
+      const dto = {
+        ...deviceFields(),
+        hashes: [HASH_B],
+        books: [{ hash: HASH_B, source: 'current_file', bookFileId: 11, title: 'Recovered book' }],
+      } as MatchCheckDto;
+
+      const result = await service.matchCheck(makeUser(), dto);
+
+      expect(koreaderRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_B, 11, {
+        title: 'Recovered book',
+        authors: null,
+        lastOpen: null,
+      });
+      expect(result.matches).toEqual([{ hash: HASH_B, bookId: 21, bookFileId: 11 }]);
+    });
+
+    it('does not trust a file id reported only by a statistics row', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(new Map());
+      const dto = {
+        ...deviceFields(),
+        hashes: [HASH_B],
+        books: [{ hash: HASH_B, source: 'statistics', bookFileId: 11 }],
+      } as MatchCheckDto;
+
+      const result = await service.matchCheck(makeUser(), dto);
+
+      expect(bookService.verifyFileAccess).not.toHaveBeenCalled();
+      expect(koreaderRepo.upsertBookHashLink).not.toHaveBeenCalled();
+      expect(result.matches).toEqual([]);
+    });
+
+    it('does not link an opened file when the reported file is inaccessible', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(new Map());
+      bookService.verifyFileAccess.mockRejectedValue(new Error('forbidden'));
+      const dto = {
+        ...deviceFields(),
+        hashes: [HASH_B],
+        books: [{ hash: HASH_B, source: 'current_file', bookFileId: 11 }],
+      } as MatchCheckDto;
+
+      const result = await service.matchCheck(makeUser(), dto);
+
+      expect(koreaderRepo.upsertBookHashLink).not.toHaveBeenCalled();
+      expect(result.matches).toEqual([]);
+    });
+
     it('does not rewrite an existing link when the explicit catalog file already resolves', async () => {
       const dto = {
         ...deviceFields(),

@@ -253,6 +253,41 @@ do
     assertEqual(#harness.calls.annotation_exchanges, 1, "the acknowledged sidecar is not exchanged again")
 end
 
+-- A path mapped to another matched book is a stale identity signal. The sweep
+-- samples only that conflicted file, repairs the map, and carries the file id
+-- already verified for the actual digest into the recovery match.
+do
+    local file = "/books/repaired.epub"
+    local actual = "md5-" .. file
+    local harness = SweepHarness.install{
+        books = { { md5 = actual, id = 9, title = "Recovered", last_open = 500 } },
+        history = { { file = file, time = 500, text = "Recovered" } },
+        library_version = "v1",
+        state = {
+            books = {
+                stale = {
+                    bookId = 1, fileId = 11, file = "/books/different.epub",
+                    matchVerifiedAt = NOW, matchVerifiedVersion = "v1",
+                },
+                [actual] = {
+                    bookId = 2, fileId = 22, file = file,
+                    matchVerifiedAt = NOW - 2 * DAY, matchVerifiedVersion = "v1",
+                },
+            },
+            files = { [file] = "stale" },
+            global = { libraryVersion = "v1" },
+        },
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(harness.state.files[file], actual, "sweep repairs the stale path digest")
+    assertEqual(harness.calls.match_candidates[1][actual].book_file_id, 22,
+        "sweep recovery carries only the actual digest's verified file id")
+end
+
 -- Cancellation stops the run at its next yield: the step already scheduled
 -- runs, sees it is no longer the current generation and writes nothing.
 do

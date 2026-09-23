@@ -78,8 +78,9 @@ local function installClient(handle)
     local responses = handle.responses
     return {
         isConfigured = function() return true end,
-        matchCheck = function(_, hashes)
+        matchCheck = function(_, hashes, candidates)
             table.insert(handle.calls.match, hashes)
+            table.insert(handle.calls.match_candidates, candidates)
             if responses.match_error then return nil, responses.match_error end
             local matches = {}
             for _, hash in ipairs(hashes) do
@@ -158,6 +159,7 @@ function SweepHarness.install(opts)
         },
         calls = {
             match = {},
+            match_candidates = {},
             page_stats = {},
             book_states = {},
             progress = {},

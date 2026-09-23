@@ -42,6 +42,19 @@ local function copyArray(values)
     return result
 end
 
+local function mergeUniqueArrays(first, second)
+    local result, seen = {}, {}
+    for _, values in ipairs({ first or {}, second or {} }) do
+        for _, value in ipairs(values) do
+            if not seen[value] then
+                seen[value] = true
+                table.insert(result, value)
+            end
+        end
+    end
+    return result
+end
+
 local function validDigest(digest)
     return type(digest) == "string" and digest ~= "" and digest:match("^%x+$") ~= nil
 end
@@ -408,6 +421,13 @@ function Outbox:enqueue(snapshot, opts)
     local stored_snapshot = {}
     for key, value in pairs(snapshot) do stored_snapshot[key] = value end
     stored_snapshot.stats_ids = copyArray(snapshot.stats_ids)
+    local existing_with_payload = existing and self:attachPayload(existing) or nil
+    if existing_with_payload and existing_with_payload.acknowledged.stats ~= true then
+        stored_snapshot.stats_ids = mergeUniqueArrays(
+            existing_with_payload.snapshot.stats_ids, stored_snapshot.stats_ids)
+        stored_snapshot.stats_identity_repaired = existing_with_payload.snapshot.stats_identity_repaired == true
+            or stored_snapshot.stats_identity_repaired == true
+    end
 
     local annotation_sync = opts.annotation_sync ~= false
     local entry = {

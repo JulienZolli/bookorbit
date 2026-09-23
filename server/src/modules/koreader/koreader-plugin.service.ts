@@ -325,7 +325,7 @@ export class KoreaderPluginService {
     const linked = new Map<string, ResolvedBookFile>();
     for (const hash of hashes) {
       const candidate = candidates.get(hash);
-      if (!candidate?.bookFileId || candidate.source !== 'file') continue;
+      if (!candidate?.bookFileId || (candidate.source !== 'file' && candidate.source !== 'current_file')) continue;
       if (resolved.get(hash)?.bookFileId === candidate.bookFileId) continue;
 
       const file = await this.bookService.verifyFileAccess(candidate.bookFileId, user).catch(() => null);

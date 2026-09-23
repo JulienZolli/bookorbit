@@ -415,6 +415,24 @@ function StateManager.linkFile(digest, book_file_id, book_id, file)
     })
 end
 
+function StateManager.repairFileIdentity(file, old_digest, new_digest)
+    if not file or not new_digest then return generation end
+    if old_digest == new_digest and ensure().files[file] == new_digest then
+        return generation
+    end
+    local digests = { new_digest }
+    if old_digest and old_digest ~= new_digest then
+        table.insert(digests, old_digest)
+    end
+    return StateManager.mutateScoped({
+        digests = digests,
+        files = { file },
+        global = false,
+    }, function(session)
+        session:repairFileIdentity(file, old_digest, new_digest)
+    end)
+end
+
 -- Test seam: forgets the shared instance and every derived cache.
 function StateManager.reset()
     shared = nil

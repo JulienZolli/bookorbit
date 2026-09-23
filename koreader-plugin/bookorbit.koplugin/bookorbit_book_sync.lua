@@ -94,10 +94,15 @@ function BookOrbitBookSync.capture(plugin)
         metadata = BookOrbitStatsReader.primeIdentity(digest)
     end
     metadata = metadata or {}
-    local stats_ambiguous = metadata.metadata_ambiguous == true
+    local current_stats_id = stats and tonumber(stats.id_curr_book) or nil
+    local stats_ambiguous = current_stats_id == nil and metadata.metadata_ambiguous == true
     local stats_ids = {}
-    for _, id in ipairs(metadata.ids or {}) do
-        table.insert(stats_ids, id)
+    if current_stats_id then
+        table.insert(stats_ids, current_stats_id)
+    else
+        for _, id in ipairs(metadata.ids or {}) do
+            table.insert(stats_ids, id)
+        end
     end
     logger.dbg(string.format("BookOrbit: lifecycle capture identity=%s elapsedMs=%.1f",
         cached and "cached" or "uncached", elapsedMs(started_ms)))
@@ -109,6 +114,8 @@ function BookOrbitBookSync.capture(plugin)
         last_open = metadata.last_open or ts,
         metadata_ambiguous = false,
         stats_metadata_ambiguous = stats_ambiguous,
+        stats_identity_repaired = plugin.bookorbit_document_digest
+            and plugin.bookorbit_document_digest.repaired == true or false,
         stats_ids = stats_ids,
         percentage = plugin:getLastPercent(),
         progress = plugin:getLastProgress(),
@@ -293,6 +300,7 @@ stepMatch = function(ctx)
             authors = ctx.snap.authors,
             last_open = ctx.snap.last_open,
             source = "current_file",
+            book_file_id = book and book.fileId or nil,
             metadata_ambiguous = ctx.snap.metadata_ambiguous,
         },
     })
@@ -344,7 +352,10 @@ stepStats = function(ctx)
         return step(ctx, stepAnnotations)
     end
 
-    local watermark = book.statsWatermark or 0
+    if ctx.stats_watermark == nil then
+        ctx.stats_watermark = ctx.snap.stats_identity_repaired and 0 or (book.statsWatermark or 0)
+    end
+    local watermark = ctx.stats_watermark
     local events = BookOrbitStatsReader.getEventsAfter(ctx.stat_ids, watermark, STATS_BATCH)
     if not events or #events == 0 then
         if not acknowledge(ctx, "stats", false) then return end
@@ -365,6 +376,7 @@ stepStats = function(ctx)
     end
 
     local more = BookOrbitState.applyStatsAck(book, events, body, ctx.snap.digest, STATS_BATCH, watermark)
+    ctx.stats_watermark = book.statsWatermark or watermark
     ctx.counts.page_stats = ctx.counts.page_stats + #events
     if more then
         return step(ctx, stepStats)

@@ -320,7 +320,9 @@ describe('KOReader plugin update source wiring', () => {
     expect(bookSync).toContain('metadata = BookOrbitStatsReader.primeIdentity(digest)');
     expect(statsReader).toContain('function BookOrbitStatsReader.primeIdentity(md5)');
     expect(statsReader).toContain('local book = BookOrbitStatsReader.getBook(md5)');
-    expect(bookSync).toContain('local stats_ambiguous = metadata.metadata_ambiguous == true');
+    expect(bookSync).toContain('local current_stats_id = stats and tonumber(stats.id_curr_book) or nil');
+    expect(bookSync).toContain('local stats_ambiguous = current_stats_id == nil and metadata.metadata_ambiguous == true');
+    expect(bookSync).toContain('table.insert(stats_ids, current_stats_id)');
     expect(bookSync).toContain('title = stats_ambiguous and titleFromFile(file) or (metadata.title or titleFromFile(file))');
     expect(bookSync).toContain('authors = stats_ambiguous and nil or metadata.authors');
     expect(bookSync).toContain('last_open = metadata.last_open or ts');
@@ -331,6 +333,7 @@ describe('KOReader plugin update source wiring', () => {
     expect(bookSync).toContain('authors = ctx.snap.authors');
     expect(bookSync).toContain('last_open = ctx.snap.last_open');
     expect(bookSync).toContain('source = "current_file"');
+    expect(bookSync).toContain('book_file_id = book and book.fileId or nil');
     expect(bookSync).toContain('metadata_ambiguous = ctx.snap.metadata_ambiguous');
     expect(bookSync).toContain('if ctx.snap.stats_metadata_ambiguous then');
     expect(bookSync).toContain('ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file)');

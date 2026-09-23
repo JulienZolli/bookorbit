@@ -166,6 +166,34 @@ function BookOrbitState:rememberFile(file, md5)
     end
 end
 
+-- Repairs a path whose cached digest no longer matches the file on disk. A
+-- server identity is never copied between digests: only an identity already
+-- verified for the recomputed digest may be used to recover an ambiguous
+-- server match.
+function BookOrbitState:repairFileIdentity(file, old_md5, new_md5)
+    if not file or not new_md5 then return nil end
+    self.files[file] = new_md5
+
+    if old_md5 and old_md5 ~= new_md5 then
+        local old_book = self.books[old_md5]
+        if old_book and old_book.file == file then
+            old_book.file = nil
+            BookOrbitState.expireMatch(old_book)
+        end
+        self.unmatched[new_md5] = nil
+    end
+
+    local new_book = self.books[new_md5]
+    if new_book then
+        new_book.file = file
+        if old_md5 ~= new_md5 then
+            BookOrbitState.expireMatch(new_book)
+            new_book.statsWatermark = 0
+        end
+    end
+    return new_book
+end
+
 function BookOrbitState:flush()
     if self.flush_handler then
         return self.flush_handler(self)

@@ -445,6 +445,20 @@ local function historyEntry(ctx, file)
 
     local file_exists = lfs.attributes(file, "mode") == "file"
     local md5 = ctx.state.files[file]
+    local mapped_book = md5 and ctx.state:getBook(md5) or nil
+    local identity_conflict = mapped_book and mapped_book.file and mapped_book.file ~= file
+    if identity_conflict and file_exists then
+        local started = nowMs()
+        local ok, computed = pcall(util.partialMD5, file)
+        ctx.timing.partial_md5_ms = ctx.timing.partial_md5_ms + elapsedMs(started)
+        ctx.timing.partial_md5_count = ctx.timing.partial_md5_count + 1
+        if ok and computed then
+            if computed ~= md5 then
+                ctx.state:repairFileIdentity(file, md5, computed)
+            end
+            md5 = computed
+        end
+    end
     if not md5 and file_exists and DocSettings:hasSidecarFile(file) then
         local doc_settings = DocSettings:open(file)
         md5 = doc_settings:readSetting("partial_md5_checksum")
@@ -476,6 +490,9 @@ local function historyEntry(ctx, file)
     end
     ctx.candidates[md5] = cand
     local book = ctx.state:getBook(md5)
+    if book and file_exists then
+        cand.book_file_id = book.fileId
+    end
     if book and file_exists and not book.file then
         book.file = file
     end
