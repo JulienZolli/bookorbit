@@ -3642,6 +3642,7 @@
         "web": "Web reader",
         "ios": "iOS app",
         "watchos": "Apple Watch",
+        "android": "Android app",
         "koreader": "KOReader",
         "manual": "Manual",
         "kobo": "Kobo",
@@ -9826,7 +9827,8 @@
         "title": "Where You Read",
         "emptyTitle": "No reading activity yet",
         "emptyDescription": "Read on the web, KOReader, or Kobo to see your source split.",
-        "emptyDescriptionWithAppleClients": "Read on the web, iOS app, Apple Watch, KOReader, or Kobo to see your source split."
+        "emptyDescriptionWithAppleClients": "Read on the web, iOS app, Apple Watch, KOReader, or Kobo to see your source split.",
+        "emptyDescriptionWithNativeClients": "Read on the web, iOS app, Android app, Apple Watch, KOReader, or Kobo to see your source split."
       }
     }
   },

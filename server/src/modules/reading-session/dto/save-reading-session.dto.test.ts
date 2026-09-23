@@ -28,6 +28,13 @@ describe('SaveReadingSessionDto', () => {
       durationSeconds: 120,
       source: 'ios',
     });
+    const android = plainToInstance(SaveReadingSessionDto, {
+      sessionId: 'android-session',
+      startedAt: '2026-04-15T10:00:00.000Z',
+      endedAt: '2026-04-15T10:02:00.000Z',
+      durationSeconds: 120,
+      source: 'android',
+    });
     const integration = plainToInstance(SaveReadingSessionDto, {
       sessionId: 'spoofed-integration',
       startedAt: '2026-04-15T10:00:00.000Z',
@@ -37,6 +44,7 @@ describe('SaveReadingSessionDto', () => {
     });
 
     expect(await validate(ios)).toEqual([]);
+    expect(await validate(android)).toEqual([]);
     expect(await validate(integration)).not.toEqual([]);
   });
 

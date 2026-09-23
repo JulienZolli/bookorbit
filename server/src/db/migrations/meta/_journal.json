@@ -673,6 +673,13 @@
       "when": 1789949424697,
       "tag": "0095_add_sabnzbd_and_prowlarr_support",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1790119788880,
+      "tag": "0096_add_android_reading_session_source",
+      "breakpoints": true
     }
   ]
 }

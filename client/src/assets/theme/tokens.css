@@ -144,6 +144,7 @@
   --pill-web: oklch(0.55 0.16 245);
   --pill-ios: oklch(0.58 0.16 150);
   --pill-watchos: oklch(0.58 0.18 35);
+  --pill-android: oklch(0.58 0.11 95);
   --pill-koreader: oklch(0.52 0.2 295);
   --pill-kobo: oklch(0.55 0.1 195);
   --pill-repaired: oklch(0.62 0.14 70);
@@ -381,6 +382,7 @@
   --pill-web: oklch(0.72 0.14 245);
   --pill-ios: oklch(0.75 0.14 150);
   --pill-watchos: oklch(0.76 0.15 35);
+  --pill-android: oklch(0.75 0.14 95);
   --pill-koreader: oklch(0.72 0.17 295);
   --pill-kobo: oklch(0.74 0.1 195);
   --pill-repaired: oklch(0.78 0.13 70);

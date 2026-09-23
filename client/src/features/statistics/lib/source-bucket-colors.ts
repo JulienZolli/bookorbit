@@ -7,6 +7,7 @@ export const SOURCE_BUCKET_COLOR_TOKENS: Record<ReadingSessionSourceBucket, stri
   bookorbit: '--pill-web',
   ios: '--pill-ios',
   watchos: '--pill-watchos',
+  android: '--pill-android',
   koreader: '--pill-koreader',
   kobo: '--pill-kobo',
 }
@@ -43,6 +44,7 @@ export function resolveSourceBucketColors(themeKey: string): Record<ReadingSessi
     bookorbit: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.bookorbit)),
     ios: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.ios)),
     watchos: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.watchos)),
+    android: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.android)),
     koreader: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.koreader)),
     kobo: toParseableColor(readCssColor(SOURCE_BUCKET_COLOR_TOKENS.kobo)),
   }

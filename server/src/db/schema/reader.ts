@@ -248,7 +248,7 @@ export const readingSessions = pgTable(
     attemptId: integer('attempt_id').references(() => readingAttempts.id, { onDelete: 'set null' }),
     // Client-generated UUID; used for idempotent retries.
     sessionId: varchar('session_id', { length: 64 }).notNull(),
-    // Browser, native Apple clients, external readers, or a user-entered session.
+    // Browser, native iOS, watchOS and Android clients, external readers, or a user-entered session.
     source: varchar('source', { length: 10 }).$type<ReadingSessionSource>(),
     sourceDeviceKey: varchar('source_device_key', { length: 128 }),
     // 'read' (default, manual reading), 'tts' (text-to-speech), or 'listen' (audiobook playback)
@@ -270,7 +270,7 @@ export const readingSessions = pgTable(
     index('rs_user_book_source_device_started_idx').on(t.userId, t.bookId, t.source, t.sourceDeviceKey, t.startedAt),
     index('reading_sessions_book_id_idx').on(t.bookId),
     index('rs_attempt_started_at_idx').on(t.attemptId, t.startedAt),
-    check('reading_sessions_source_chk', sql`${t.source} in ('web', 'ios', 'watchos', 'koreader', 'manual', 'kobo')`),
+    check('reading_sessions_source_chk', sql`${t.source} in ('web', 'ios', 'watchos', 'android', 'koreader', 'manual', 'kobo')`),
     check('reading_sessions_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} >= 0`),
     check('reading_sessions_end_progress_range_chk', sql`${t.endProgress} is null or (${t.endProgress} >= 0 and ${t.endProgress} <= 100)`),
     check('reading_sessions_ended_after_started_chk', sql`${t.endedAt} >= ${t.startedAt}`),

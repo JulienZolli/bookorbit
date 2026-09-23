@@ -126,7 +126,7 @@ describe('UserStatisticsService', () => {
       readingSeconds: 1800,
       listeningSeconds: 0,
       sessionsCount: 1,
-      bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 1800, kobo: 0 },
+      bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 1800, kobo: 0 },
     });
     expect(result.sessions[0]).toEqual(expect.objectContaining({ durationOnDaySeconds: 1800, hasCover: true, sourceBucket: 'koreader' }));
   });
@@ -321,21 +321,21 @@ describe('UserStatisticsService', () => {
         readingSeconds: 120,
         progressDelta: 1.2346,
         eventsCount: 2,
-        bySource: { bookorbit: 60, ios: 10, watchos: 20, koreader: 0, kobo: 30 },
+        bySource: { bookorbit: 60, ios: 10, watchos: 20, android: 0, koreader: 0, kobo: 30 },
       },
       {
         day: '2026-04-07',
         readingSeconds: 0,
         progressDelta: 0,
         eventsCount: 0,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 0, kobo: 0 },
+        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
       },
       {
         day: '2026-04-08',
         readingSeconds: 0,
         progressDelta: 0,
         eventsCount: 0,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 0, kobo: 0 },
+        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
       },
     ]);
   });
@@ -420,7 +420,7 @@ describe('UserStatisticsService', () => {
         hour: 8,
         readingSeconds: 1000,
         eventsCount: 5,
-        bySource: { bookorbit: 400, ios: 100, watchos: 300, koreader: 0, kobo: 200 },
+        bySource: { bookorbit: 400, ios: 100, watchos: 300, android: 0, koreader: 0, kobo: 200 },
       }),
     );
     expect(result[21]).toEqual(
@@ -428,11 +428,16 @@ describe('UserStatisticsService', () => {
         hour: 21,
         readingSeconds: 900,
         eventsCount: 4,
-        bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 900, kobo: 0 },
+        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 900, kobo: 0 },
       }),
     );
     expect(result[0]).toEqual(
-      expect.objectContaining({ hour: 0, readingSeconds: 0, eventsCount: 0, bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 0, kobo: 0 } }),
+      expect.objectContaining({
+        hour: 0,
+        readingSeconds: 0,
+        eventsCount: 0,
+        bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
+      }),
     );
   });
 
@@ -468,14 +473,14 @@ describe('UserStatisticsService', () => {
       readingSeconds: 1800,
       eventsCount: 6,
       byFormat: { EPUB: 1200, PDF: 600 },
-      bySource: { bookorbit: 600, ios: 0, watchos: 0, koreader: 1200, kobo: 0 },
+      bySource: { bookorbit: 600, ios: 0, watchos: 0, android: 0, koreader: 1200, kobo: 0 },
     });
     expect(result[0]).toEqual({
       dayOfWeek: 0,
       readingSeconds: 0,
       eventsCount: 0,
       byFormat: {},
-      bySource: { bookorbit: 0, ios: 0, watchos: 0, koreader: 0, kobo: 0 },
+      bySource: { bookorbit: 0, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 0 },
     });
   });
 
@@ -943,7 +948,7 @@ describe('UserStatisticsService', () => {
 
     await expect(service.getSessionArchetypes(user, { libraryIds: [1] })).resolves.toEqual([{ hour: 9, durationMinutes: 20, dayOfWeek: 2 }]);
     await expect(service.getGenreReadingTime(user, { libraryIds: [1] })).resolves.toEqual([
-      { genre: 'Sci-Fi', readingSeconds: 300, bySource: { bookorbit: 200, ios: 0, watchos: 0, koreader: 0, kobo: 100 } },
+      { genre: 'Sci-Fi', readingSeconds: 300, bySource: { bookorbit: 200, ios: 0, watchos: 0, android: 0, koreader: 0, kobo: 100 } },
     ]);
     await expect(service.getReadingPace(user, { libraryIds: [1] })).resolves.toEqual([
       { durationSeconds: 240, progressDelta: 1.4, bucket: 'bookorbit', format: 'EPUB' },

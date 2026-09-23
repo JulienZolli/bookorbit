@@ -1211,7 +1211,7 @@ export class AchievementRepository {
       SELECT COUNT(DISTINCT src)::int AS source_count FROM (
         SELECT source AS src
         FROM reading_sessions
-        WHERE user_id = ${userId} AND source IN ('web', 'ios', 'watchos')
+        WHERE user_id = ${userId} AND source IN ('web', 'ios', 'watchos', 'android')
         UNION
         SELECT 'koreader' AS src
         FROM koreader_device_progress
@@ -1232,7 +1232,7 @@ export class AchievementRepository {
         SELECT book_id, COUNT(DISTINCT src) AS src_count FROM (
           SELECT rs.book_id, rs.source AS src
           FROM reading_sessions rs
-          WHERE rs.user_id = ${userId} AND rs.source IN ('web', 'ios', 'watchos')
+          WHERE rs.user_id = ${userId} AND rs.source IN ('web', 'ios', 'watchos', 'android')
           UNION
           SELECT bf.book_id, 'koreader' AS src
           FROM koreader_device_progress kdp JOIN book_files bf ON bf.id = kdp.book_file_id

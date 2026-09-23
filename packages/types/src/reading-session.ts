@@ -1,9 +1,9 @@
 import type { ReadingSessionSourceBucket } from "./reading-session-source-bucket";
 
-export const READING_SESSION_SOURCES = ["web", "ios", "watchos", "koreader", "manual", "kobo"] as const;
+export const READING_SESSION_SOURCES = ["web", "ios", "watchos", "android", "koreader", "manual", "kobo"] as const;
 export type ReadingSessionSource = (typeof READING_SESSION_SOURCES)[number];
 
-export const CLIENT_READING_SESSION_SOURCES = ["ios", "watchos"] as const;
+export const CLIENT_READING_SESSION_SOURCES = ["ios", "watchos", "android"] as const;
 export type ClientReadingSessionSource = (typeof CLIENT_READING_SESSION_SOURCES)[number];
 
 export interface BookReadingSession {
