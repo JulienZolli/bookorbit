@@ -127,7 +127,7 @@ opts:
 - books: statistics rows, { md5, id, title, authors, last_open }
 - events: map of statistics row id to { page, start_time, duration, total_pages }
 - history: ReadHistory entries, { file, time, text }
-- state: initial { books, unmatched, files, global }
+-- state: initial { books, unmatched, files, statsRows, global }
 - library_version: token every server response carries
 - unmatched: set of hashes match-check refuses to match
 - matches: map of hashes to custom { bookId, bookFileId } match results
@@ -299,6 +299,7 @@ function SweepHarness.install(opts)
         books = initial.books or {},
         unmatched = initial.unmatched or {},
         files = initial.files or {},
+        statsRows = initial.statsRows or {},
         global = initial.global or {},
     }, function()
         handle.flushes = handle.flushes + 1

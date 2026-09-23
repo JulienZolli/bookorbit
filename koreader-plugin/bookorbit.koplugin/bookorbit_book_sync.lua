@@ -95,7 +95,14 @@ function BookOrbitBookSync.capture(plugin)
     end
     metadata = metadata or {}
     local current_stats_id = stats and tonumber(stats.id_curr_book) or nil
-    local stats_ambiguous = current_stats_id == nil and metadata.metadata_ambiguous == true
+    local stats_ambiguous = current_stats_id == nil and metadata.stats_ambiguous == true
+    local current_stats_row
+    for _, row in ipairs(metadata.rows or {}) do
+        if row.id == current_stats_id then
+            current_stats_row = row
+            break
+        end
+    end
     local stats_ids = {}
     if current_stats_id then
         table.insert(stats_ids, current_stats_id)
@@ -114,6 +121,8 @@ function BookOrbitBookSync.capture(plugin)
         last_open = metadata.last_open or ts,
         metadata_ambiguous = false,
         stats_metadata_ambiguous = stats_ambiguous,
+        stats_row_ambiguous = current_stats_row ~= nil and metadata.stats_ambiguous == true,
+        stats_row = current_stats_row,
         stats_identity_repaired = plugin.bookorbit_document_digest
             and plugin.bookorbit_document_digest.repaired == true or false,
         stats_ids = stats_ids,
@@ -279,6 +288,21 @@ end
 
 local stepMatch, stepStats, stepAnnotations, stepAnnotationsLegacy, stepBookmarks, stepState, stepProgress
 
+local function bindStatsRow(ctx, book)
+    local row = ctx.snap.stats_row
+    if not row or not ctx.snap.stats_row_ambiguous then return nil end
+    return ctx.state:bindStatsRow(
+        row.id, ctx.snap.digest, row.title, row.authors, book.fileId, book.bookId)
+end
+
+local function matchedFileCandidate(ctx, book)
+    if not ctx.snap.stats_row_ambiguous then return book and book.fileId or nil end
+    local row = ctx.snap.stats_row
+    if not row then return nil end
+    local target = ctx.state:getStatsRow(row.id, ctx.snap.digest, row.title, row.authors)
+    return target and target.bookFileId or nil
+end
+
 stepMatch = function(ctx)
     if ctx.acknowledged.match then
         return step(ctx, stepStats)
@@ -288,7 +312,10 @@ stepMatch = function(ctx)
         book.file = ctx.snap.file
     end
 
-    if not ctx.force_match and BookOrbitState.isMatchFresh(book, ctx.state.global) then
+    if not ctx.force_match
+            and not ctx.snap.stats_row_ambiguous
+            and BookOrbitState.isMatchFresh(book, ctx.state.global) then
+        bindStatsRow(ctx, book)
         logger.dbg("BookOrbit: book sync match skipped, verified match still fresh")
         if not acknowledge(ctx, "match", false) then return end
         return step(ctx, stepStats)
@@ -300,7 +327,7 @@ stepMatch = function(ctx)
             authors = ctx.snap.authors,
             last_open = ctx.snap.last_open,
             source = "current_file",
-            book_file_id = book and book.fileId or nil,
+            book_file_id = matchedFileCandidate(ctx, book),
             metadata_ambiguous = ctx.snap.metadata_ambiguous,
         },
     })
@@ -317,6 +344,7 @@ stepMatch = function(ctx)
     for _, match in ipairs(body.matches or {}) do
         if match.hash == ctx.snap.digest then
             ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file)
+            bindStatsRow(ctx, ctx.state:getBook(ctx.snap.digest))
             if not acknowledge(ctx, "match") then return end
             return step(ctx, stepStats)
         end
@@ -352,8 +380,9 @@ stepStats = function(ctx)
         return step(ctx, stepAnnotations)
     end
 
+    local stats_target = bindStatsRow(ctx, book) or book
     if ctx.stats_watermark == nil then
-        ctx.stats_watermark = ctx.snap.stats_identity_repaired and 0 or (book.statsWatermark or 0)
+        ctx.stats_watermark = ctx.snap.stats_identity_repaired and 0 or (stats_target.statsWatermark or 0)
     end
     local watermark = ctx.stats_watermark
     local events = BookOrbitStatsReader.getEventsAfter(ctx.stat_ids, watermark, STATS_BATCH)
@@ -362,7 +391,9 @@ stepStats = function(ctx)
         return step(ctx, stepAnnotations)
     end
 
-    local body, err = ctx.client:uploadPageStats({ { hash = ctx.snap.digest, events = events } })
+    local upload = { hash = ctx.snap.digest, events = events }
+    if ctx.snap.stats_row_ambiguous then upload.bookFileId = stats_target.bookFileId end
+    local body, err = ctx.client:uploadPageStats({ upload })
     if not body then
         if isAuthError(err) then return finish(ctx, "auth") end
         ctx.had_errors = true
@@ -375,8 +406,8 @@ stepStats = function(ctx)
         return finish(ctx, "unmatched")
     end
 
-    local more = BookOrbitState.applyStatsAck(book, events, body, ctx.snap.digest, STATS_BATCH, watermark)
-    ctx.stats_watermark = book.statsWatermark or watermark
+    local more = BookOrbitState.applyStatsAck(stats_target, events, body, ctx.snap.digest, STATS_BATCH, watermark)
+    ctx.stats_watermark = stats_target.statsWatermark or watermark
     ctx.counts.page_stats = ctx.counts.page_stats + #events
     if more then
         return step(ctx, stepStats)
@@ -780,6 +811,7 @@ function BookOrbitBookSync.run(opts)
         state = BookOrbitStateManager.session({
             digests = { snap.digest },
             files = { snap.file },
+            statsRows = snap.stats_ids,
         }),
         snap = snap,
         reason = opts.reason or "manual",

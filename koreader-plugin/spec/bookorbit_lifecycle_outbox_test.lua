@@ -65,6 +65,15 @@ assertEqual(replacement.snapshot.stats_ids[3], 29, "the newest statistics row is
 assertEqual(replacement.snapshot.stats_identity_repaired, true,
     "a pending identity-repair replay survives snapshot replacement")
 
+local collision_snapshot = {}
+for key, value in pairs(snapshot) do collision_snapshot[key] = value end
+collision_snapshot.file = "/books/collision.epub"
+collision_snapshot.stats_ids = { 41 }
+local collision = assert(outbox:enqueue(collision_snapshot, { reason = "close", annotation_sync = true }))
+assert(collision.id ~= replacement.id, "colliding files keep independent outbox entries")
+assertEqual(outbox:status().count, 2, "a shared digest cannot coalesce distinct files")
+outbox:removeEntry(collision.id)
+
 fixture.fail_write = true
 local failed, failure = outbox:enqueue(snapshot, { reason = "close" })
 fixture.fail_write = false

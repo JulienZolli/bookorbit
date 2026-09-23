@@ -119,6 +119,11 @@ export class PageStatsBookDto {
   @Matches(MD5_HEX)
   hash!: string;
 
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  bookFileId?: number;
+
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
