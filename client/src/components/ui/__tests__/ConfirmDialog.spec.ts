@@ -78,4 +78,36 @@ describe('ConfirmDialog', () => {
     expect(confirmButton()?.disabled).toBe(true)
     wrapper.unmount()
   })
+
+  it('elevates its stacking layer to z-[70] so it renders above drawers and sheets', async () => {
+    const wrapper = mountDialog()
+    await flushPromises()
+
+    const content = document.body.querySelector<HTMLDivElement>('[role="dialog"]')
+    const overlay = document.body.querySelector<HTMLDivElement>('.fixed.inset-0')
+
+    expect(content?.className).toContain('z-[70]')
+    expect(overlay?.className).toContain('z-[70]')
+
+    wrapper.unmount()
+  })
+
+  it('can be confirmed when rendered alongside a sheet overlay', async () => {
+    // Simulate an underlying drawer/sheet overlay rendered at z-50
+    const sheetOverlay = document.createElement('div')
+    sheetOverlay.setAttribute('data-slot', 'sheet-overlay')
+    sheetOverlay.className = 'fixed inset-0 z-50 bg-black/15'
+    document.body.appendChild(sheetOverlay)
+
+    const wrapper = mountDialog()
+    await flushPromises()
+
+    confirmButton()?.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('confirm')).toHaveLength(1)
+
+    wrapper.unmount()
+    sheetOverlay.remove()
+  })
 })
