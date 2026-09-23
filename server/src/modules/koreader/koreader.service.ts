@@ -726,8 +726,10 @@ export class KoreaderService {
   }
 
   async getBookProgress(userId: number, bookId: number): Promise<KoreaderBookSyncInfo | null> {
-    const bookFileId = await this.repo.findBookFileIdByBookId(bookId);
-    if (!bookFileId) return null;
+    const accessibleLibraryIds = await this.repo.getAccessibleLibraryIds(userId);
+    const bookFile = await this.repo.findProgressBookFileByBookId(bookId, userId, accessibleLibraryIds);
+    if (!bookFile) return null;
+    const bookFileId = bookFile.id;
 
     const { deviceProgress, readingProgress } = await this.repo.getBookProgressForDashboard(bookFileId, userId);
     if (deviceProgress.length === 0 && !readingProgress) return null;
@@ -792,7 +794,7 @@ export class KoreaderService {
   async releaseResetHold(userId: number, bookId: number, deviceId: string): Promise<void> {
     const startedAt = Date.now();
     const accessibleLibraryIds = await this.repo.getAccessibleLibraryIds(userId);
-    const bookFile = await this.repo.findProgressBookFileByBookId(bookId, accessibleLibraryIds);
+    const bookFile = await this.repo.findProgressBookFileByBookId(bookId, userId, accessibleLibraryIds);
     if (!bookFile) throw new NotFoundException(`No synced file found for book ${bookId}`);
 
     const held = await this.repo.getDeviceProgressForDevice(bookFile.id, userId, deviceId);

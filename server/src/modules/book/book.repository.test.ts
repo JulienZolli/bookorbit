@@ -751,6 +751,35 @@ describe('BookRepository', () => {
     expect(resetWhere).toHaveBeenCalledOnce();
   });
 
+  it('clears a stale narration marker when bridging to a copy without media overlays', async () => {
+    const returning = vi.fn().mockResolvedValue([{ fileId: 20 }]);
+    const onConflictDoUpdate = vi.fn().mockReturnValue({ returning });
+    const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
+    const db = {
+      insert: vi.fn().mockReturnValue({ values }),
+      delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+    };
+    const repo = new BookRepository(db as never);
+
+    await expect(
+      repo.upsertSyncedEpubProgressIfNewer({
+        userId: 7,
+        fileId: 20,
+        cfi: 'epubcfi(/6/4)',
+        percentage: 42,
+        positionSeconds: null,
+        mediaOverlayFragment: null,
+        mediaOverlaySectionIndex: null,
+        koreaderProgress: '/body/DocFragment[2]/body/p[2]/text().0',
+        sourceUpdatedAt: new Date('2026-09-19T12:00:00.000Z'),
+      }),
+    ).resolves.toBe(true);
+
+    const cleared = { positionSeconds: null, mediaOverlayFragment: null, mediaOverlaySectionIndex: null };
+    expect(values).toHaveBeenCalledWith(expect.objectContaining(cleared));
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(expect.objectContaining({ set: expect.objectContaining(cleared) }));
+  });
+
   it('does not clear reset protection when a newer EPUB row rejects the bridge', async () => {
     const returning = vi.fn().mockResolvedValue([]);
     const db = {

@@ -34,16 +34,27 @@ type EpubProgressResolution = {
   cfi: string;
   koreaderProgress: string | null;
   percentage: number;
-  positionSeconds: number;
-  mediaOverlayFragment: string;
-  mediaOverlaySectionIndex: number;
+  positionSeconds: number | null;
+  mediaOverlayFragment: string | null;
+  mediaOverlaySectionIndex: number | null;
 };
 
-type AudioProgressResolution = {
+/** An EPUB position placed on the read-along file's narration timeline. */
+type EbookOverlayPosition = {
+  ebookFile: SyncFile;
+  overlaySourceFile: SyncFile;
+  playlist: EpubMediaOverlayPlaylist;
+  overlayDurationSeconds: number;
+  overlaySeconds: number;
+  audioFiles: SyncFile[];
+  audioTotalSeconds: number | null;
+  siblingEpubFiles: SyncFile[];
+};
+
+type AudioPosition = {
   currentFileId: number;
   positionSeconds: number;
   percentage: number;
-  siblingTargets: EpubProgressResolution[];
 };
 
 @Injectable()
@@ -129,22 +140,29 @@ export class AudiobookEbookProgressSyncService {
     try {
       if ((await this.bookRepo.findReadAloudSyncMode(params.userId, params.bookId)) === 'disabled') return false;
 
-      const resolution = await this.resolveAudioProgress(params);
-      if (!resolution) return false;
+      const syncSiblingEpubs = params.syncSiblingEpubs !== false;
+      const position = await this.resolveEbookOverlayPosition(params, syncSiblingEpubs);
+      if (!position) return false;
 
       const sourceUpdatedAt = params.sourceUpdatedAt ?? new Date();
-      const saved = await this.bookRepo.upsertAudioProgress(
-        params.userId,
-        params.bookId,
-        resolution.currentFileId,
-        resolution.positionSeconds,
-        resolution.percentage,
-        sourceUpdatedAt,
-      );
-      if (!saved) return false;
+      const audio = this.mapOverlayPositionToAudio(position);
+      if (audio) {
+        const saved = await this.bookRepo.upsertAudioProgress(
+          params.userId,
+          params.bookId,
+          audio.currentFileId,
+          audio.positionSeconds,
+          audio.percentage,
+          sourceUpdatedAt,
+        );
+        if (!saved) return false;
+      }
+      if (!syncSiblingEpubs) return audio !== null;
 
-      for (const target of params.syncSiblingEpubs === false ? [] : resolution.siblingTargets) {
-        await this.bookRepo.upsertSyncedEpubProgressIfNewer({
+      let siblingSynced = false;
+      const textPercentage = audio ? null : this.clampPercentage(params.percentage);
+      for (const target of await this.resolveSiblingEpubTargets(position, textPercentage)) {
+        const accepted = await this.bookRepo.upsertSyncedEpubProgressIfNewer({
           userId: params.userId,
           fileId: target.targetFile.id,
           cfi: target.cfi,
@@ -155,8 +173,9 @@ export class AudiobookEbookProgressSyncService {
           koreaderProgress: target.koreaderProgress,
           sourceUpdatedAt,
         });
+        siblingSynced ||= accepted;
       }
-      return true;
+      return audio !== null || siblingSynced;
     } catch (error: unknown) {
       const errorClass = error instanceof Error ? error.constructor.name : 'UnknownError';
       const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
@@ -201,17 +220,11 @@ export class AudiobookEbookProgressSyncService {
     const targetFile = this.selectTargetFile(syncFiles.files, syncFiles.primaryFileId, overlaySourceFile);
     const epubFiles = syncFiles.files.filter((file) => file.format?.toLowerCase() === 'epub');
     const orderedTargets = [targetFile, ...epubFiles.filter((file) => file.id !== targetFile.id)];
+    const percentage = this.clampPercentage((overlaySeconds / playlist.durationSeconds) * 100);
     const targets: EpubProgressResolution[] = [];
     for (const candidate of orderedTargets) {
       const resolved = await this.resolveFragmentPositions(candidate, item, overlaySourceFile.id);
-      if (!resolved) continue;
-      targets.push({
-        ...resolved,
-        percentage: this.clampPercentage((overlaySeconds / playlist.durationSeconds) * 100),
-        positionSeconds: overlaySeconds,
-        mediaOverlayFragment: this.itemFragment(item),
-        mediaOverlaySectionIndex: item.sectionIndex,
-      });
+      if (resolved) targets.push(this.toEpubTarget(resolved, item, overlaySourceFile, overlaySeconds, percentage));
     }
     if (targets.length === 0) return null;
 
@@ -220,15 +233,23 @@ export class AudiobookEbookProgressSyncService {
     };
   }
 
-  private async resolveAudioProgress(params: {
-    bookId: number;
-    bookFileId: number;
-    cfi?: string | null;
-    koreaderProgress?: string | null;
-    positionSeconds?: number | null;
-    mediaOverlayFragment?: string | null;
-    mediaOverlaySectionIndex?: number | null;
-  }): Promise<AudioProgressResolution | null> {
+  /**
+   * Places an EPUB position on the read-along file's narration, which is what every other copy
+   * of the book is found through. Returns null before any file is parsed when there is nothing
+   * to carry the position to, which is every sync of a read-along EPUB that sits on its own.
+   */
+  private async resolveEbookOverlayPosition(
+    params: {
+      bookId: number;
+      bookFileId: number;
+      cfi?: string | null;
+      koreaderProgress?: string | null;
+      positionSeconds?: number | null;
+      mediaOverlayFragment?: string | null;
+      mediaOverlaySectionIndex?: number | null;
+    },
+    syncSiblingEpubs: boolean,
+  ): Promise<EbookOverlayPosition | null> {
     const syncFiles = await this.bookRepo.findAudioEbookProgressSyncFiles(params.bookId);
     if (!syncFiles) return null;
 
@@ -240,7 +261,10 @@ export class AudiobookEbookProgressSyncService {
 
     const audioFiles = syncFiles.files.filter((file) => typeof file.format === 'string' && isAudioFormat(file.format));
     const audioTotalSeconds = this.computeAudioTotalSeconds(audioFiles);
-    if (audioFiles.length === 0 || audioTotalSeconds === null) return null;
+    const siblingEpubFiles = syncSiblingEpubs
+      ? syncFiles.files.filter((file) => file.id !== ebookFile.id && file.format?.toLowerCase() === 'epub')
+      : [];
+    if (audioTotalSeconds === null && siblingEpubFiles.length === 0) return null;
 
     const playlist = await this.getPlaylist(overlaySourceFile, params.bookId);
     if (playlist.items.length === 0 || playlist.durationSeconds == null || playlist.durationSeconds <= 0) return null;
@@ -248,34 +272,75 @@ export class AudiobookEbookProgressSyncService {
     const overlaySeconds = await this.resolveOverlaySecondsFromEbookPosition(ebookFile, overlaySourceFile.id, playlist, params);
     if (overlaySeconds === null) return null;
 
-    const audioSeconds = this.mapOverlaySecondsToAudioSeconds(overlaySeconds, playlist.durationSeconds, audioTotalSeconds);
+    return {
+      ebookFile,
+      overlaySourceFile,
+      playlist,
+      overlayDurationSeconds: playlist.durationSeconds,
+      overlaySeconds,
+      audioFiles,
+      audioTotalSeconds,
+      siblingEpubFiles,
+    };
+  }
+
+  private mapOverlayPositionToAudio(position: EbookOverlayPosition): AudioPosition | null {
+    if (position.audioTotalSeconds === null) return null;
+
+    const audioSeconds = this.mapOverlaySecondsToAudioSeconds(position.overlaySeconds, position.overlayDurationSeconds, position.audioTotalSeconds);
     if (audioSeconds === null) return null;
 
-    const filePosition = this.audioFilePositionForSeconds(audioFiles, audioSeconds);
+    const filePosition = this.audioFilePositionForSeconds(position.audioFiles, audioSeconds);
     if (!filePosition) return null;
-
-    const item = this.findItemBySeconds(playlist, overlaySeconds);
-    const siblingTargets: EpubProgressResolution[] = [];
-    if (item?.textFragment) {
-      for (const candidate of syncFiles.files) {
-        if (candidate.id === ebookFile.id || candidate.format?.toLowerCase() !== 'epub') continue;
-        const resolved = await this.resolveFragmentPositions(candidate, item, overlaySourceFile.id);
-        if (!resolved) continue;
-        siblingTargets.push({
-          ...resolved,
-          percentage: this.clampPercentage((overlaySeconds / playlist.durationSeconds) * 100),
-          positionSeconds: overlaySeconds,
-          mediaOverlayFragment: this.itemFragment(item),
-          mediaOverlaySectionIndex: item.sectionIndex,
-        });
-      }
-    }
 
     return {
       currentFileId: filePosition.file.id,
       positionSeconds: filePosition.positionSeconds,
-      percentage: this.clampPercentage((audioSeconds / audioTotalSeconds) * 100),
-      siblingTargets,
+      percentage: this.clampPercentage((audioSeconds / position.audioTotalSeconds) * 100),
+    };
+  }
+
+  /**
+   * Where the position lands in every other EPUB of the book: the nearest narrated sentence,
+   * located in each copy whose chapter text is identical.
+   *
+   * Behind an audiobook the copies follow its timeline percentage. Without one, `textPercentage`
+   * is the source's own figure and is used as is: narration time drifts from text wherever the
+   * pace changes or a section goes unnarrated, and KOReader decides by percentage whether a
+   * pulled position is ahead of its own.
+   */
+  private async resolveSiblingEpubTargets(position: EbookOverlayPosition, textPercentage: number | null): Promise<EpubProgressResolution[]> {
+    const item = this.findItemBySeconds(position.playlist, position.overlaySeconds);
+    if (!item?.textFragment) return [];
+
+    const percentage = textPercentage ?? this.clampPercentage((position.overlaySeconds / position.overlayDurationSeconds) * 100);
+    const targets: EpubProgressResolution[] = [];
+    for (const candidate of position.siblingEpubFiles) {
+      const resolved = await this.resolveFragmentPositions(candidate, item, position.overlaySourceFile.id);
+      if (resolved) targets.push(this.toEpubTarget(resolved, item, position.overlaySourceFile, position.overlaySeconds, percentage));
+    }
+    return targets;
+  }
+
+  /**
+   * A copy's synced position. The narration marker goes only to the read-along file: it names one
+   * of that file's sentences, and the web reader opens a file at its stored marker before its cfi,
+   * so a copy without media overlays given one would open at the start of the chapter.
+   */
+  private toEpubTarget(
+    resolved: { targetFile: SyncFile; cfi: string; koreaderProgress: string | null },
+    item: EpubMediaOverlayPlaylistItem,
+    overlaySourceFile: SyncFile,
+    overlaySeconds: number,
+    percentage: number,
+  ): EpubProgressResolution {
+    const narration = resolved.targetFile.id === overlaySourceFile.id;
+    return {
+      ...resolved,
+      percentage,
+      positionSeconds: narration ? overlaySeconds : null,
+      mediaOverlayFragment: narration ? this.itemFragment(item) : null,
+      mediaOverlaySectionIndex: narration ? item.sectionIndex : null,
     };
   }
 
@@ -339,7 +404,11 @@ export class AudiobookEbookProgressSyncService {
       mediaOverlaySectionIndex?: number | null;
     },
   ): Promise<number | null> {
+    // A copy without media overlays has no narration of its own. A marker it sends back is one an
+    // earlier sync left on it, and its text position is the only one it can speak for.
+    const hasNarration = ebookFile.mediaOverlayAvailable === true;
     if (
+      hasNarration &&
       this.isNonNegativeFinite(params.positionSeconds) &&
       (params.mediaOverlayFragment || params.mediaOverlaySectionIndex != null) &&
       playlist.durationSeconds != null
@@ -347,7 +416,7 @@ export class AudiobookEbookProgressSyncService {
       return Math.max(0, Math.min(playlist.durationSeconds, params.positionSeconds));
     }
 
-    if (params.mediaOverlayFragment) {
+    if (hasNarration && params.mediaOverlayFragment) {
       const match = this.findItemStartByFragment(playlist, params.mediaOverlayFragment, params.mediaOverlaySectionIndex ?? null);
       if (match) return match.startSeconds;
     }

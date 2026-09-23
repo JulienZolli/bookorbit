@@ -846,4 +846,62 @@ describe('DetailsTab cover surface', () => {
     expect(wrapper.get('[role="status"]').text()).toBe('Could not update read-aloud progress sync.')
     expect(wrapper.emitted('saved')).toBeUndefined()
   })
+
+  describe('read-aloud sync with a second EPUB beside the read-along file', () => {
+    const readAlongEpub = { ...makeBook().files[0]!, mediaOverlay: { available: true, durationSeconds: 3600 } }
+    const originalEpub = {
+      id: 103,
+      format: 'epub',
+      role: 'content',
+      sizeBytes: 1200,
+      absolutePath: '/books/Title.epub',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      filename: 'Title.epub',
+      durationSeconds: null,
+    }
+    const unavailable = (unavailableReason: 'no_audio_files' | 'duration_mismatch', audioDurationSeconds: number | null) => ({
+      mode: 'auto' as const,
+      state: 'unavailable' as const,
+      unavailableReason,
+      overlayFileId: 101,
+      audioDurationSeconds,
+      overlayDurationSeconds: 3600,
+      durationDifferenceSeconds: audioDurationSeconds === null ? null : audioDurationSeconds - 3600,
+      durationDifferenceRatio: audioDurationSeconds === null ? null : (audioDurationSeconds - 3600) / 3600,
+      koreaderDownloadAvailable: true,
+    })
+
+    it('reports the EPUB copies as in sync when no audiobook is imported', async () => {
+      const wrapper = mountDetails(makeBook({ files: [readAlongEpub, originalEpub], readAloudSync: unavailable('no_audio_files', null) }))
+      await flushPromises()
+
+      const panel = wrapper.get('[data-test="read-aloud-sync"]').text()
+      expect(panel).toContain('EPUB copies only')
+      expect(panel).toContain('Web reader, Kobo, and KOReader positions stay in sync across the EPUB copies.')
+      expect(panel).not.toContain('Unavailable')
+      // A missing audiobook is already what the description asks for, so there is nothing to add.
+      expect(wrapper.find('[data-test="read-aloud-sync-audiobook-note"]').exists()).toBe(false)
+    })
+
+    it('keeps the reason an existing audiobook is left out beside the EPUB copies status', async () => {
+      const audiobook = { ...originalEpub, id: 104, format: 'mp3', absolutePath: '/books/audio.mp3', filename: 'audio.mp3', durationSeconds: 4000 }
+      const wrapper = mountDetails(
+        makeBook({ files: [readAlongEpub, originalEpub, audiobook], readAloudSync: unavailable('duration_mismatch', 4000) }),
+      )
+      await flushPromises()
+
+      expect(wrapper.get('[data-test="read-aloud-sync"]').text()).toContain('EPUB copies only')
+      expect(wrapper.get('[data-test="read-aloud-sync-audiobook-note"]').text()).toContain('audiobook 1h 6m, read-along EPUB 1h')
+    })
+
+    it('still reports a lone read-along EPUB without an audiobook as unavailable', async () => {
+      const wrapper = mountDetails(makeBook({ files: [readAlongEpub], readAloudSync: unavailable('no_audio_files', null) }))
+      await flushPromises()
+
+      const panel = wrapper.get('[data-test="read-aloud-sync"]').text()
+      expect(panel).toContain('Unavailable')
+      expect(panel).toContain('Matching standalone audiobook files are required.')
+      expect(panel).not.toContain('EPUB copies only')
+    })
+  })
 })

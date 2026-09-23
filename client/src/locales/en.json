@@ -5254,10 +5254,12 @@
           "state": {
             "enabled": "Enabled",
             "disabled": "Disabled",
-            "unavailable": "Unavailable"
+            "unavailable": "Unavailable",
+            "epubCopiesOnly": "EPUB copies only"
           },
           "enabledDescription": "Audiobook, web reader, Kobo, and KOReader positions stay in sync.",
           "disabledDescription": "Each format keeps its own reading position.",
+          "epubCopiesDescription": "Web reader, Kobo, and KOReader positions stay in sync across the EPUB copies. Add matching audiobook files to sync the audiobook too.",
           "reason": {
             "no_media_overlay_epub": "A read-along EPUB with media overlays is required.",
             "no_audio_files": "Matching standalone audiobook files are required.",

@@ -2368,9 +2368,9 @@ export class BookRepository {
     fileId: number;
     cfi: string;
     percentage: number;
-    positionSeconds: number;
-    mediaOverlayFragment: string;
-    mediaOverlaySectionIndex: number;
+    positionSeconds: number | null;
+    mediaOverlayFragment: string | null;
+    mediaOverlaySectionIndex: number | null;
     koreaderProgress: string | null;
     sourceUpdatedAt: Date;
   }): Promise<boolean> {

@@ -11,7 +11,7 @@ const mockBuildPlaylist = vi.mocked(buildEpubMediaOverlayPlaylistFromFile);
 
 const SOURCE_TIME = new Date('2026-09-19T12:00:00.000Z');
 
-function makeFiles(audioDuration = 100) {
+function makeFiles(audioDuration: number | null = 100) {
   return {
     primaryFileId: 20,
     files: [
@@ -112,10 +112,16 @@ function makePlaylistWithZeroLengthClip() {
   };
 }
 
-function makeFixture(audioDuration = 100) {
+/** A Storyteller read-along EPUB beside the original, with the audiobook never imported. */
+function makeFilesWithoutAudio() {
+  const files = makeFiles();
+  return { ...files, primaryFileId: 30, files: files.files.filter((file) => file.format === 'epub') };
+}
+
+function makeFixture(audioDuration = 100, syncFiles: ReturnType<typeof makeFiles> = makeFiles(audioDuration)) {
   const bookRepo = {
     findReadAloudSyncMode: vi.fn().mockResolvedValue('auto'),
-    findAudioEbookProgressSyncFiles: vi.fn().mockResolvedValue(makeFiles(audioDuration)),
+    findAudioEbookProgressSyncFiles: vi.fn().mockResolvedValue(syncFiles),
     upsertSyncedEpubProgressIfNewer: vi.fn().mockResolvedValue(true),
     syncKoboReadingStateFromProgress: vi.fn().mockResolvedValue(undefined),
     upsertAudioProgress: vi.fn().mockResolvedValue({ revision: 2 }),
@@ -156,13 +162,30 @@ describe('AudiobookEbookProgressSyncService', () => {
     ).resolves.toBe(true);
 
     expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledTimes(2);
+    // The plain EPUB has no narration to resume, so it gets the text position without a marker.
     expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ userId: 7, fileId: 20, percentage: 75, positionSeconds: 75, sourceUpdatedAt: SOURCE_TIME }),
+      expect.objectContaining({
+        userId: 7,
+        fileId: 20,
+        percentage: 75,
+        positionSeconds: null,
+        mediaOverlayFragment: null,
+        mediaOverlaySectionIndex: null,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
     );
     expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ userId: 7, fileId: 30, percentage: 75, positionSeconds: 75, sourceUpdatedAt: SOURCE_TIME }),
+      expect.objectContaining({
+        userId: 7,
+        fileId: 30,
+        percentage: 75,
+        positionSeconds: 75,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#second',
+        mediaOverlaySectionIndex: 0,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
     );
     expect(bookRepo.syncKoboReadingStateFromProgress).toHaveBeenCalledWith(7, 20, 75, null, null, null, null);
     expect(positionConverter.fragmentToPositions).toHaveBeenCalledWith(
@@ -194,9 +217,10 @@ describe('AudiobookEbookProgressSyncService', () => {
       1,
       expect.objectContaining({
         fileId: 20,
+        cfi: 'epubcfi(20-after)',
         percentage: positionSeconds,
-        positionSeconds,
-        mediaOverlayFragment: 'OPS/chapter.xhtml#after',
+        positionSeconds: null,
+        mediaOverlayFragment: null,
       }),
     );
     expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenNthCalledWith(
@@ -258,7 +282,7 @@ describe('AudiobookEbookProgressSyncService', () => {
       service.syncFromEbookProgress({
         userId: 7,
         bookId: 5,
-        bookFileId: 20,
+        bookFileId: 30,
         percentage: 75,
         positionSeconds: 75,
         mediaOverlayFragment: 'OPS/chapter.xhtml#after',
@@ -269,10 +293,55 @@ describe('AudiobookEbookProgressSyncService', () => {
 
     expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(7, 5, 10, 75, 75, SOURCE_TIME);
     expect(positionConverter.fragmentToPositions).toHaveBeenCalledWith(
-      expect.objectContaining({ bookFileId: 30, sourceBookFileId: 30, fragment: 'after' }),
+      expect.objectContaining({ bookFileId: 20, sourceBookFileId: 30, fragment: 'after' }),
     );
     expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith(
-      expect.objectContaining({ fileId: 30, positionSeconds: 75, mediaOverlayFragment: 'OPS/chapter.xhtml#after' }),
+      expect.objectContaining({ fileId: 20, cfi: 'epubcfi(20-after)', positionSeconds: null, mediaOverlayFragment: null }),
+    );
+  });
+
+  it('follows the text position of a plain EPUB that sends back a narration marker an older sync left on it', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture();
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 20,
+        percentage: 75,
+        cfi: 'epubcfi(/6/4)',
+        positionSeconds: 10,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#first',
+        mediaOverlaySectionIndex: 0,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    // The stale marker names 'first' at 10 seconds; the page the reader is on resolves to 'second'.
+    expect(positionConverter.nearestFragmentForPosition).toHaveBeenCalledWith(expect.objectContaining({ bookFileId: 20, cfi: 'epubcfi(/6/4)' }));
+    expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(7, 5, 10, 50, 50, SOURCE_TIME);
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith(
+      expect.objectContaining({ fileId: 30, positionSeconds: 50, mediaOverlayFragment: 'OPS/chapter.xhtml#second' }),
+    );
+  });
+
+  it('writes a read-along position to the plain sibling without a narration marker', async () => {
+    const { service, bookRepo } = makeFixture();
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 30, percentage: 75, cfi: 'epubcfi(/6/4)', sourceUpdatedAt: SOURCE_TIME }),
+    ).resolves.toBe(true);
+
+    expect(bookRepo.upsertAudioProgress).toHaveBeenCalledWith(7, 5, 10, 50, 50, SOURCE_TIME);
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledOnce();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileId: 20,
+        percentage: 50,
+        positionSeconds: null,
+        mediaOverlayFragment: null,
+        mediaOverlaySectionIndex: null,
+      }),
     );
   });
 
@@ -349,5 +418,187 @@ describe('AudiobookEbookProgressSyncService', () => {
 
     expect(bookRepo.findAudioEbookProgressSyncFiles).not.toHaveBeenCalled();
     expect(mockBuildPlaylist).not.toHaveBeenCalled();
+  });
+});
+
+describe('AudiobookEbookProgressSyncService sibling EPUBs without an audiobook', () => {
+  const KOREADER_XPOINTER = '/body/DocFragment[1]/body/p[3]/text().0';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStat.mockResolvedValue({ mtimeMs: 1234 } as never);
+    mockBuildPlaylist.mockResolvedValue(makePlaylist());
+  });
+
+  it('carries a device position on the original EPUB to the read-along copy', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture(100, makeFilesWithoutAudio());
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 20,
+        percentage: 69,
+        cfi: 'epubcfi(/6/4)',
+        koreaderProgress: KOREADER_XPOINTER,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    expect(bookRepo.upsertAudioProgress).not.toHaveBeenCalled();
+    expect(positionConverter.nearestFragmentForPosition).toHaveBeenCalledWith(
+      expect.objectContaining({ bookFileId: 20, sourceBookFileId: 30, cfi: 'epubcfi(/6/4)', xpointer: KOREADER_XPOINTER }),
+    );
+    expect(positionConverter.fragmentToPositions).toHaveBeenCalledWith({ bookFileId: 30, sourceBookFileId: 30, chapterIndex: 0, fragment: 'second' });
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledOnce();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith({
+      userId: 7,
+      fileId: 30,
+      cfi: 'epubcfi(30-second)',
+      koreaderProgress: '/body/30/second',
+      percentage: 69,
+      positionSeconds: 50,
+      mediaOverlayFragment: 'OPS/chapter.xhtml#second',
+      mediaOverlaySectionIndex: 0,
+      sourceUpdatedAt: SOURCE_TIME,
+    });
+  });
+
+  it('carries a web position on the read-along copy to the original without a narration marker', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture(100, makeFilesWithoutAudio());
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 30,
+        percentage: 67,
+        cfi: 'epubcfi(/6/4)',
+        koreaderProgress: KOREADER_XPOINTER,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    expect(positionConverter.nearestFragmentForPosition).toHaveBeenCalledWith(expect.objectContaining({ bookFileId: 30, sourceBookFileId: 30 }));
+    expect(positionConverter.fragmentToPositions).toHaveBeenCalledWith({ bookFileId: 20, sourceBookFileId: 30, chapterIndex: 0, fragment: 'second' });
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledOnce();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith({
+      userId: 7,
+      fileId: 20,
+      cfi: 'epubcfi(20-second)',
+      koreaderProgress: '/body/20/second',
+      percentage: 67,
+      positionSeconds: null,
+      mediaOverlayFragment: null,
+      mediaOverlaySectionIndex: null,
+      sourceUpdatedAt: SOURCE_TIME,
+    });
+  });
+
+  it('parses nothing for a read-along EPUB that has no sibling and no audiobook', async () => {
+    const readAlongOnly = makeFilesWithoutAudio();
+    readAlongOnly.files = readAlongOnly.files.filter((file) => file.id === 30);
+    const { service, bookRepo, positionConverter } = makeFixture(100, readAlongOnly);
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 30, percentage: 67, cfi: 'epubcfi(/6/4)', sourceUpdatedAt: SOURCE_TIME }),
+    ).resolves.toBe(false);
+
+    expect(mockStat).not.toHaveBeenCalled();
+    expect(mockBuildPlaylist).not.toHaveBeenCalled();
+    expect(positionConverter.nearestFragmentForPosition).not.toHaveBeenCalled();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).not.toHaveBeenCalled();
+  });
+
+  it('parses nothing for a narration write that did not move the text position', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture(100, makeFilesWithoutAudio());
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 30,
+        percentage: 32,
+        positionSeconds: 10,
+        mediaOverlayFragment: 'OPS/chapter.xhtml#first',
+        mediaOverlaySectionIndex: 0,
+        sourceUpdatedAt: SOURCE_TIME,
+        syncSiblingEpubs: false,
+      }),
+    ).resolves.toBe(false);
+
+    expect(mockBuildPlaylist).not.toHaveBeenCalled();
+    expect(positionConverter.nearestFragmentForPosition).not.toHaveBeenCalled();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).not.toHaveBeenCalled();
+  });
+
+  it('keeps every copy on its own position when read-aloud sync is disabled', async () => {
+    const { service, bookRepo } = makeFixture(100, makeFilesWithoutAudio());
+    bookRepo.findReadAloudSyncMode.mockResolvedValue('disabled');
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 20, percentage: 69, koreaderProgress: KOREADER_XPOINTER }),
+    ).resolves.toBe(false);
+
+    expect(bookRepo.findAudioEbookProgressSyncFiles).not.toHaveBeenCalled();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['its duration is too far from the narration', () => makeFixture(120)],
+    ['a file has no duration', () => makeFixture(100, makeFiles(null))],
+  ])('syncs the sibling EPUB by text when the audiobook cannot be mapped because %s', async (_reason, fixture) => {
+    const { service, bookRepo } = fixture();
+
+    await expect(
+      service.syncFromEbookProgress({
+        userId: 7,
+        bookId: 5,
+        bookFileId: 20,
+        percentage: 69,
+        koreaderProgress: KOREADER_XPOINTER,
+        sourceUpdatedAt: SOURCE_TIME,
+      }),
+    ).resolves.toBe(true);
+
+    expect(bookRepo.upsertAudioProgress).not.toHaveBeenCalled();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledOnce();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledWith(
+      expect.objectContaining({ fileId: 30, percentage: 69, positionSeconds: 50, mediaOverlayFragment: 'OPS/chapter.xhtml#second' }),
+    );
+  });
+
+  it('writes nothing when the copies do not share the chapter text', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture(100, makeFilesWithoutAudio());
+    positionConverter.fragmentToPositions.mockResolvedValue({ status: 'failed', reason: 'chapter_text_mismatch' } as never);
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 30, percentage: 67, cfi: 'epubcfi(/6/4)', sourceUpdatedAt: SOURCE_TIME }),
+    ).resolves.toBe(false);
+
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing when the position cannot be placed on the narration', async () => {
+    const { service, bookRepo, positionConverter } = makeFixture(100, makeFilesWithoutAudio());
+    positionConverter.nearestFragmentForPosition.mockResolvedValue({ status: 'failed', reason: 'no_candidate_fragments' });
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 20, percentage: 69, koreaderProgress: KOREADER_XPOINTER }),
+    ).resolves.toBe(false);
+
+    expect(positionConverter.fragmentToPositions).not.toHaveBeenCalled();
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).not.toHaveBeenCalled();
+  });
+
+  it('reports no sync when the sibling already holds a newer position', async () => {
+    const { service, bookRepo } = makeFixture(100, makeFilesWithoutAudio());
+    bookRepo.upsertSyncedEpubProgressIfNewer.mockResolvedValue(false);
+
+    await expect(
+      service.syncFromEbookProgress({ userId: 7, bookId: 5, bookFileId: 20, percentage: 69, koreaderProgress: KOREADER_XPOINTER }),
+    ).resolves.toBe(false);
+
+    expect(bookRepo.upsertSyncedEpubProgressIfNewer).toHaveBeenCalledOnce();
   });
 });

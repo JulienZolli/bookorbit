@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, notExists, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notExists, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { chunk } from '../../common/utils/batch.utils';
@@ -761,13 +761,22 @@ export class KoreaderRepository {
   }
 
   /**
-   * The file a book's KOReader progress hangs off, in the shape the shared-progress path needs.
-   * Resolved through the book's primary file, matching findBookFileIdByBookId: the book page
-   * reports one file's holds, so the release action has to act on that same file rather than
-   * whichever one a marker happens to be found on first.
+   * The file a book's KOReader progress hangs off, in the shape the shared-progress path needs:
+   * the copy this user's devices synced most recently, or the primary file when none has. A
+   * device syncs whichever copy it was given, and a Storyteller read-along EPUB becomes the
+   * primary while devices usually hold the original beside it. The book page reports one file's
+   * devices and holds, and the release action resolves through this same query, so it acts on
+   * the file the page showed rather than whichever one a marker happens to be found on first.
    */
-  async findProgressBookFileByBookId(bookId: number, accessibleLibraryIds: number[] | null) {
+  async findProgressBookFileByBookId(bookId: number, userId: number, accessibleLibraryIds: number[] | null) {
     if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
+    const lastDeviceSyncAt = sql`(
+      select max(${schema.koreaderDeviceProgress.updatedAt})
+      from ${schema.koreaderDeviceProgress}
+      where ${schema.koreaderDeviceProgress.bookFileId} = ${schema.bookFiles.id}
+        and ${schema.koreaderDeviceProgress.userId} = ${userId}
+        and ${schema.koreaderDeviceProgress.orphaned} = false
+    )`;
     const [row] = await this.db
       .select({
         id: schema.bookFiles.id,
@@ -780,13 +789,14 @@ export class KoreaderRepository {
       .where(
         and(
           eq(schema.books.id, bookId),
-          eq(schema.books.primaryFileId, schema.bookFiles.id),
+          or(eq(schema.books.primaryFileId, schema.bookFiles.id), sql`${lastDeviceSyncAt} is not null`),
           // Scoped the same way every other entry point into this module is. A device progress
           // row outlives the library grant that created it, so ownership of the row is not
           // ownership of the book, and this path writes.
           accessibleLibraryIds === null ? undefined : inArray(schema.books.libraryId, accessibleLibraryIds),
         ),
       )
+      .orderBy(sql`${lastDeviceSyncAt} desc nulls last`, asc(schema.bookFiles.id))
       .limit(1);
     return row ?? null;
   }

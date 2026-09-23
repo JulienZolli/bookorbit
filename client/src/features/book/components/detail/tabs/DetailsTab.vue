@@ -373,10 +373,31 @@ const readAloudSync = ref<ReadAloudProgressSync>(props.book.readAloudSync)
 const readAloudSyncSaving = ref(false)
 const readAloudSyncError = ref<string | null>(null)
 const showReadAloudSync = computed(() => readAlongFile.value != null || hasAudioFile.value)
-const readAloudSyncStatus = computed(() => t(`book.detail.details.readAloudSync.state.${readAloudSync.value.state}`))
+// Another EPUB beside the read-along file keeps its position in sync through the read-along's
+// narration even when no audiobook can be matched, so only the audiobook half is unavailable.
+const syncsEpubCopiesOnly = computed(
+  () =>
+    readAloudSync.value.state === 'unavailable' &&
+    readAloudSync.value.unavailableReason !== 'no_media_overlay_epub' &&
+    props.book.files.filter((file) => file.format?.toLowerCase() === 'epub').length > 1,
+)
+const readAloudSyncStatus = computed(() =>
+  syncsEpubCopiesOnly.value
+    ? t('book.detail.details.readAloudSync.state.epubCopiesOnly')
+    : t(`book.detail.details.readAloudSync.state.${readAloudSync.value.state}`),
+)
 const readAloudSyncDescription = computed(() => {
   if (readAloudSync.value.state === 'enabled') return t('book.detail.details.readAloudSync.enabledDescription')
   if (readAloudSync.value.state === 'disabled') return t('book.detail.details.readAloudSync.disabledDescription')
+  if (syncsEpubCopiesOnly.value) return t('book.detail.details.readAloudSync.epubCopiesDescription')
+  return readAloudSyncUnavailableReason()
+})
+/** Why the audiobook is left out, when there is one and it is not simply missing. */
+const readAloudSyncAudiobookNote = computed(() =>
+  syncsEpubCopiesOnly.value && readAloudSync.value.unavailableReason !== 'no_audio_files' ? readAloudSyncUnavailableReason() : null,
+)
+
+function readAloudSyncUnavailableReason(): string {
   const reason = readAloudSync.value.unavailableReason ?? 'missing_duration'
   if (reason === 'duration_mismatch') {
     return t('book.detail.details.readAloudSync.reason.durationMismatch', {
@@ -385,7 +406,7 @@ const readAloudSyncDescription = computed(() => {
     })
   }
   return t(`book.detail.details.readAloudSync.reason.${reason}`)
-})
+}
 
 watch(
   () => props.book.readAloudSync,
@@ -1782,6 +1803,9 @@ watch(
               <span class="text-[11px] text-muted-foreground">{{ readAloudSyncStatus }}</span>
             </div>
             <p class="mt-0.5 text-xs text-muted-foreground">{{ readAloudSyncDescription }}</p>
+            <p v-if="readAloudSyncAudiobookNote" data-test="read-aloud-sync-audiobook-note" class="mt-0.5 text-xs text-muted-foreground">
+              {{ readAloudSyncAudiobookNote }}
+            </p>
             <p v-if="readAloudSyncError" class="mt-1 text-xs text-destructive" role="status" aria-live="polite">
               {{ readAloudSyncError }}
             </p>
