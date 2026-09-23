@@ -70,6 +70,9 @@ function clearAuth() {
 
 setOnAuthFailure(() => {
   clearAuth()
+  // Public pages are reached without a session, so a rejected request there is not a reason to
+  // leave. Moving on would strand a reset or magic link, or drop the sign-in redirect.
+  if (router.currentRoute.value.meta.public) return
   const { needsSetup } = useSetupStatus()
   router.push(needsSetup.value ? '/setup' : '/login')
 })

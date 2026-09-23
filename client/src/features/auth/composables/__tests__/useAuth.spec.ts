@@ -15,11 +15,12 @@ const cancelPendingThemeSyncMock = vi.hoisted(() => vi.fn<VoidFn>())
 const cancelPendingDisplaySettingsSyncMock = vi.hoisted(() => vi.fn<VoidFn>())
 const disconnectAuthorEnrichmentSocketMock = vi.hoisted(() => vi.fn<VoidFn>())
 const disconnectBookMetadataFetchSocketMock = vi.hoisted(() => vi.fn<VoidFn>())
+const currentRouteMock = vi.hoisted(() => ({ value: { query: {}, meta: {} as { public?: boolean } } }))
 
 vi.mock('@/router', () => ({
   default: {
     push: routerPushMock,
-    currentRoute: { value: { query: {} } },
+    currentRoute: currentRouteMock,
   },
 }))
 
@@ -88,6 +89,7 @@ describe('useAuth', () => {
     cancelPendingDisplaySettingsSyncMock.mockReset()
     disconnectAuthorEnrichmentSocketMock.mockReset()
     disconnectBookMetadataFetchSocketMock.mockReset()
+    currentRouteMock.value = { query: {}, meta: {} }
     vi.stubGlobal(
       'fetch',
       vi.fn<typeof fetch>().mockResolvedValue({
@@ -142,5 +144,26 @@ describe('useAuth', () => {
     await useAuth().logout()
     expect(readBody).not.toHaveBeenCalled()
     expect(routerPushMock).toHaveBeenCalledWith('/login')
+  })
+
+  it('sends a protected page to sign-in when the session is rejected', async () => {
+    await import('../useAuth')
+    const onAuthFailure = setOnAuthFailureMock.mock.calls[0]![0]
+
+    onAuthFailure()
+
+    expect(setAccessTokenMock).toHaveBeenCalledWith(null)
+    expect(routerPushMock).toHaveBeenCalledWith('/login')
+  })
+
+  it('stays on a public page when the session is rejected', async () => {
+    currentRouteMock.value = { query: {}, meta: { public: true } }
+    await import('../useAuth')
+    const onAuthFailure = setOnAuthFailureMock.mock.calls[0]![0]
+
+    onAuthFailure()
+
+    expect(setAccessTokenMock).toHaveBeenCalledWith(null)
+    expect(routerPushMock).not.toHaveBeenCalled()
   })
 })

@@ -133,6 +133,10 @@ watch(
       return
     }
 
+    // Not on mount: this player is mounted on signed-out pages too, where a 401 would send a reset or
+    // magic link to sign-in. Playback implies a session.
+    if (allVoices.value.length === 0) void loadVoices()
+
     if (mode.value !== 'expanded' && !compactModeCustomized.value) {
       setMode(defaultCompactMode.value)
     }
@@ -150,8 +154,6 @@ watch(
 )
 
 onMounted(() => {
-  if (allVoices.value.length === 0) void loadVoices()
-
   updateIsMobileViewport()
 
   if (typeof window !== 'undefined') {
