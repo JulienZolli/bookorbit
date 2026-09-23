@@ -150,6 +150,47 @@ describe('AudiobookService', () => {
     );
   });
 
+  it('uses complete per-file durations instead of stale aggregate metadata', async () => {
+    const { service, bookService } = makeFixture();
+    const detail = await bookService.getDetail();
+    bookService.getDetail.mockResolvedValue({
+      ...detail,
+      audioMetadata: { ...detail.audioMetadata, durationSeconds: 60 },
+    });
+
+    const manifest = await service.getManifest(30, makeUser());
+
+    expect(manifest.totalDurationMs).toBe(30_125);
+  });
+
+  it('does not derive false completion while any asset duration is missing', async () => {
+    const { service, repo, bookService } = makeFixture();
+    const files = await repo.findAudioFiles();
+    repo.findAudioFiles.mockResolvedValue(files.map((file, index) => (index === 0 ? { ...file, durationSeconds: null } : file)));
+    const manifest = await service.getManifest(30, makeUser());
+    repo.createPlaybackState.mockResolvedValue({
+      capturedAt: new Date('2026-02-01T00:00:00.000Z'),
+      revision: 1,
+    });
+
+    const saved = await service.putPlaybackState(
+      30,
+      {
+        assetId: manifest.assets[1]!.assetId,
+        positionMs: 20_000,
+        capturedAt: '2026-02-01T00:00:00.000Z',
+        operationId: '99999999-9999-4999-8999-999999999999',
+        baseRevision: 0,
+        manifestRevision: manifest.revision,
+      },
+      makeUser(),
+    );
+
+    expect(saved.percentage).toBe(0);
+    expect(saved.completed).toBe(false);
+    expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenCalledWith(7, { bookId: 30, libraryId: 4 }, 0, {});
+  });
+
   it('syncs EPUB progress only after the revision-controlled write is accepted', async () => {
     const { service, repo, bookService } = makeFixture();
     const manifest = await service.getManifest(30, makeUser());

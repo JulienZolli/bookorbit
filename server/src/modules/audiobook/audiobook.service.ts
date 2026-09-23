@@ -28,6 +28,7 @@ interface ManifestContext {
   manifest: AudiobookManifest;
   files: AudioFileRow[];
   libraryId: number;
+  hasCompleteDurations: boolean;
 }
 
 @Injectable()
@@ -99,7 +100,9 @@ export class AudiobookService {
     const elapsedBefore = context.manifest.assets.slice(0, fileIndex).reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
     const absolutePositionMs = elapsedBefore + dto.positionMs;
     const percentage =
-      context.manifest.totalDurationMs > 0 ? Math.max(0, Math.min(100, (absolutePositionMs / context.manifest.totalDurationMs) * 100)) : 0;
+      context.hasCompleteDurations && context.manifest.totalDurationMs > 0
+        ? Math.max(0, Math.min(100, (absolutePositionMs / context.manifest.totalDurationMs) * 100))
+        : (previous?.percentage ?? 0);
     const values = {
       currentFileId: context.files[fileIndex]!.id,
       positionSeconds: dto.positionMs / 1000,
@@ -219,14 +222,18 @@ export class AudiobookService {
         .update(`${file.publicId}:${file.sizeBytes ?? ''}:${file.mtime?.getTime() ?? ''}`)
         .digest('hex'),
     }));
-    const totalDurationMs =
-      detail.audioMetadata?.durationSeconds !== null && detail.audioMetadata?.durationSeconds !== undefined
+    const hasCompleteDurations = assets.every((asset) => asset.durationMs !== null && asset.durationMs > 0);
+    const measuredDurationMs = assets.reduce((sum, asset) => sum + (asset.durationMs ?? 0), 0);
+    const totalDurationMs = hasCompleteDurations
+      ? measuredDurationMs
+      : detail.audioMetadata?.durationSeconds !== null && detail.audioMetadata?.durationSeconds !== undefined
         ? Math.round(detail.audioMetadata.durationSeconds * 1000)
-        : assets.reduce((sum, asset) => sum + (asset.durationMs ?? 0), 0);
+        : measuredDurationMs;
     const chapters = this.buildChapters(bookId, revision, detail.audioMetadata?.chapters ?? [], assets, totalDurationMs);
     return {
       libraryId: detail.libraryId,
       files,
+      hasCompleteDurations,
       manifest: {
         schema: AUDIOBOOK_MANIFEST_SCHEMA,
         schemaVersion: AUDIOBOOK_MANIFEST_VERSION,

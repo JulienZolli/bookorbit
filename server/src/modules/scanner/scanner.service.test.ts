@@ -67,6 +67,7 @@ function makeBookFile(overrides: Record<string, unknown> = {}) {
     format: 'epub',
     role: 'content',
     sortOrder: 0,
+    durationSeconds: 600,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -2206,6 +2207,71 @@ describe('incremental scan — no re-extraction on unchanged winner', () => {
 
     expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
     expect(mockMetadata.aggregateAudioDuration).not.toHaveBeenCalled();
+  });
+
+  it('repairs a missing duration when an otherwise unchanged audio candidate is processed', async () => {
+    const m4b = makeFileStat({ absolutePath: '/library/Book/book.m4b', relPath: 'Book/book.m4b', ino: 10001n });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Book', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ id: 10, bookId: 1, absolutePath: m4b.absolutePath, ino: m4b.ino, format: 'm4b', durationSeconds: null })]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Book', [m4b])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledOnce();
+    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(1, m4b.absolutePath);
+    expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(1);
+  });
+
+  it('repairs every missing track duration when an incremental scan skips an unchanged audiobook directory', async () => {
+    const files = Array.from({ length: 16 }, (_, index) =>
+      makeBookFile({
+        id: index + 10,
+        bookId: 1,
+        absolutePath: `/library/Book/chapter-${String(index + 1).padStart(2, '0')}.mp3`,
+        relPath: `Book/chapter-${String(index + 1).padStart(2, '0')}.mp3`,
+        ino: BigInt(10001 + index),
+        format: 'mp3',
+        durationSeconds: null,
+      }),
+    );
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Book', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(files),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(['/library/Book']),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledTimes(16);
+    for (const file of files) {
+      expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(1, file.absolutePath);
+    }
+    expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledOnce();
+    expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(1);
   });
 });
 

@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { naturalCompare } from '../../common/utils/natural-sort.utils';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
@@ -61,6 +62,7 @@ interface FileByPathEntry {
   sizeBytes: number | null;
   mtime: Date | null;
   fileHash: string | null;
+  durationSeconds?: number | null;
   sortOrder: number | null;
   mediaOverlayAvailable: boolean;
   mediaOverlayCheckedAt: Date | null;
@@ -121,6 +123,7 @@ const BOOK_MISSING_NOTIFY_DEBOUNCE_MS = 5000;
 const WATCHER_NOTIFY_DEBOUNCE_MS = 30_000;
 const TARGETED_BOOK_SCAN_MAX_CONCURRENCY = 8;
 const MISSING_FILE_STAT_BATCH_SIZE = 50;
+const AUDIO_DURATION_PROBE_CONCURRENCY = 4;
 type OrganizationMode = 'book_per_file' | 'book_per_folder';
 
 interface ScanCounts {
@@ -137,6 +140,7 @@ interface RegisteredFile {
   role: FileRole;
   absolutePath: string;
   sizeBytes: number;
+  durationSeconds: number | null;
   isNew: boolean;
   wasReassigned: boolean;
   wasChanged: boolean;
@@ -322,6 +326,7 @@ export class ScannerService implements OnApplicationBootstrap {
       sizeBytes: number | null;
       mtime: Date | null;
       fileHash: string | null;
+      durationSeconds?: number | null;
       sortOrder?: number | null;
       mediaOverlayAvailable?: boolean | null;
       mediaOverlayCheckedAt?: Date | null;
@@ -366,6 +371,7 @@ export class ScannerService implements OnApplicationBootstrap {
           sizeBytes: f.sizeBytes,
           mtime: f.mtime,
           fileHash: f.fileHash,
+          durationSeconds: f.durationSeconds ?? null,
           sortOrder: f.sortOrder ?? null,
           mediaOverlayAvailable: f.mediaOverlayAvailable === true,
           mediaOverlayCheckedAt: f.mediaOverlayCheckedAt ?? null,
@@ -1033,6 +1039,7 @@ export class ScannerService implements OnApplicationBootstrap {
         sizeBytes: f.sizeBytes,
         mtime: f.mtime,
         fileHash: f.fileHash,
+        durationSeconds: f.durationSeconds,
         sortOrder: f.sortOrder,
         mediaOverlayAvailable: f.mediaOverlayAvailable,
         mediaOverlayCheckedAt: f.mediaOverlayCheckedAt,
@@ -1514,6 +1521,8 @@ export class ScannerService implements OnApplicationBootstrap {
         }
       }
 
+      await this.repairMissingAudioDurations(knownFiles, unchangedDirs, seenBookIds);
+
       // Deferred prune: delete book files not retained by any candidate.
       // Must happen after ALL batches so cross-book file moves are visible.
       const pruneCounts = { added: 0, updated: 0 };
@@ -1564,6 +1573,57 @@ export class ScannerService implements OnApplicationBootstrap {
       );
       throw err;
     }
+  }
+
+  private async repairMissingAudioDurations(
+    knownFiles: Array<{
+      bookId: number;
+      absolutePath: string;
+      format: string | null;
+      durationSeconds: number | null;
+    }>,
+    unchangedDirs: Set<string>,
+    processedBookIds: Set<number>,
+  ): Promise<void> {
+    if (unchangedDirs.size === 0) return;
+
+    const isUnderUnchangedDir = (absolutePath: string) => {
+      for (const dir of unchangedDirs) {
+        if (absolutePath === dir || absolutePath.startsWith(dir + sep)) return true;
+      }
+      return false;
+    };
+    const filesToRepair = knownFiles.filter(
+      (file) =>
+        !processedBookIds.has(file.bookId) &&
+        file.format !== null &&
+        isAudioFormat(file.format) &&
+        (file.durationSeconds === null || file.durationSeconds <= 0) &&
+        isUnderUnchangedDir(file.absolutePath) &&
+        !this.selfWriteRegistry.isSuppressed(file.absolutePath),
+    );
+    const repairedBookIds = new Set<number>();
+
+    await mapWithConcurrency(filesToRepair, AUDIO_DURATION_PROBE_CONCURRENCY, async (file) => {
+      try {
+        await this.metadataService.extractAudioFileDuration(file.bookId, file.absolutePath);
+        repairedBookIds.add(file.bookId);
+      } catch (err) {
+        this.logger.warn(
+          `[scanner.extract_audio_duration] [fail] bookId=${file.bookId} path="${sanitizeLogValue(file.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - missing audio duration repair failed`,
+        );
+      }
+    });
+
+    await mapWithConcurrency([...repairedBookIds], AUDIO_DURATION_PROBE_CONCURRENCY, async (bookId) => {
+      try {
+        await this.metadataService.aggregateAudioDuration(bookId);
+      } catch (err) {
+        this.logger.warn(
+          `[scanner.aggregate_audio_duration] [fail] bookId=${bookId} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - repaired audio duration aggregation failed`,
+        );
+      }
+    });
   }
 
   private async processCandidate(
@@ -1617,6 +1677,7 @@ export class ScannerService implements OnApplicationBootstrap {
 
       const fileCount: ScanCounts = { addedCount: 0, updatedCount: 0, missingCount: 0 };
       let processResult: ProcessedFileResult;
+      const knownDurationSeconds = fileByPath.get(fileStat.absolutePath)?.durationSeconds ?? null;
 
       try {
         processResult = await this.processFile(
@@ -1647,6 +1708,7 @@ export class ScannerService implements OnApplicationBootstrap {
           role,
           absolutePath: fileStat.absolutePath,
           sizeBytes: fileStat.sizeBytes,
+          durationSeconds: knownDurationSeconds,
           isNew: processResult.isNew,
           wasReassigned: processResult.reassigned,
           wasChanged: processResult.changed,
@@ -1684,6 +1746,9 @@ export class ScannerService implements OnApplicationBootstrap {
       metadataSources.some((source) => hasMetadataSourceChanged(source.file)) || (book.primaryFileId === null && winner !== null);
     const audioContentFiles = contentFiles.filter((f) => f.format !== null && isAudioFormat(f.format!));
     const changedAudioFiles = audioContentFiles.filter(hasMetadataSourceChanged);
+    const audioFilesNeedingDuration = audioContentFiles.filter(
+      (file) => hasMetadataSourceChanged(file) || file.durationSeconds === null || file.durationSeconds <= 0,
+    );
     const winnerIsAudio = winner !== null && winner.format !== null && isAudioFormat(winner.format);
 
     // 3a: Extract audio-specific fields (chapters, narrators) from the first audio file if any audio
@@ -1718,25 +1783,22 @@ export class ScannerService implements OnApplicationBootstrap {
       await this.extractFirstAvailableMetadataSource(book.id, metadataSources);
     }
 
-    // 3c: Write per-file duration to bookFiles for every new/reassigned/changed audio file.
-    //     Running this for all new audio files (including the winner) ensures
-    //     aggregateAudioDuration has accurate per-file data for the total.
-    if (changedAudioFiles.length > 0) {
-      await Promise.all(
-        changedAudioFiles.map(async (audioFile) => {
-          try {
-            await this.metadataService.extractAudioFileDuration(book.id, audioFile.absolutePath);
-          } catch (err) {
-            this.logger.warn(
-              `[scanner.extract_audio_duration] [fail] bookId=${book.id} path="${sanitizeLogValue(audioFile.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration extraction failed`,
-            );
-          }
-        }),
-      );
+    // 3c: Write per-file duration for new, changed, or historically unprobed audio files.
+    //     Including the winner ensures aggregateAudioDuration has accurate data for the total.
+    if (audioFilesNeedingDuration.length > 0) {
+      await mapWithConcurrency(audioFilesNeedingDuration, AUDIO_DURATION_PROBE_CONCURRENCY, async (audioFile) => {
+        try {
+          await this.metadataService.extractAudioFileDuration(book.id, audioFile.absolutePath);
+        } catch (err) {
+          this.logger.warn(
+            `[scanner.extract_audio_duration] [fail] bookId=${book.id} path="${sanitizeLogValue(audioFile.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration extraction failed`,
+          );
+        }
+      });
     }
 
     // 3d: Re-aggregate total duration whenever audio files exist and anything changed.
-    if (audioContentFiles.length > 0 && (shouldExtractMetadata || changedAudioFiles.length > 0)) {
+    if (audioContentFiles.length > 0 && (shouldExtractMetadata || audioFilesNeedingDuration.length > 0)) {
       try {
         await this.metadataService.aggregateAudioDuration(book.id);
       } catch (err) {
