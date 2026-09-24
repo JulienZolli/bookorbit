@@ -234,6 +234,77 @@ describe('QbittorrentAdapter', () => {
       expect(status.seed).toMatchObject({ seeding: false, ratio: 0.4, ratioGoal: null, seedingTimeGoalMinutes: null });
     });
 
+    describe('per-file selection', () => {
+      const PACK = {
+        hash: INFO_HASH,
+        state: 'downloading',
+        progress: 0.0005,
+        downloaded: 541_512,
+        size: 67_108_864,
+        completed: 32_768,
+        total_size: 184_193_193_108,
+      };
+
+      it('reports the wanted file, not the pack or the piece that holds it', async () => {
+        const { calls, handlers } = mockFetch();
+        handlers.set('/torrents/info', () => response([PACK]));
+        handlers.set('/torrents/files', () =>
+          response([
+            { index: 0, priority: 0, progress: 0, size: 184_192_747_389 },
+            { index: 1, priority: 1, progress: 0.5, size: 445_719 },
+          ]),
+        );
+
+        const [status] = await adapter.status([INFO_HASH], config());
+
+        expect(calls.find((call) => call.url.includes('/torrents/files'))?.url).toContain(`hash=${INFO_HASH}`);
+        expect(status).toMatchObject({ totalBytes: 445_719, downloadedBytes: 222_860, progressPercent: 50 });
+      });
+
+      it('leaves a whole-torrent grab on the torrent-level figures without listing its files', async () => {
+        const { calls, handlers } = mockFetch();
+        handlers.set('/torrents/info', () =>
+          response([{ hash: INFO_HASH, state: 'downloading', progress: 0.42, downloaded: 420, size: 1000, total_size: 1000 }]),
+        );
+
+        const [status] = await adapter.status([INFO_HASH], config());
+
+        expect(calls.some((call) => call.url.includes('/torrents/files'))).toBe(false);
+        expect(status).toMatchObject({ totalBytes: 1000, downloadedBytes: 420, progressPercent: 42 });
+      });
+
+      it('keeps the torrent-level figures when no wanted file is in the listing', async () => {
+        const { handlers } = mockFetch();
+        handlers.set('/torrents/info', () => response([PACK]));
+        handlers.set('/torrents/files', () => response([{ index: 0, priority: 0, progress: 0, size: 184_192_747_389 }]));
+
+        const [status] = await adapter.status([INFO_HASH], config());
+
+        expect(status).toMatchObject({ totalBytes: 184_193_193_108, downloadedBytes: 541_512 });
+      });
+
+      it('keeps polling when the file listing fails', async () => {
+        const { handlers } = mockFetch();
+        handlers.set('/torrents/info', () => response([PACK]));
+        handlers.set('/torrents/files', () => response('nope', { status: 500 }));
+
+        const [status] = await adapter.status([INFO_HASH], config());
+
+        expect(status).toMatchObject({ totalBytes: 184_193_193_108, downloadedBytes: 541_512 });
+      });
+
+      it('does not probe trackers for a stalled file whose piece has not verified yet but is receiving blocks', async () => {
+        const { calls, handlers } = mockFetch();
+        handlers.set('/torrents/info', () => response([{ ...PACK, state: 'stalledDL' }]));
+        handlers.set('/torrents/files', () => response([{ index: 1, priority: 1, progress: 0, size: 445_719 }]));
+
+        const [status] = await adapter.status([INFO_HASH], config());
+
+        expect(status).toMatchObject({ downloadedBytes: 0, totalBytes: 445_719 });
+        expect(calls.some((call) => call.url.includes('/torrents/trackers'))).toBe(false);
+      });
+    });
+
     it('leaves a hash the client does not know about out of the result', async () => {
       const { handlers } = mockFetch();
       handlers.set('/torrents/info', () => response([]));
