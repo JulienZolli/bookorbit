@@ -1,9 +1,11 @@
 import { BadRequestException } from '@nestjs/common';
 
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type { ResolvedClientConfig } from '../download-client-adapter';
 import { DelugeAdapter } from './deluge.adapter';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
+const TWO_FILE_TORRENT = Buffer.from('d4:infod5:filesld6:lengthi1e4:pathl6:a.epubeed6:lengthi1e4:pathl6:b.epubeee4:name4:packee');
 const SESSION_COOKIE = '_session_id=abc123';
 
 function config(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
@@ -228,6 +230,7 @@ describe('DelugeAdapter', () => {
 
       await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).resolves.toEqual({
         clientKey: INFO_HASH,
+        adopted: true,
       });
     });
 
@@ -473,6 +476,62 @@ describe('DelugeAdapter', () => {
       handlers.set('daemon.info', () => result('1.3.15'));
 
       await expect(adapter.test(config())).resolves.toEqual({ success: true, version: '1.3.15' });
+    });
+  });
+
+  describe('per-file selection', () => {
+    const magnet = `magnet:?xt=urn:btih:${INFO_HASH}`;
+
+    it('refuses a magnet naming one file without adding anything', async () => {
+      const { calls } = mockRpc();
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).rejects.toThrow(
+        'Per-file selection on magnet links needs qBittorrent',
+      );
+      expect(calls.some((call) => call.method.startsWith('core.add'))).toBe(false);
+    });
+
+    it('skips every other file of a .torrent in the add itself', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('core.add_torrent_file', () => result(INFO_HASH));
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
+      });
+
+      const add = calls.find((call) => call.method === 'core.add_torrent_file');
+      expect(add?.params[2]).toEqual({ add_paused: false, file_priorities: [0, 1] });
+    });
+
+    it('refuses an index the .torrent does not have before asking the daemon', async () => {
+      const { calls } = mockRpc();
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 2 }, config())).rejects.toBeInstanceOf(
+        FileIndexOutOfRangeException,
+      );
+      expect(calls.some((call) => call.method === 'core.add_torrent_file')).toBe(false);
+    });
+
+    it('adds the file to a torrent it already holds without skipping the others', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('core.add_torrent_file', () => failure('Torrent already in session'));
+      handlers.set('core.get_torrents_status', () => result({ [INFO_HASH]: { hash: INFO_HASH } }));
+      handlers.set('core.get_torrent_status', () => result({ files: [{}, {}], file_priorities: [4, 0] }));
+
+      await adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config());
+
+      const set = calls.find((call) => call.method === 'core.set_torrent_options');
+      expect(set?.params).toEqual([[INFO_HASH], { file_priorities: [4, 1] }]);
+      expect(calls.find((call) => call.method === 'core.resume_torrent')?.params).toEqual([[INFO_HASH]]);
+    });
+
+    it('adds exactly as before when no file is named', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('core.add_torrent_file', () => result(INFO_HASH));
+
+      await adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH }, config());
+
+      expect(calls.find((call) => call.method === 'core.add_torrent_file')?.params[2]).toEqual({ add_paused: false });
     });
   });
 });

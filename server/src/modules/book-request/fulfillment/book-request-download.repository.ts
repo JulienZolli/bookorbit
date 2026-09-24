@@ -255,13 +255,15 @@ export class BookRequestDownloadRepository {
     downloadId: number,
     clientId: number,
     clientKey: string,
-    data: Pick<NewBookRequestDownloadRow, 'status' | 'progressPercent' | 'downloadedBytes' | 'totalBytes' | 'contentPath'>,
+    data: Pick<NewBookRequestDownloadRow, 'status' | 'progressPercent' | 'downloadedBytes' | 'totalBytes' | 'contentPath' | 'selectedFilePath'>,
   ): Promise<BookRequestDownloadRow | undefined> {
     try {
       return await this.db.transaction(async (tx) => {
         const [download] = await tx
           .update(bookRequestDownloads)
-          .set({ ...data, downloadClientId: clientId, errorMessage: null })
+          // A selection that was still pending when the attempt failed is over: the adopted item is
+          // whatever the operator made of it, and a stale flag would have the next failure remove it.
+          .set({ ...data, downloadClientId: clientId, errorMessage: null, fileSelectionPendingSince: null })
           .where(
             and(eq(bookRequestDownloads.id, downloadId), eq(bookRequestDownloads.clientKey, clientKey), eq(bookRequestDownloads.status, 'failed')),
           )

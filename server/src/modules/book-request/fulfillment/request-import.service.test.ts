@@ -503,6 +503,32 @@ describe('RequestImportService.importDownload', () => {
     expect(harness.dockRepo.createUnit).toHaveBeenCalledWith(expect.objectContaining({ format: 'm4b' }), []);
   });
 
+  /** A shared pack also holds the books of other attempts, which would otherwise ask for a choice. */
+  it('imports only the one file of a pack the attempt selected', async () => {
+    const harness = await makeHarness();
+    const folder = join(harness.bookDockPath, '..', 'downloads', 'omnibus');
+    await makeFile(folder, 'Mort.epub');
+    await makeFile(folder, 'Small Gods.epub');
+
+    await expect(harness.service.importDownload(download(folder, { fileIndex: 1, selectedFilePath: join(folder, 'Small Gods.epub') }))).resolves.toBe(
+      true,
+    );
+
+    expect(harness.fulfillment.holdForReview).not.toHaveBeenCalled();
+    expect(harness.dockRepo.createUnit).toHaveBeenCalledTimes(1);
+    expect(harness.dockRepo.createUnit).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'request-7-Small Gods.epub' }), []);
+  });
+
+  it('refuses to import the folder of a one-file attempt that never recorded its file', async () => {
+    const harness = await makeHarness();
+    const folder = join(harness.bookDockPath, '..', 'downloads', 'omnibus');
+    await makeFile(folder, 'Mort.epub');
+
+    await expect(harness.service.importDownload(download(folder, { fileIndex: 1, selectedFilePath: null }))).resolves.toBe(false);
+
+    expect(harness.dockRepo.createUnit).not.toHaveBeenCalled();
+  });
+
   describe('importChosenUnit', () => {
     async function heldHarness() {
       const harness = await makeHarness();

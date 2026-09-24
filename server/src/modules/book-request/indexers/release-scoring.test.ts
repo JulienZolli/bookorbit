@@ -302,6 +302,13 @@ describe('scoreRelease', () => {
     expect(pointsFor(scored, 'likelySeveralBooks')).toBeLessThan(0);
   });
 
+  /** A release naming one file of the pack downloads that file alone, whatever the pack holds. */
+  it('does not penalise a release that names one file of a large pack', () => {
+    const scored = scoreRelease(release({ fileCount: 30, fileIndex: 4 }), request());
+
+    expect(pointsFor(scored, 'likelySeveralBooks')).toBeUndefined();
+  });
+
   /**
    * Three formats plus a cover and an `.opf` is five files and one perfectly ordinary book. It
    * used to lose twenty points for that, which was enough to drop it under an 80 auto-grab floor.

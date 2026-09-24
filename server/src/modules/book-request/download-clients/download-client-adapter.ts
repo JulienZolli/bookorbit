@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import type { DownloadClientTestResult, DownloadClientType, DownloadDelivery } from '@bookorbit/types';
 
 /** A client row with its credentials already decrypted. Never logged, never returned over HTTP. */
@@ -34,6 +35,44 @@ export interface GrabPayload {
    */
   seedRatioGoal?: number;
   seedTimeMinutes?: number;
+  /**
+   * The one file of a multi-file torrent to download, 0-based in `info.files` order. Every other
+   * file stays unwanted. Only ever set when the adapter's `fileSelection` covers this delivery.
+   */
+  fileIndex?: number;
+}
+
+export interface AddResult {
+  clientKey: string;
+  /**
+   * The torrent was added without its file list, stopped once its metadata arrives, and still has
+   * `fileIndex` to apply. The poll loop finishes the selection through `selectFile`.
+   */
+  fileSelectionPending?: boolean;
+  /**
+   * The client already held this torrent, so it is not ours to take back: a failure after the add
+   * must leave it where it was rather than remove somebody else's download.
+   */
+  adopted?: boolean;
+}
+
+/** Which deliveries an adapter can restrict to one file without transferring any other. */
+export interface FileSelectionSupport {
+  magnet: boolean;
+  torrentFile: boolean;
+}
+
+export const NO_FILE_SELECTION: FileSelectionSupport = { magnet: false, torrentFile: false };
+
+/**
+ * The torrent has no file at the requested index. Its own class because it is the one selection
+ * failure that is an answer about the release: anything else is the client being unreachable,
+ * and the next poll asks again.
+ */
+export class FileIndexOutOfRangeException extends BadRequestException {
+  constructor(fileIndex: number, fileCount: number) {
+    super(`The release names file ${fileIndex}, but the torrent only has ${fileCount} file${fileCount === 1 ? '' : 's'}`);
+  }
 }
 
 export type DownloadState = 'queued' | 'downloading' | 'completed' | 'failed' | 'unknown';
@@ -89,8 +128,21 @@ export interface DownloadClientAdapter {
   readonly label: string;
   /** What this client can be handed, which is what decides whether a given grab may go to it. */
   readonly delivers: DownloadDelivery;
+  /** Checked before anything is added: a grab naming one file must never become the whole pack. */
+  readonly fileSelection: FileSelectionSupport;
 
-  add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientKey: string }>;
+  add(release: GrabPayload, config: ResolvedClientConfig): Promise<AddResult>;
+  /**
+   * Finishes a selection `add` left pending: wants `fileIndex` only, unwants every other file and
+   * starts the torrent. `pending` while the client has no file list yet; throws
+   * `FileIndexOutOfRangeException` when the torrent has no such file.
+   */
+  selectFile?(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<'pending' | 'selected'>;
+  /**
+   * Where the client wrote file `fileIndex` of a torrent, in its own filesystem namespace like
+   * `contentPath`. Null when the client has no such file, or no longer has the torrent.
+   */
+  filePath?(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<string | null>;
   /**
    * Batched deliberately: one poll tick is one HTTP call per client however many downloads are
    * in flight. A key the client no longer knows about is simply absent from the result.

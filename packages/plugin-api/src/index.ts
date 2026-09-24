@@ -126,6 +126,16 @@ export interface PluginReleaseCandidate {
   fileCount?: number;
   seedRatioGoal?: number;
   seedTimeMinutes?: number;
+  /**
+   * The one file of a multi-file torrent this release is, 0-based in the torrent's `info.files`
+   * order (BEP 3). BookOrbit then downloads that file alone and leaves every other one unwanted.
+   * Only valid with `magnet` or `infoHash`: a release carrying it without either is dropped.
+   *
+   * Emit it disabled by default. A BookOrbit that predates this field ignores it and downloads the
+   * whole pack. Only one download per pack per client can be active at a time, so two books from
+   * the same pack are fetched one after the other, not side by side.
+   */
+  fileIndex?: number;
 }
 
 /** One file, for a source that serves the file itself rather than a torrent. */

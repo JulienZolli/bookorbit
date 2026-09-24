@@ -102,7 +102,7 @@ export class PluginIndexerAdapter implements IndexerAdapter {
       // `TimeoutError` is what rejects, which `guard` already reports as an indexer timeout.
       withDeadline(this.plugin.search(toPluginQuery(query), toPluginConfig(config), this.host(config, signal), signal), signal),
     );
-    return sanitizeCandidates(found, config);
+    return sanitizeCandidates(found, config, this.logger, this.type);
   }
 
   async test(config: ResolvedIndexerConfig) {
@@ -282,24 +282,43 @@ function deadlineFor(deadline?: AbortSignal): AbortSignal {
  * "NaN KB". None of that is a plugin bug worth propagating, so a row that cannot be read is
  * dropped here and its source keeps the rest of its results.
  */
-function sanitizeCandidates(found: readonly PluginReleaseCandidate[], config: ResolvedIndexerConfig): ReleaseCandidate[] {
+function sanitizeCandidates(
+  found: readonly PluginReleaseCandidate[],
+  config: ResolvedIndexerConfig,
+  logger: Logger,
+  pluginId: string,
+): ReleaseCandidate[] {
   if (!Array.isArray(found)) {
     throw new IndexerSearchException('error', `${config.name} returned something that is not a list of releases`);
   }
 
   const releases: ReleaseCandidate[] = [];
   for (const raw of found.slice(0, MAX_PLUGIN_RELEASES)) {
-    const candidate = sanitizeCandidate(raw, config.id);
+    const candidate = sanitizeCandidate(raw, config.id, logger, pluginId);
     if (candidate) releases.push(candidate);
   }
   return releases;
 }
 
 /** Null for a row with no usable identity: without a title and a guid there is nothing to grab. */
-function sanitizeCandidate(raw: PluginReleaseCandidate, indexerId: number): ReleaseCandidate | null {
+function sanitizeCandidate(raw: PluginReleaseCandidate, indexerId: number, logger: Logger, pluginId: string): ReleaseCandidate | null {
   const title = text(raw?.title, MAX_PLUGIN_TEXT_LENGTH);
   const guid = text(raw?.guid, MAX_PLUGIN_URL_LENGTH);
   if (!title || !guid) return null;
+
+  // A file index is a promise that only one file of a pack is downloaded. One that cannot be
+  // honoured drops the release rather than the index: without it the row is the whole pack.
+  const fileIndex = raw.fileIndex;
+  if (fileIndex !== undefined) {
+    const reason = !Number.isSafeInteger(fileIndex) || fileIndex < 0 ? 'fileIndex is not a non-negative integer' : null;
+    const unanchored = !text(raw.magnet, MAX_PLUGIN_URL_LENGTH) && !text(raw.infoHash, MAX_PLUGIN_TEXT_LENGTH);
+    if (reason || unanchored) {
+      logger.warn(
+        `[plugin.release] [reject] pluginId=${sanitizeLogValue(pluginId)} indexerId=${indexerId} guid="${sanitizeLogValue(guid)}" - ${reason ?? 'fileIndex without infoHash/magnet'}`,
+      );
+      return null;
+    }
+  }
 
   return {
     indexerId,
@@ -327,6 +346,7 @@ function sanitizeCandidate(raw: PluginReleaseCandidate, indexerId: number): Rele
     ...optionalNormalizedNumber('seedRatioGoal', normalizeProviderSeedRatio(raw.seedRatioGoal)),
     ...optionalNormalizedNumber('seedTimeMinutes', normalizeProviderSeedTimeMinutes(raw.seedTimeMinutes)),
     ...(raw.audio && typeof raw.audio === 'object' ? { audio: sanitizeAudio(raw.audio) } : {}),
+    ...(fileIndex !== undefined ? { fileIndex } : {}),
   };
 }
 

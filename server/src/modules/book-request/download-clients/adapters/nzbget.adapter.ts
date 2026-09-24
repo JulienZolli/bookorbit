@@ -11,6 +11,7 @@ import type {
   OwnedDownloadClientInventory,
   ResolvedClientConfig,
 } from '../download-client-adapter';
+import { NO_FILE_SELECTION } from '../download-client-adapter';
 import { basicAuthHeader, endpointUrl, fetchClient, readClientJson, throwForClientServerError } from './client-http.utils';
 
 const LABEL = 'NZBGet';
@@ -49,6 +50,7 @@ export class NzbgetAdapter implements DownloadClientAdapter {
   readonly type = 'nzbget' as const;
   readonly label = LABEL;
   readonly delivers = 'usenet' as const;
+  readonly fileSelection = NO_FILE_SELECTION;
 
   private readonly logger = new Logger(NzbgetAdapter.name);
 

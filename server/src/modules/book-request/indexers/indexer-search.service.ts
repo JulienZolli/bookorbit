@@ -464,7 +464,8 @@ function candidateKey(candidate: ReleaseCandidate): string {
 function sameRelease(candidate: ReleaseCandidate, stale: ReleaseCandidate): boolean {
   const candidateHash = candidate.infoHash?.toLowerCase();
   const staleHash = stale.infoHash?.toLowerCase();
-  if (candidateHash && staleHash) return candidateHash === staleHash;
+  // One pack can carry several releases, one per file, all under the same infohash.
+  if (candidateHash && staleHash) return candidateHash === staleHash && candidate.fileIndex === stale.fileIndex;
   return candidate.guid === stale.guid;
 }
 
