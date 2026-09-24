@@ -196,9 +196,18 @@ export class RequestImportService implements OnApplicationBootstrap {
     chosenPrimaryPath?: string,
   ): Promise<void> {
     const started = Date.now();
-    if (!download.contentPath) throw new Error('The download did not report where the finished files are');
+    // One file of a pack: that file is the release, and nothing beside it is read. The folder around
+    // it holds the books of other attempts on a shared torrent and, on Transmission, the edges of
+    // neighbouring files written with the pieces they share.
+    const oneFile = typeof download.fileIndex === 'number';
+    const contentPath = oneFile ? download.selectedFilePath : download.contentPath;
+    if (!contentPath) {
+      throw new Error(
+        oneFile ? 'The download did not record where its one file was written' : 'The download did not report where the finished files are',
+      );
+    }
 
-    const { localPath, containmentRoot } = await this.resolveLocalPath(download, download.contentPath);
+    const { localPath, containmentRoot } = await this.resolveLocalPath(download, contentPath);
     const { root, plan, containmentRoot: contentContainmentRoot } = await this.resolveReleasePlan(localPath, containmentRoot, extractionDirectory);
 
     // Part of the release was never read, so what looks like a whole book may be the half of one

@@ -3,7 +3,10 @@ import type { DownloadClientTestResult } from '@bookorbit/types';
 
 import { ensureSafeUrl } from '../../../../common/utils/ssrf.utils';
 import { sanitizeLogValue } from '../../../../common/utils/log-sanitize.utils';
+import { torrentMetadataFromFile } from '../../fulfillment/torrent.utils';
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type {
+  AddResult,
   DownloadClientAdapter,
   DownloadState,
   DownloadStatus,
@@ -89,15 +92,25 @@ export class TransmissionAdapter implements DownloadClientAdapter {
   readonly type = 'transmission' as const;
   readonly label = LABEL;
   readonly delivers = 'torrent' as const;
+  /**
+   * Only with a .torrent. Transmission has no way to stop a magnet once its metadata arrives, and
+   * a stopped magnet never fetches it, so a magnet would download pieces of the whole pack before
+   * any file could be unwanted.
+   */
+  readonly fileSelection = { magnet: false, torrentFile: true };
 
   private readonly logger = new Logger(TransmissionAdapter.name);
   /** The CSRF token the daemon issued, per client row. Not a login: it survives no restart. */
   private readonly sessions = new Map<number, string>();
 
-  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientKey: string }> {
+  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<AddResult> {
     const args: Record<string, unknown> = { paused: false };
+    if (release.fileIndex !== undefined && !release.torrentFile) {
+      throw new BadRequestException('Per-file selection on magnet links needs qBittorrent');
+    }
     if (release.torrentFile) {
       args.metainfo = release.torrentFile.toString('base64');
+      if (release.fileIndex !== undefined) Object.assign(args, onlyFile(release.torrentFile, release.fileIndex));
     } else if (release.magnet) {
       args.filename = release.magnet;
     } else {
@@ -118,6 +131,8 @@ export class TransmissionAdapter implements DownloadClientAdapter {
 
     if (duplicate) {
       this.logger.log(`[download_client.adopt] [end] clientId=${config.id} hash=${hash} - the client already held this torrent`);
+      // The wanted-lists on the add only apply to a torrent the daemon did not have yet.
+      if (release.fileIndex !== undefined) await this.wantFileNow(hash, release.fileIndex, config);
     }
     // The poll loop asks about the hash the grab was recorded under, so a client that named a
     // different one would leave the download sitting in `queued` until the watchdog gave up.
@@ -128,7 +143,38 @@ export class TransmissionAdapter implements DownloadClientAdapter {
     }
 
     await this.applySeedGoal(hash, release, config);
-    return { clientKey: hash };
+    return { clientKey: hash, ...(duplicate ? { adopted: true } : {}) };
+  }
+
+  async filePath(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<string | null> {
+    const result = await this.rpc<{ torrents?: Array<{ downloadDir?: string; files?: Array<{ name?: unknown }> }> }>(config, 'torrent-get', {
+      ids: [clientKey.toLowerCase()],
+      fields: ['downloadDir', 'files'],
+    });
+    const entry = result.torrents?.[0];
+    const dir = entry?.downloadDir?.trim();
+    const name = entry?.files?.[fileIndex]?.name;
+    return dir && typeof name === 'string' && name ? `${dir.replace(/\/+$/, '')}/${name}` : null;
+  }
+
+  /**
+   * The adopted torrent is somebody else's download too, typically a finished one still seeding,
+   * so this only ever adds a file: unwanting the rest would take away what the other attempt
+   * imported or is still fetching. Removing either attempt with its data still removes the files
+   * of both, which is the price of sharing one torrent.
+   */
+  private async wantFileNow(hash: string, fileIndex: number, config: ResolvedClientConfig): Promise<void> {
+    const result = await this.rpc<{ torrents?: Array<{ files?: unknown[] }> }>(config, 'torrent-get', { ids: [hash], fields: ['files'] });
+    const count = result.torrents?.[0]?.files?.length ?? 0;
+    if (count === 0) {
+      throw new BadRequestException('Transmission already holds this torrent but has no file list for it yet, so one file cannot be selected');
+    }
+    if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+    await this.rpc(config, 'torrent-set', { ids: [hash], 'files-wanted': [fileIndex] });
+    await this.rpc(config, 'torrent-start', { ids: [hash] });
+    this.logger.log(
+      `[download_client.select_file] [end] clientId=${config.id} hash=${hash} fileIndex=${fileIndex} files=${count} adopted=true - added one file to a torrent the client already held`,
+    );
   }
 
   /**
@@ -280,6 +326,14 @@ export class TransmissionAdapter implements DownloadClientAdapter {
  * An operator may paste the daemon's root or the RPC endpoint itself, and appending the path to a
  * URL that already carries it produces a 404 that reads like the client is down.
  */
+/** The wanted-lists for `torrent-add`, which Transmission applies before the torrent first starts. */
+function onlyFile(torrentFile: Buffer, fileIndex: number): Record<string, number[]> {
+  const count = torrentMetadataFromFile(torrentFile).files.length;
+  if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+  const unwanted = Array.from({ length: count }, (_, index) => index).filter((index) => index !== fileIndex);
+  return { 'files-wanted': [fileIndex], ...(unwanted.length > 0 ? { 'files-unwanted': unwanted } : {}) };
+}
+
 function rpcPath(base: URL): string {
   return /\/transmission\/rpc\/?$/.test(base.pathname) ? '' : RPC_PATH;
 }

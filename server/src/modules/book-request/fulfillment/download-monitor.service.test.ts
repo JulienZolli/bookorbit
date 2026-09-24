@@ -1,6 +1,7 @@
 import { ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES } from '@bookorbit/types';
 
 import type { BookRequestDownloadRow } from '../../../db/schema';
+import { FileIndexOutOfRangeException } from '../download-clients/download-client-adapter';
 import type { DownloadStatus } from '../download-clients/download-client-adapter';
 import { DownloadMonitorService } from './download-monitor.service';
 
@@ -20,6 +21,9 @@ function row(overrides: Partial<BookRequestDownloadRow> = {}): BookRequestDownlo
     contentPath: null,
     bookDockFileId: null,
     completedAt: null,
+    fileIndex: null,
+    fileSelectionPendingSince: null,
+    selectedFilePath: null,
     grabbedAt: new Date(Date.now() - 10 * 60 * 1000),
     createdAt: new Date(Date.now() - 10 * 60 * 1000),
     ...overrides,
@@ -544,6 +548,139 @@ describe('DownloadMonitorService.tick', () => {
       await polled(service);
 
       expect(fulfillment.failDownload).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('DownloadMonitorService per-file selection', () => {
+  const waiting = (sinceMs: number) =>
+    row({ status: 'queued', downloadedBytes: 0, progressPercent: 0, fileIndex: 1, fileSelectionPendingSince: new Date(Date.now() - sinceMs) });
+  const stopped = status({ state: 'queued', downloadedBytes: 0, progressPercent: 0 });
+
+  function withSelection(sinceMs: number, selectFile: () => Promise<'pending' | 'selected'>, statuses = [stopped]) {
+    const setup = makeService({ active: [waiting(sinceMs)], statuses });
+    Object.assign(setup.adapter, { label: 'qBittorrent', selectFile: vi.fn(selectFile), remove: vi.fn().mockResolvedValue(undefined) });
+    return setup as typeof setup & { adapter: { selectFile: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> } };
+  }
+
+  it('clears the pending selection once the client has selected the file, keeping the index', async () => {
+    const { service, adapter, downloads, fulfillment } = withSelection(30_000, () => Promise.resolve('selected'));
+
+    await polled(service);
+
+    expect(adapter.selectFile).toHaveBeenCalledWith(HASH_A, 1, { id: 4, adapterType: 'qbittorrent' });
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES, { fileSelectionPendingSince: null });
+    expect(fulfillment.failDownload).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  /** The torrent was just started for its one file; a failure now is an ordinary one. */
+  it('reports a failure in the same tick as selected, not as still pending', async () => {
+    const { service, fulfillment } = withSelection(30_000, () => Promise.resolve('selected'), [
+      status({ state: 'failed', errorMessage: 'disk full' }),
+    ]);
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).toHaveBeenCalledWith(expect.objectContaining({ id: 11, fileSelectionPendingSince: null }), 'disk full');
+  });
+
+  it('keeps waiting, reported as queued, while the metadata is still on its way', async () => {
+    const { service, adapter, downloads, fulfillment } = withSelection(9 * 60_000, () => Promise.resolve('pending'));
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES, expect.objectContaining({ status: 'queued' }));
+  });
+
+  /** Stopped on purpose, with nothing downloaded: the tracker rule would read it as refused. */
+  it('does not fail a pending selection on a tracker error, leaving it to its own limit', async () => {
+    const { service, fulfillment } = withSelection(9 * 60_000, () => Promise.resolve('pending'), [
+      status({ state: 'queued', downloadedBytes: 0, progressPercent: 0, trackerError: 'unregistered torrent' }),
+    ]);
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).not.toHaveBeenCalled();
+  });
+
+  it('fails the attempt once the metadata is ten minutes late, leaving the removal to failDownload', async () => {
+    const { service, adapter, fulfillment } = withSelection(10 * 60_000 + 1, () => Promise.resolve('pending'));
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11, fileSelectionPendingSince: expect.any(Date) }),
+      expect.stringContaining('did not arrive within 10 minutes'),
+    );
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it('fails the attempt when the index is out of range, never keeping the pack', async () => {
+    const { service, fulfillment, downloads } = withSelection(30_000, () => Promise.reject(new FileIndexOutOfRangeException(1, 1)));
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 11, fileSelectionPendingSince: expect.any(Date) }),
+      'The release names file 1, but the torrent only has 1 file',
+    );
+    expect(downloads.updateIf).not.toHaveBeenCalled();
+  });
+
+  it('asks again on the next poll when the client could not be reached', async () => {
+    const { service, adapter, fulfillment } = withSelection(30_000, () => Promise.reject(new Error('socket hang up')));
+
+    await polled(service);
+
+    expect(fulfillment.failDownload).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  describe('on completion', () => {
+    const selected = row({ fileIndex: 1 });
+    const done = status({ state: 'completed', progressPercent: 100 });
+
+    function completing(filePath: () => Promise<string | null>) {
+      const setup = makeService({ active: [selected], statuses: [done] });
+      Object.assign(setup.adapter, { filePath: vi.fn(filePath) });
+      return setup as typeof setup & { adapter: { filePath: ReturnType<typeof vi.fn> } };
+    }
+
+    it('records where the one file was written before the import is queued', async () => {
+      const { service, adapter, downloads, imports } = completing(() => Promise.resolve('/downloads/Pack/Book 2.epub'));
+
+      await polled(service);
+      await importQueue(service).waitForIdle();
+
+      expect(adapter.filePath).toHaveBeenCalledWith(HASH_A, 1, { id: 4, adapterType: 'qbittorrent' });
+      expect(downloads.updateIf).toHaveBeenCalledWith(11, ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES, {
+        selectedFilePath: '/downloads/Pack/Book 2.epub',
+      });
+      expect(imports.importDownload).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds the completion for the next poll when the client cannot be read', async () => {
+      const { service, downloads, imports, fulfillment } = completing(() => Promise.reject(new Error('socket hang up')));
+
+      await polled(service);
+      await importQueue(service).waitForIdle();
+
+      expect(downloads.updateIf).not.toHaveBeenCalled();
+      expect(imports.importDownload).not.toHaveBeenCalled();
+      expect(fulfillment.failDownload).not.toHaveBeenCalled();
+    });
+
+    it('fails the attempt rather than importing the folder when the client has no such file', async () => {
+      const { service, imports, fulfillment } = completing(() => Promise.resolve(null));
+
+      await polled(service);
+      await importQueue(service).waitForIdle();
+
+      expect(fulfillment.failDownload).toHaveBeenCalledWith(expect.objectContaining({ id: 11 }), 'The download client has no file 1 in this torrent');
+      expect(imports.importDownload).not.toHaveBeenCalled();
     });
   });
 });

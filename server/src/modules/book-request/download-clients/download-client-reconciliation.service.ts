@@ -73,7 +73,8 @@ export class DownloadClientReconciliationService {
   async adopt(clientId: number, clientKey: string, downloadId: number): Promise<DownloadClientReconciliationAttempt> {
     const key = normalizeKey(clientKey);
     const config = await this.clients.resolveConfig(clientId);
-    const inventory = await this.registry.require(config.adapterType).listOwned(config);
+    const adapter = this.registry.require(config.adapterType);
+    const inventory = await adapter.listOwned(config);
     if (!inventory.supported) throw reconciliationError('DOWNLOAD_CLIENT_RECONCILIATION_UNSUPPORTED', 'This client cannot enumerate owned downloads');
 
     const item = inventory.items.find((entry) => entry.clientKey.toLowerCase() === key);
@@ -88,12 +89,27 @@ export class DownloadClientReconciliationService {
     }
 
     const status = adoptionStatus(item.state);
+    // One file of a pack is imported from where the client wrote that file, never from the folder
+    // around it. Read now rather than left to the poll loop: an item adopted as completed goes
+    // straight to the import, which has no client to ask.
+    let selectedFilePath: string | null = null;
+    const fileIndex = candidate.download.fileIndex;
+    if (typeof fileIndex === 'number') {
+      selectedFilePath = adapter.filePath ? await adapter.filePath(key, fileIndex, config) : null;
+      if (!selectedFilePath) {
+        throw reconciliationError(
+          'DOWNLOAD_CLIENT_RECONCILIATION_NOT_ADOPTABLE',
+          `That client item has no file ${fileIndex} for this attempt to import`,
+        );
+      }
+    }
     const adopted = await this.downloads.adoptFailedAttempt(downloadId, clientId, key, {
       status,
       progressPercent: item.progressPercent,
       downloadedBytes: item.downloadedBytes,
       totalBytes: item.totalBytes,
       contentPath: item.contentPath,
+      selectedFilePath,
     });
     if (!adopted) throw new ConflictException('That request changed before the client item could be adopted');
 

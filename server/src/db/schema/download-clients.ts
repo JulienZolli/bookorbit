@@ -132,6 +132,22 @@ export const bookRequestDownloads = pgTable(
      */
     releaseUnits: jsonb('release_units').$type<ReleaseUnitChoice[]>(),
 
+    /**
+     * The one file of a multi-file torrent this attempt downloads, 0-based in `info.files` order.
+     * Kept for the life of the attempt: the import reads that file and nothing else beside it.
+     */
+    fileIndex: integer('file_index'),
+    /**
+     * Set while a magnet added for `fileIndex` waits, stopped, for its metadata. The poll loop
+     * selects the file and starts the torrent, or fails the attempt once this is ten minutes old.
+     */
+    fileSelectionPendingSince: timestamp('file_selection_pending_since', { withTimezone: true }),
+    /**
+     * Where the client wrote `fileIndex`, in the client's own filesystem like `contentPath`. Read
+     * off the client once the download completes, since only then is the file where it stays.
+     */
+    selectedFilePath: text('selected_file_path'),
+
     errorMessage: text('error_message'),
     grabbedAt: timestamp('grabbed_at', { withTimezone: true }),
     /** Last tick that saw bytes move. The stall watchdog reads this, not `updatedAt`. */

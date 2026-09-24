@@ -1152,6 +1152,53 @@ describe('RequestFulfillmentService.failDownload', () => {
     expect(events.emit).not.toHaveBeenCalled();
   });
 
+  /** Failing it can start a retry, and a retry of the same pack would adopt the torrent whole. */
+  it('removes a torrent still waiting on its file selection before failing the attempt', async () => {
+    const { service, downloads, registry } = makeService();
+    const order: string[] = [];
+    const adapter = { remove: vi.fn(() => (order.push('remove'), Promise.resolve())) };
+    registry.require.mockReturnValue(adapter);
+    downloads.updateIf.mockImplementation(() => (order.push('fail'), Promise.resolve(undefined)));
+
+    await service.failDownload(
+      { id: 11, requestId: 7, downloadClientId: 5, clientKey: INFO_HASH, fileSelectionPendingSince: new Date() } as BookRequestDownloadRow,
+      'stalled',
+    );
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: true });
+    expect(order).toEqual(['remove', 'fail']);
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.anything(), expect.objectContaining({ fileSelectionPendingSince: null }));
+  });
+
+  /**
+   * The torrent is still there, so the flag stays for the adoption to reset. Cleared anyway, it
+   * would claim a selection that never finished was done.
+   */
+  it('keeps the pending flag when the unselected torrent could not be removed', async () => {
+    const { service, downloads, registry } = makeService();
+    registry.require.mockReturnValue({ remove: vi.fn().mockRejectedValue(new Error('socket hang up')) });
+
+    await service.failDownload(
+      { id: 11, requestId: 7, downloadClientId: 5, clientKey: INFO_HASH, fileSelectionPendingSince: new Date() } as BookRequestDownloadRow,
+      'stalled',
+    );
+
+    expect(downloads.updateIf).toHaveBeenCalledWith(11, expect.anything(), expect.not.objectContaining({ fileSelectionPendingSince: null }));
+  });
+
+  it('leaves the torrent of an attempt whose selection is done', async () => {
+    const { service, registry } = makeService();
+    const adapter = { remove: vi.fn() };
+    registry.require.mockReturnValue(adapter);
+
+    await service.failDownload(
+      { id: 11, requestId: 7, downloadClientId: 5, clientKey: INFO_HASH, fileIndex: 1, fileSelectionPendingSince: null } as BookRequestDownloadRow,
+      'stalled',
+    );
+
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
   /** An attempt that already settled keeps the reason it settled for, which is the useful one. */
   it('does not rewrite an attempt that settled between the read and the write', async () => {
     const { service, downloads, requests } = makeService();
@@ -1160,5 +1207,108 @@ describe('RequestFulfillmentService.failDownload', () => {
     await service.failDownload({ id: 11, requestId: 7 } as BookRequestDownloadRow, 'stalled');
 
     expect(requests.updateIf).not.toHaveBeenCalled();
+  });
+});
+
+describe('RequestFulfillmentService.grab of one file of a pack', () => {
+  const PACK_MAGNET = `magnet:?xt=urn:btih:${INFO_HASH}`;
+  const PACK = {
+    indexerId: 9,
+    guid: 'pack-2',
+    title: 'Herbert omnibus',
+    magnet: PACK_MAGNET,
+    sizeBytes: 9_000_000,
+    seeders: 5,
+    leechers: 0,
+    fileIndex: 1,
+  };
+  const QBIT = { add: vi.fn(), fileSelection: { magnet: true, torrentFile: true } };
+
+  it('hands the index to a client that can select on a magnet and records the pending selection', async () => {
+    const { service, downloads, registry } = makeService({ releases: { find: vi.fn().mockReturnValue(PACK) } });
+    const adapter = { ...QBIT, add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH, fileSelectionPending: true }) };
+    registry.require.mockReturnValue(adapter);
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user());
+
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ magnet: PACK_MAGNET, fileIndex: 1 }), expect.anything());
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ fileIndex: 1 }));
+    expect(downloads.update).toHaveBeenCalledWith(expect.any(Number), { fileSelectionPendingSince: expect.any(Date) });
+  });
+
+  it('removes a torrent it added itself when recording the pending selection fails', async () => {
+    const { service, downloads, registry } = makeService({ releases: { find: vi.fn().mockReturnValue(PACK) } });
+    const adapter = {
+      ...QBIT,
+      add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH, fileSelectionPending: true }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    registry.require.mockReturnValue(adapter);
+    downloads.update.mockRejectedValueOnce(new Error('connection terminated'));
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user())).rejects.toThrow('connection terminated');
+
+    expect(adapter.remove).toHaveBeenCalledWith(INFO_HASH, expect.anything(), { deleteFiles: true });
+  });
+
+  it('never removes an adopted torrent when a step after the add fails', async () => {
+    const { service, downloads, registry } = makeService({ releases: { find: vi.fn().mockReturnValue(PACK) } });
+    const adapter = {
+      ...QBIT,
+      add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH, fileSelectionPending: true, adopted: true }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    registry.require.mockReturnValue(adapter);
+    downloads.update.mockRejectedValueOnce(new Error('connection terminated'));
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user())).rejects.toThrow('connection terminated');
+
+    expect(adapter.remove).not.toHaveBeenCalled();
+  });
+
+  it('refuses a client that cannot select on a magnet before recording or adding anything', async () => {
+    const { service, downloads, registry } = makeService({
+      releases: { find: vi.fn().mockReturnValue(PACK) },
+      clients: {
+        findOne: vi.fn().mockResolvedValue({ id: 5, name: 'transmission', adapterType: 'transmission', enabled: true, pathMappings: [{ id: 1 }] }),
+        findPreferredEnabled: vi.fn().mockResolvedValue({ id: 5 }),
+      },
+    });
+    const adapter = { add: vi.fn(), fileSelection: { magnet: false, torrentFile: true } };
+    registry.require.mockReturnValue(adapter);
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user())).rejects.toMatchObject({
+      response: { errorCode: 'GRAB_CLIENT_REFUSED', message: expect.stringContaining('Per-file selection on magnet links needs qBittorrent') },
+    });
+    expect(downloads.create).not.toHaveBeenCalled();
+    expect(adapter.add).not.toHaveBeenCalled();
+  });
+
+  it('refuses an index the fetched .torrent does not have, rather than grabbing the pack', async () => {
+    const { service, downloads, registry } = makeService({
+      releases: { find: vi.fn().mockReturnValue({ ...PACK, magnet: undefined, downloadUrl: 'https://tracker.example.com/pack', fileIndex: 5 }) },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(multiFileTorrent(['a.epub', 'b.epub'])) },
+    });
+    registry.require.mockReturnValue({ ...QBIT, add: vi.fn() });
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user())).rejects.toMatchObject({
+      response: { errorCode: 'GRAB_RELEASE_REFUSED' },
+    });
+    expect(downloads.create).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }));
+  });
+
+  it('sizes and inspects a .torrent grab by its one file', async () => {
+    const { service, downloads, registry } = makeService({
+      releases: { find: vi.fn().mockReturnValue({ ...PACK, magnet: undefined, downloadUrl: 'https://tracker.example.com/pack' }) },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(multiFileTorrent(['a.epub', 'b.epub'])) },
+    });
+    const adapter = { ...QBIT, add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
+    registry.require.mockReturnValue(adapter);
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'pack-2' }, user());
+
+    expect(adapter.add).toHaveBeenCalledWith(expect.objectContaining({ fileIndex: 1, torrentFile: expect.any(Buffer) }), expect.anything());
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ source: 'torrent_file', releaseSizeBytes: 1 }));
+    expect(downloads.update).not.toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({ fileSelectionPendingSince: expect.any(Date) }));
   });
 });

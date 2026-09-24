@@ -1,10 +1,12 @@
 import { Test } from '@nestjs/testing';
 import { BadRequestException, Logger } from '@nestjs/common';
 
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type { ResolvedClientConfig } from '../download-client-adapter';
 import { QbittorrentAdapter } from './qbittorrent.adapter';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
+const TWO_FILE_TORRENT = Buffer.from('d4:infod5:filesld6:lengthi1e4:pathl6:a.epubeed6:lengthi1e4:pathl6:b.epubeee4:name4:packee');
 
 function config(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
   return {
@@ -143,6 +145,7 @@ describe('QbittorrentAdapter', () => {
 
       await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).resolves.toEqual({
         clientKey: INFO_HASH,
+        adopted: true,
       });
     });
 
@@ -408,6 +411,7 @@ describe('QbittorrentAdapter', () => {
       handlers.set('/torrents/add', () => response(status === 409 ? 'Conflict' : 'Fails.', { status }));
       expect(await adapter.add({ clientKey: INFO_HASH, magnet: `magnet:?xt=urn:btih:${INFO_HASH}&xt=urn:btmh:1220${V2}` }, config())).toEqual({
         clientKey: INFO_HASH,
+        adopted: true,
       });
     });
 
@@ -745,6 +749,191 @@ describe('QbittorrentAdapter', () => {
       await adapter.status(hashes, config());
 
       expect(calls.filter((call) => call.url.includes('/torrents/trackers'))).toHaveLength(20);
+    });
+  });
+
+  describe('per-file selection', () => {
+    const magnet = `magnet:?xt=urn:btih:${INFO_HASH}`;
+    const form = (calls: Array<{ url: string; init: RequestInit }>, fragment: string) =>
+      calls.find((call) => call.url.includes(fragment))?.init.body as FormData | URLSearchParams | undefined;
+    const bodies = (calls: Array<{ url: string; init: RequestInit }>, fragment: string) =>
+      calls.filter((call) => call.url.includes(fragment)).map((call) => Object.fromEntries(call.init.body as URLSearchParams));
+
+    it('adds a magnet that stops on its metadata and leaves the selection to the poll loop', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.8.18'));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
+        fileSelectionPending: true,
+      });
+
+      const add = form(calls, 'torrents/add') as FormData;
+      expect(add.get('stopCondition')).toBe('MetadataReceived');
+      expect(add.get('paused')).toBe('false');
+      expect(add.get('stopped')).toBe('false');
+      expect(calls.some((call) => call.url.includes('torrents/filePrio'))).toBe(false);
+    });
+
+    it('refuses before adding anything when the client predates stopCondition', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.8.5'));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).rejects.toThrow(
+        'Per-file selection needs qBittorrent >= 4.5',
+      );
+      expect(calls.some((call) => call.url.includes('torrents/add'))).toBe(false);
+    });
+
+    it('keeps only the named file once the metadata is in, then starts the torrent', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'stoppedDL' }]));
+      handlers.set('torrents/files', () => response([{ name: 'pack/a.epub' }, { name: 'pack/b.epub' }]));
+
+      await expect(adapter.selectFile(INFO_HASH, 1, config())).resolves.toBe('selected');
+
+      expect(bodies(calls, 'torrents/filePrio')).toEqual([
+        { hash: INFO_HASH, id: '1', priority: '1' },
+        { hash: INFO_HASH, id: '0', priority: '0' },
+      ]);
+      expect(bodies(calls, 'torrents/start')).toEqual([{ hashes: INFO_HASH }]);
+    });
+
+    it('falls back to torrents/resume on a 4.x client', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+      handlers.set('torrents/start', () => response('Not Found', { status: 404 }));
+
+      await expect(adapter.selectFile(INFO_HASH, 0, config())).resolves.toBe('selected');
+      expect(bodies(calls, 'torrents/resume')).toEqual([{ hashes: INFO_HASH }]);
+    });
+
+    it('answers pending while the file list is still empty', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'metaDL' }]));
+      handlers.set('torrents/files', () => response([]));
+
+      await expect(adapter.selectFile(INFO_HASH, 1, config())).resolves.toBe('pending');
+      expect(calls.some((call) => call.url.includes('torrents/filePrio'))).toBe(false);
+    });
+
+    it('refuses an index the torrent does not have, wanting nothing', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+
+      await expect(adapter.selectFile(INFO_HASH, 2, config())).rejects.toBeInstanceOf(FileIndexOutOfRangeException);
+      expect(calls.some((call) => call.url.includes('torrents/filePrio') || call.url.includes('torrents/start'))).toBe(false);
+    });
+
+    it('selects a .torrent in the add itself, with nothing left pending', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.11.4'));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
+      });
+
+      const add = form(calls, 'torrents/add') as FormData;
+      expect(add.get('stopped')).toBe('true');
+      expect(add.get('stopCondition')).toBeNull();
+      expect(bodies(calls, 'torrents/filePrio')).toEqual([
+        { hash: INFO_HASH, id: '1', priority: '1' },
+        { hash: INFO_HASH, id: '0', priority: '0' },
+      ]);
+    });
+
+    it('adds the file to a torrent it already holds without unwanting the others or pausing it', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.8.18'));
+      handlers.set('torrents/add', () => response('Fails.'));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'uploading' }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({ clientKey: INFO_HASH, adopted: true });
+
+      expect(bodies(calls, 'torrents/filePrio')).toEqual([{ hash: INFO_HASH, id: '1', priority: '1' }]);
+      expect(calls.some((call) => call.url.includes('torrents/stop') || call.url.includes('torrents/pause'))).toBe(false);
+    });
+
+    /** Ours, left behind before its selection: nobody has a byte of it, and it still wants every file. */
+    it('selects exclusively on a held torrent stopped with nothing downloaded', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.11.4'));
+      handlers.set('torrents/add', () => response('', { status: 409 }));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'stoppedDL', downloaded: 0 }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({ clientKey: INFO_HASH, adopted: true });
+
+      expect(bodies(calls, 'torrents/filePrio')).toEqual([
+        { hash: INFO_HASH, id: '1', priority: '1' },
+        { hash: INFO_HASH, id: '0', priority: '0' },
+      ]);
+      expect(bodies(calls, 'torrents/start')).toEqual([{ hashes: INFO_HASH }]);
+    });
+
+    /** After a restart qBittorrent rechecks everything; ours cannot be told apart until it settles. */
+    it('leaves a held torrent still being checked with nothing on disk to the poll loop, starting nothing', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.11.4'));
+      handlers.set('torrents/add', () => response('', { status: 409 }));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'checkingResumeData', progress: 0, downloaded: 0 }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
+        adopted: true,
+        fileSelectionPending: true,
+      });
+
+      expect(calls.some((call) => call.url.includes('torrents/filePrio') || call.url.includes('torrents/start'))).toBe(false);
+    });
+
+    it('removes a .torrent it added itself when the selection fails for any reason', async () => {
+      const { calls, handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.11.4'));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH }]));
+      handlers.set('torrents/files', () => response([{}, {}]));
+      handlers.set('torrents/filePrio', () => response('', { status: 503 }));
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config())).rejects.toThrow();
+
+      const removal = calls.find((call) => call.url.includes('/torrents/delete'))?.init.body as URLSearchParams;
+      expect(removal.get('hashes')).toBe(INFO_HASH);
+      expect(removal.get('deleteFiles')).toBe('true');
+    });
+
+    it('reads where the client wrote one file, under the save path', async () => {
+      const { handlers } = mockFetch();
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, save_path: '/downloads/' }]));
+      handlers.set('torrents/files', () => response([{ name: 'Pack/Book 1.epub' }, { name: 'Pack/Book 2.epub' }]));
+
+      await expect(adapter.filePath(INFO_HASH, 1, config())).resolves.toBe('/downloads/Pack/Book 2.epub');
+      await expect(adapter.filePath(INFO_HASH, 2, config())).resolves.toBeNull();
+    });
+
+    it('fails an adoption whose torrent has no file list yet', async () => {
+      const { handlers } = mockFetch();
+      handlers.set('app/webapiVersion', () => response('2.8.18'));
+      handlers.set('torrents/add', () => response('Fails.'));
+      handlers.set('torrents/info', () => response([{ hash: INFO_HASH, state: 'metaDL' }]));
+      handlers.set('torrents/files', () => response([]));
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).rejects.toThrow('has no file list for it yet');
+    });
+
+    it('adds exactly as before when no file is named', async () => {
+      const { calls } = mockFetch();
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH }, config())).resolves.toEqual({ clientKey: INFO_HASH });
+
+      const add = form(calls, 'torrents/add') as FormData;
+      expect([...add.keys()].sort()).toEqual(['category', 'urls']);
+      expect(calls.some((call) => call.url.includes('webapiVersion'))).toBe(false);
     });
   });
 });

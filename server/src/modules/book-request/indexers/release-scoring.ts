@@ -189,7 +189,8 @@ export function scoreRelease(candidate: ReleaseCandidate, request: ScoringReques
   }
 
   if (candidate.freeleech) reasons.push({ code: 'freeleech', points: WEIGHTS.freeleech });
-  if (candidate.fileCount !== undefined && candidate.fileCount > SEVERAL_BOOKS_SUSPICION_THRESHOLD) {
+  // A release naming one file of a pack downloads that file alone, however many the pack holds.
+  if (candidate.fileIndex === undefined && candidate.fileCount !== undefined && candidate.fileCount > SEVERAL_BOOKS_SUSPICION_THRESHOLD) {
     reasons.push({ code: 'likelySeveralBooks', points: WEIGHTS.likelySeveralBooks, detail: String(candidate.fileCount) });
   }
 

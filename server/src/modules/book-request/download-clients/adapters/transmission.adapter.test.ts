@@ -1,9 +1,11 @@
 import { BadRequestException } from '@nestjs/common';
 
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type { ResolvedClientConfig } from '../download-client-adapter';
 import { TransmissionAdapter } from './transmission.adapter';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
+const TWO_FILE_TORRENT = Buffer.from('d4:infod5:filesld6:lengthi1e4:pathl6:a.epubeed6:lengthi1e4:pathl6:b.epubeee4:name4:packee');
 
 function config(overrides: Partial<ResolvedClientConfig> = {}): ResolvedClientConfig {
   return {
@@ -172,6 +174,7 @@ describe('TransmissionAdapter', () => {
 
       await expect(adapter.add({ magnet: `magnet:?xt=urn:btih:${INFO_HASH}`, clientKey: INFO_HASH }, config())).resolves.toEqual({
         clientKey: INFO_HASH,
+        adopted: true,
       });
     });
 
@@ -398,6 +401,64 @@ describe('TransmissionAdapter', () => {
       const result = await adapter.test(config());
       expect(result.success).toBe(false);
       expect(result.error).toContain('method name not recognized');
+    });
+  });
+
+  describe('per-file selection', () => {
+    const magnet = `magnet:?xt=urn:btih:${INFO_HASH}`;
+
+    it('refuses a magnet naming one file without adding anything', async () => {
+      const { calls } = mockRpc();
+
+      await expect(adapter.add({ magnet, clientKey: INFO_HASH, fileIndex: 1 }, config())).rejects.toThrow(
+        'Per-file selection on magnet links needs qBittorrent',
+      );
+      expect(calls).toHaveLength(0);
+    });
+
+    it('wants only the named file of a .torrent in the add itself', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('torrent-add', () => success({ 'torrent-added': { hashString: INFO_HASH } }));
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config())).resolves.toEqual({
+        clientKey: INFO_HASH,
+      });
+
+      const add = calls.find((call) => call.method === 'torrent-add');
+      expect(add?.args['files-wanted']).toEqual([1]);
+      expect(add?.args['files-unwanted']).toEqual([0]);
+      expect(add?.args.paused).toBe(false);
+    });
+
+    it('refuses an index the .torrent does not have before asking the daemon', async () => {
+      const { calls } = mockRpc();
+
+      await expect(adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 2 }, config())).rejects.toBeInstanceOf(
+        FileIndexOutOfRangeException,
+      );
+      expect(calls.some((call) => call.method === 'torrent-add')).toBe(false);
+    });
+
+    it('adds the file to a torrent it already holds without unwanting the others', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('torrent-add', () => success({ 'torrent-duplicate': { hashString: INFO_HASH } }));
+      handlers.set('torrent-get', () => success({ torrents: [{ files: [{}, {}] }] }));
+
+      await adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH, fileIndex: 1 }, config());
+
+      const set = calls.find((call) => call.method === 'torrent-set');
+      expect(set?.args).toEqual({ ids: [INFO_HASH], 'files-wanted': [1] });
+      expect(calls.find((call) => call.method === 'torrent-start')?.args).toEqual({ ids: [INFO_HASH] });
+    });
+
+    it('adds exactly as before when no file is named', async () => {
+      const { calls, handlers } = mockRpc();
+      handlers.set('torrent-add', () => success({ 'torrent-added': { hashString: INFO_HASH } }));
+
+      await adapter.add({ torrentFile: TWO_FILE_TORRENT, clientKey: INFO_HASH }, config());
+
+      const add = calls.find((call) => call.method === 'torrent-add');
+      expect(Object.keys(add?.args ?? {}).sort()).toEqual(['metainfo', 'paused']);
     });
   });
 });

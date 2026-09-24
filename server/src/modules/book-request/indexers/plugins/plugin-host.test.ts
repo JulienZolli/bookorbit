@@ -18,6 +18,7 @@ vi.mock('dns/promises', async (importOriginal) => ({
 }));
 
 import { lookup } from 'dns/promises';
+import { Logger } from '@nestjs/common';
 
 import type { IndexerCredentialStore } from '../indexer-credential-store';
 import { IndexerSearchException, type ReleaseQuery, type ResolvedIndexerConfig } from '../indexer-adapter';
@@ -107,6 +108,56 @@ describe('PluginIndexerAdapter', () => {
    * candidate outside the per-indexer failure accounting: one malformed row used to throw out of
    * the whole search and 500 the picker for every indexer that answered perfectly well.
    */
+  describe('a release naming one file of a pack', () => {
+    const base = { guid: 'g1', title: 'Dune', sizeBytes: null, seeders: null, leechers: null };
+
+    it('keeps the index on a release anchored by a magnet or an infohash', async () => {
+      const { adapter } = makeAdapter({
+        search: () =>
+          Promise.resolve([
+            { ...base, magnet: 'magnet:?xt=urn:btih:abc', fileIndex: 3 },
+            { ...base, guid: 'g2', infoHash: 'abc', fileIndex: 0 },
+          ]),
+      });
+
+      const releases = await adapter.search(query(), config(), AbortSignal.timeout(1000));
+
+      expect(releases.map((release) => release.fileIndex)).toEqual([3, 0]);
+    });
+
+    it('drops a release whose index has no magnet or infohash to apply to, and says so', async () => {
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { adapter } = makeAdapter({
+        search: () =>
+          Promise.resolve([
+            { ...base, downloadUrl: 'https://tracker.example.com/pack.torrent', fileIndex: 1 },
+            { ...base, guid: 'g2' },
+          ]),
+      });
+
+      const releases = await adapter.search(query(), config({ id: 11 }), AbortSignal.timeout(1000));
+
+      expect(releases.map((release) => release.guid)).toEqual(['g2']);
+      expect(warn).toHaveBeenCalledWith(
+        '[plugin.release] [reject] pluginId=example-tracker indexerId=11 guid="g1" - fileIndex without infoHash/magnet',
+      );
+      warn.mockRestore();
+    });
+
+    it('drops a release whose index is not a non-negative integer', async () => {
+      const { adapter } = makeAdapter({
+        search: () =>
+          Promise.resolve([
+            { ...base, magnet: 'magnet:?xt=urn:btih:abc', fileIndex: -1 },
+            { ...base, guid: 'g2', magnet: 'magnet:?xt=urn:btih:abc', fileIndex: 1.5 },
+            { ...base, guid: 'g3', magnet: 'magnet:?xt=urn:btih:abc', fileIndex: '2' as unknown as number },
+          ]),
+      });
+
+      await expect(adapter.search(query(), config(), AbortSignal.timeout(1000))).resolves.toEqual([]);
+    });
+  });
+
   describe('what a plugin says it found', () => {
     async function searched(releases: unknown) {
       const { adapter } = makeAdapter({ search: () => Promise.resolve(releases as never) });

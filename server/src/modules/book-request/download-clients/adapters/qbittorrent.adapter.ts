@@ -3,7 +3,9 @@ import type { DownloadClientTestResult } from '@bookorbit/types';
 
 import { ensureSafeUrl } from '../../../../common/utils/ssrf.utils';
 import { sanitizeLogValue } from '../../../../common/utils/log-sanitize.utils';
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type {
+  AddResult,
   DownloadClientAdapter,
   DownloadState,
   DownloadStatus,
@@ -36,6 +38,12 @@ const RECONCILIATION_LIMIT = 1000;
 const HASH_LOOKUP_PAGE_SIZE = 1000;
 const HASH_LOOKUP_MAX_PAGES = 100;
 const HASH_ALIAS_CACHE_LIMIT = 10_000;
+/**
+ * The first WebAPI that honours `stopCondition` on `torrents/add`, shipped with qBittorrent 4.5.0.
+ * A stopped magnet never connects to a peer and so never gets its file list; stopping on metadata
+ * is the only way to learn the files of a magnet without downloading any of them.
+ */
+const FILE_SELECTION_MIN_WEBAPI = [2, 8, 18] as const;
 
 interface QbTracker {
   url?: string;
@@ -70,6 +78,10 @@ interface QbTorrentInfo {
 const COMPLETED_STATES = new Set(['uploading', 'stalledUP', 'queuedUP', 'forcedUP', 'pausedUP', 'stoppedUP', 'checkingUP']);
 /** Finished and still working the swarm. The paused and stopped spellings are finished and idle. */
 const SEEDING_STATES = new Set(['uploading', 'stalledUP', 'queuedUP', 'forcedUP', 'checkingUP']);
+/** Stopped before finishing, in the 4.x and 5.x spellings. */
+const STOPPED_DOWNLOAD_STATES = new Set(['pausedDL', 'stoppedDL']);
+/** Being checked before it downloads, typically right after qBittorrent restarts. */
+const CHECKING_DOWNLOAD_STATES = new Set(['checkingResumeData', 'checkingDL']);
 const FAILED_STATES = new Set(['error', 'missingFiles']);
 const QUEUED_STATES = new Set(['queuedDL', 'allocating', 'metaDL', 'checkingDL', 'checkingResumeData', 'moving', 'pausedDL', 'stoppedDL']);
 /**
@@ -85,12 +97,14 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
   readonly type = 'qbittorrent' as const;
   readonly label = 'qBittorrent';
   readonly delivers = 'torrent' as const;
+  readonly fileSelection = { magnet: true, torrentFile: true };
 
   private readonly logger = new Logger(QbittorrentAdapter.name);
   private readonly sessions = new Map<number, { cookie: string; expiresAt: number }>();
   private readonly hashAliases = new Map<string, { primary: string; expiresAt: number }>();
 
-  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientKey: string }> {
+  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<AddResult> {
+    if (release.fileIndex !== undefined) await this.requireFileSelection(config);
     const form = new FormData();
     if (release.torrentFile) {
       form.append('torrents', new Blob([new Uint8Array(release.torrentFile)]), release.torrentFileName ?? 'upload.torrent');
@@ -104,6 +118,15 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
     // Torrent-level goals: the client enforces them, BookOrbit never stops a seed itself.
     if (release.seedRatioGoal !== undefined) form.append('ratioLimit', String(release.seedRatioGoal));
     if (release.seedTimeMinutes !== undefined) form.append('seedingTimeLimit', String(release.seedTimeMinutes));
+    if (release.fileIndex !== undefined) {
+      // Both spellings, since 4.x reads `paused` and 5.x reads `stopped`. A .torrent is added
+      // stopped outright because its file list is already known; a magnet has to run until its
+      // metadata arrives, and stops by itself then, before a single piece is requested.
+      const stopped = release.torrentFile ? 'true' : 'false';
+      form.append('paused', stopped);
+      form.append('stopped', stopped);
+      if (!release.torrentFile) form.append('stopCondition', 'MetadataReceived');
+    }
 
     const response = await this.call(config, '/api/v2/torrents/add', { method: 'POST', body: form });
     const body = (await readClientText(response, LABEL)).trim();
@@ -118,13 +141,143 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
         this.logger.log(
           `[download_client.add] [end] clientId=${config.id} hash=${release.clientKey.toLowerCase()} adopted=true - the client already held this torrent`,
         );
-        return { clientKey: release.clientKey.toLowerCase() };
+        const pending = release.fileIndex !== undefined && (await this.wantFileNow(release.clientKey, release.fileIndex, config)) === 'pending';
+        return { clientKey: release.clientKey.toLowerCase(), adopted: true, ...(pending ? { fileSelectionPending: true } : {}) };
       }
       if (response.status === 409) throw new BadRequestException('qBittorrent answered 409 for /api/v2/torrents/add');
       throw new BadRequestException('qBittorrent could not read that torrent. The file may be corrupt, or the magnet link invalid.');
     }
 
-    return { clientKey: release.clientKey.toLowerCase() };
+    const clientKey = release.clientKey.toLowerCase();
+    if (release.fileIndex === undefined) return { clientKey };
+    // A .torrent's file list exists the moment the client has registered it, which is usually
+    // already the case here. When it is not, the torrent is stopped and the poll loop finishes the
+    // selection exactly as it does for a magnet, so nothing is downloaded either way.
+    if (release.torrentFile && (await this.selectAddedFile(clientKey, release.fileIndex, config)) === 'selected') return { clientKey };
+    return { clientKey, fileSelectionPending: true };
+  }
+
+  /**
+   * Any failure leaves nothing behind, not only an index the torrent does not have: the stopped
+   * torrent is ours alone and still wants every file, so a later grab of the same pack adopting it
+   * as it stands would start the whole pack.
+   */
+  private async selectAddedFile(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<'pending' | 'selected'> {
+    try {
+      return await this.selectFile(clientKey, fileIndex, config);
+    } catch (error) {
+      await this.remove(clientKey, config, { deleteFiles: true }).catch((removeError: unknown) => {
+        const message = removeError instanceof Error ? removeError.message : String(removeError);
+        this.logger.warn(
+          `[download_client.select_file] [fail] clientId=${config.id} hash=${clientKey.toLowerCase()} error="${sanitizeLogValue(message)}" - could not remove the torrent after a failed selection`,
+        );
+      });
+      throw error;
+    }
+  }
+
+  /** Refuses before anything is added, so an old client is never handed a pack it would download whole. */
+  private async requireFileSelection(config: ResolvedClientConfig): Promise<void> {
+    const response = await this.call(config, '/api/v2/app/webapiVersion', { method: 'GET' });
+    const version = (await readClientText(response, LABEL)).trim();
+    if (!webapiAtLeast(version, FILE_SELECTION_MIN_WEBAPI)) {
+      throw new BadRequestException(
+        `Per-file selection needs qBittorrent >= 4.5 (WebAPI ${FILE_SELECTION_MIN_WEBAPI.join('.')}), this client reports WebAPI ${version || 'unknown'}`,
+      );
+    }
+  }
+
+  async selectFile(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<'pending' | 'selected'> {
+    const primary = await this.primaryOf(clientKey, config);
+    if (!primary) return 'pending';
+    const count = await this.fileCount(primary, config);
+    if (count === 0) return 'pending';
+    if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+
+    const others = Array.from({ length: count }, (_, index) => index).filter((index) => index !== fileIndex);
+    await this.setFilePriority(primary, [fileIndex], 1, config);
+    if (others.length > 0) await this.setFilePriority(primary, others, 0, config);
+    await this.start(primary, config);
+    this.logger.log(
+      `[download_client.select_file] [end] clientId=${config.id} hash=${clientKey.toLowerCase()} fileIndex=${fileIndex} files=${count} - kept one file and started the torrent`,
+    );
+    return 'selected';
+  }
+
+  /**
+   * The adopted torrent is somebody else's download too, typically a finished one still seeding,
+   * so this only ever adds a file: unwanting the rest would take away what the other attempt
+   * imported or is still fetching. Removing either attempt with its data still removes the files
+   * of both, which is the price of sharing one torrent.
+   *
+   * Except a torrent stopped with nothing downloaded: that is one of ours left behind before its
+   * selection, a magnet whose add timed out on our side or an attempt failed while it waited, and
+   * it still wants every file. Nobody has a byte of it to lose, so the selection is exclusive.
+   * One still being checked with nothing on disk, as after a restart of qBittorrent, cannot be told
+   * apart yet and must not be started wanting everything: the poll loop selects it once it settles.
+   */
+  private async wantFileNow(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<'pending' | 'selected'> {
+    const entry = (await this.findTorrents([clientKey], config)).get(clientKey.toLowerCase());
+    const untouched = (entry?.progress ?? 0) === 0 && (entry?.downloaded ?? 0) === 0;
+    if (untouched && CHECKING_DOWNLOAD_STATES.has(entry?.state ?? '')) return 'pending';
+    const primary = entry?.hash?.toLowerCase();
+    const count = primary ? (await this.fileNames(primary, config)).length : 0;
+    if (!primary || count === 0) {
+      throw new BadRequestException('qBittorrent already holds this torrent but has no file list for it yet, so one file cannot be selected');
+    }
+    if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+    if (untouched && STOPPED_DOWNLOAD_STATES.has(entry?.state ?? '')) return this.selectFile(clientKey, fileIndex, config);
+    await this.setFilePriority(primary, [fileIndex], 1, config);
+    await this.start(primary, config);
+    this.logger.log(
+      `[download_client.select_file] [end] clientId=${config.id} hash=${clientKey.toLowerCase()} fileIndex=${fileIndex} files=${count} adopted=true - added one file to a torrent the client already held`,
+    );
+    return 'selected';
+  }
+
+  async filePath(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<string | null> {
+    const entry = (await this.findTorrents([clientKey], config)).get(clientKey.toLowerCase());
+    const primary = entry?.hash?.toLowerCase();
+    const savePath = entry?.save_path?.trim();
+    if (!primary || !savePath) return null;
+    const name = (await this.fileNames(primary, config))[fileIndex];
+    return name ? `${savePath.replace(/\/+$/, '')}/${name}` : null;
+  }
+
+  private async primaryOf(clientKey: string, config: ResolvedClientConfig): Promise<string | undefined> {
+    return (await this.findTorrents([clientKey], config)).get(clientKey.toLowerCase())?.hash?.toLowerCase();
+  }
+
+  private async fileCount(primary: string, config: ResolvedClientConfig): Promise<number> {
+    return (await this.fileNames(primary, config)).length;
+  }
+
+  /** In `info.files` order, relative to the save path. Empty while a magnet's metadata is on its way. */
+  private async fileNames(primary: string, config: ResolvedClientConfig): Promise<string[]> {
+    const response = await this.call(config, `/api/v2/torrents/files?hash=${encodeURIComponent(primary)}`, { method: 'GET' });
+    const payload = await readClientJson<unknown>(response, LABEL);
+    if (!Array.isArray(payload)) throw new BadRequestException('qBittorrent returned an invalid file listing');
+    return payload.map((file: { name?: unknown }) => (typeof file?.name === 'string' ? file.name : ''));
+  }
+
+  private async setFilePriority(primary: string, indexes: number[], priority: 0 | 1, config: ResolvedClientConfig): Promise<void> {
+    const body = new URLSearchParams({ hash: primary, id: indexes.join('|'), priority: String(priority) });
+    await this.call(config, '/api/v2/torrents/filePrio', {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+  }
+
+  /** 5.0 renamed `resume` to `start` and answers the old path with 404, as 4.x does the new one. */
+  private async start(primary: string, config: ResolvedClientConfig): Promise<void> {
+    const init = () => ({
+      method: 'POST',
+      body: new URLSearchParams({ hashes: primary }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    const response = await this.call(config, '/api/v2/torrents/start', init());
+    if (response.status === 404) await this.call(config, '/api/v2/torrents/resume', init());
   }
 
   /**
@@ -299,7 +452,12 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
       return this.call(config, path, init, false);
     }
     // Newer clients report duplicate adds as 409; add() verifies presence before adopting.
-    if (!response.ok && !(response.status === 409 && path === '/api/v2/torrents/add')) {
+    // 4.x has no `torrents/start`, and start() falls back to `torrents/resume` on this 404.
+    if (
+      !response.ok &&
+      !(response.status === 409 && path === '/api/v2/torrents/add') &&
+      !(response.status === 404 && path === '/api/v2/torrents/start')
+    ) {
       throwForClientServerError(response, LABEL, path.split('?')[0]!);
       throw new BadRequestException(`qBittorrent answered ${response.status} for ${path.split('?')[0]}`);
     }
@@ -351,6 +509,17 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
   private async resolveBaseUrl(config: ResolvedClientConfig): Promise<URL> {
     return ensureSafeUrl(config.baseUrl, { allowPrivate: config.allowPrivateAddress });
   }
+}
+
+/** A missing or unreadable version is treated as too old: the fallback would download the whole pack. */
+function webapiAtLeast(version: string, minimum: readonly number[]): boolean {
+  if (!/^\d+(\.\d+)*$/.test(version)) return false;
+  const parts = version.split('.').map(Number);
+  for (let index = 0; index < minimum.length; index++) {
+    const part = parts[index] ?? 0;
+    if (part !== minimum[index]) return part > minimum[index]!;
+  }
+  return true;
 }
 
 function validHash(value: unknown, length: 40 | 64): string | undefined {

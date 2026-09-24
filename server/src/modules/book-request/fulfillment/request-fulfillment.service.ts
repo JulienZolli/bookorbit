@@ -33,6 +33,7 @@ import type {
   BookRequestHandbackCode,
   BookRequestItem,
   BookRequestStatus,
+  DownloadClientType,
   GrabFailureCode,
   IndexerSearchFailure,
   ReleaseFileInspection,
@@ -53,6 +54,7 @@ import { BookRequestGateway } from '../book-request.gateway';
 import { BookRequestNotifier } from '../book-request-notifier.service';
 import { mapBookRequestDownload, mapBookRequestRow } from '../book-request.mapper';
 import { BookRequestRepository } from '../book-request.repository';
+import type { DownloadClientAdapter, ResolvedClientConfig } from '../download-clients/download-client-adapter';
 import { DownloadClientConfigService } from '../download-clients/download-client-config.service';
 import { DownloadClientRegistry } from '../download-clients/download-client-registry';
 import { ADD_PATH_MAPPING_HINT } from '../download-clients/path-mapping.service';
@@ -251,6 +253,7 @@ export class RequestFulfillmentService {
     // Deliberately outside it: this refuses on the routing alone, before anything is asked of a
     // client, and an attempt nothing was ever asked to take is not an attempt.
     const client = await this.resolveClient(dto.downloadClientId ?? null, grab.source);
+    if (grab.fileIndex !== undefined) this.assertClientCanSelectFile(client, grab.source);
     const directUrl = client === null ? requireFileUrl(grab) : null;
     const directFileName = client === null ? stagedDirectFileName(grab.fileName, grab.releaseFormat) : null;
 
@@ -271,6 +274,7 @@ export class RequestFulfillmentService {
         clientKey: grab.clientKey,
         directUrl,
         directFileName,
+        fileIndex: grab.fileIndex ?? null,
         status: 'queued',
         grabbedAt: new Date(),
       });
@@ -281,6 +285,10 @@ export class RequestFulfillmentService {
       throw error;
     }
 
+    // What a failure after the add has to take back: a torrent this grab added itself for one file,
+    // which may still want every file, and which a later grab of the same pack would otherwise
+    // adopt and start whole.
+    let freshTorrent: { config: ResolvedClientConfig; adapter: DownloadClientAdapter; clientKey: string } | null = null;
     try {
       if (client === null) {
         await this.direct.add({
@@ -292,7 +300,7 @@ export class RequestFulfillmentService {
       } else {
         const config = await this.clients.resolveConfig(client.id);
         const adapter = this.registry.require(config.adapterType);
-        await this.withTransientRetry(user === null, requestId, 'client', () =>
+        const added = await this.withTransientRetry(user === null, requestId, 'client', () =>
           adapter.add(
             {
               magnet: grab.magnet,
@@ -304,12 +312,19 @@ export class RequestFulfillmentService {
               // The indexer's goals, enforced by the client: BookOrbit never stops a seed itself.
               ...(grab.seedRatioGoal !== null && grab.seedRatioGoal !== undefined ? { seedRatioGoal: grab.seedRatioGoal } : {}),
               ...(grab.seedTimeMinutes !== null && grab.seedTimeMinutes !== undefined ? { seedTimeMinutes: grab.seedTimeMinutes } : {}),
+              ...(grab.fileIndex !== undefined ? { fileIndex: grab.fileIndex } : {}),
             },
             config,
           ),
         );
+        if (grab.fileIndex !== undefined && !added.adopted) freshTorrent = { config, adapter, clientKey: added.clientKey };
+        // The torrent sits stopped until its file list arrives; the poll loop takes it from here.
+        if (added.fileSelectionPending && grab.fileIndex !== undefined) {
+          await this.downloads.update(download.id, { fileSelectionPendingSince: new Date() });
+        }
       }
     } catch (error) {
+      if (freshTorrent) await this.removeUnselectedTorrent(freshTorrent.adapter, freshTorrent.config, freshTorrent.clientKey, download);
       const message = error instanceof Error ? error.message : String(error);
       await this.downloads.update(download.id, {
         status: 'failed',
@@ -447,6 +462,21 @@ export class RequestFulfillmentService {
    * same audit trail and the same approver notification.
    */
   async failDownload(download: BookRequestDownloadRow, reason: string): Promise<void> {
+    // Removed before the attempt is marked failed, because failing it is what can start an automatic
+    // retry: a torrent still waiting on its file selection wants every file, and a retry of the same
+    // pack would adopt it and download the whole of it.
+    let removed = false;
+    if (download.fileSelectionPendingSince && download.clientKey && download.downloadClientId) {
+      try {
+        const config = await this.clients.resolveConfig(download.downloadClientId);
+        removed = await this.removeUnselectedTorrent(this.registry.require(config.adapterType), config, download.clientKey, download);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `[book_request.select_file] [fail] requestId=${download.requestId} downloadId=${download.id} error="${sanitizeLogValue(message)}" - could not reach the client to remove the unselected torrent`,
+        );
+      }
+    }
     // Both writes are conditional, and both callers are sweeps over rows read some time ago: the
     // poll loop and the watchdog. An attempt somebody already settled keeps the reason it settled
     // for, and a request somebody already cancelled, rejected or filed stays that way rather than
@@ -456,6 +486,9 @@ export class RequestFulfillmentService {
         status: 'failed',
         errorMessage: reason,
         ...(download.source === 'direct_url' ? { directUrl: null, directEtag: null, directLastModified: null } : {}),
+        // Only once the torrent is gone. A flag left on a torrent that is still there is what lets
+        // an adoption know the selection never finished; cleared over it, nothing would.
+        ...(removed ? { fileSelectionPendingSince: null } : {}),
       }))
     ) {
       return;
@@ -489,6 +522,25 @@ export class RequestFulfillmentService {
     // Last, so a retry policy listening here sees a request already marked failed and a
     // notification already sent, whatever it decides to do next.
     this.events.emit(BOOK_REQUEST_DOWNLOAD_FAILED, download.id);
+  }
+
+  /** Stopped before its first piece, so there are no files of anyone's to keep. Never throws. */
+  private async removeUnselectedTorrent(
+    adapter: DownloadClientAdapter,
+    config: ResolvedClientConfig,
+    clientKey: string,
+    download: BookRequestDownloadRow,
+  ): Promise<boolean> {
+    try {
+      await adapter.remove(clientKey, config, { deleteFiles: true });
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[book_request.select_file] [fail] requestId=${download.requestId} downloadId=${download.id} clientId=${config.id} error="${sanitizeLogValue(message)}" - could not remove the unselected torrent`,
+      );
+      return false;
+    }
   }
 
   /**
@@ -650,8 +702,10 @@ export class RequestFulfillmentService {
       // once per grab attempt, so a settings edit does not require another credentialed fetch.
       seedRatioGoal: release.seedRatioGoal ?? null,
       seedTimeMinutes: release.seedTimeMinutes ?? null,
+      ...(release.fileIndex !== undefined ? { fileIndex: release.fileIndex } : {}),
     };
 
+    // Kept when both are present: the magnet carries the trackers, the bare infohash does not.
     if (release.magnet) {
       return {
         ...snapshot,
@@ -720,7 +774,7 @@ export class RequestFulfillmentService {
         inspection: metadataUnavailableInspection('magnet'),
       };
     }
-    const metadata = torrentMetadataFromFile(torrentFile);
+    const metadata = selectedFileMetadata(torrentMetadataFromFile(torrentFile), release.fileIndex);
     return {
       ...snapshot,
       source: 'torrent_file',
@@ -729,7 +783,8 @@ export class RequestFulfillmentService {
       // separators into a multipart filename.
       torrentFileName: `${metadata.infoHash}.torrent`,
       clientKey: metadata.infoHash,
-      releaseSizeBytes: snapshot.releaseSizeBytes ?? metadata.totalLength,
+      releaseSizeBytes:
+        release.fileIndex !== undefined ? (metadata.totalLength ?? snapshot.releaseSizeBytes) : (snapshot.releaseSizeBytes ?? metadata.totalLength),
       inspection: torrentInspection(metadata),
     };
   }
@@ -793,6 +848,21 @@ export class RequestFulfillmentService {
     throw grabError(
       'GRAB_CLIENT_REFUSED',
       `Download client "${client.name}" has no path mapping, so nothing it downloads could be imported. ${ADD_PATH_MAPPING_HINT}`,
+    );
+  }
+
+  /**
+   * Refused on the routing alone, before anything is added: a client that cannot keep the other
+   * files unwanted would download the whole pack for a release that promised one book.
+   */
+  private assertClientCanSelectFile(client: { name: string; adapterType: DownloadClientType } | null, source: BookRequestDownloadSource): void {
+    const support = client === null ? null : this.registry.require(client.adapterType).fileSelection;
+    if (source === 'magnet' ? support?.magnet : source === 'torrent_file' ? support?.torrentFile : false) return;
+    throw grabError(
+      'GRAB_CLIENT_REFUSED',
+      source === 'magnet'
+        ? `Download client "${client?.name ?? 'built-in'}" cannot download one file of a magnet link. Per-file selection on magnet links needs qBittorrent.`
+        : `Download client "${client?.name ?? 'built-in'}" cannot download one file of a release`,
     );
   }
 
@@ -958,6 +1028,8 @@ interface ResolvedGrab extends ParsedGrab {
   freeleech?: boolean;
   seedRatioGoal?: number | null;
   seedTimeMinutes?: number | null;
+  /** The one file of the torrent to download, where the release named one. */
+  fileIndex?: number;
 }
 
 interface CachedResolvedRelease {
@@ -1004,6 +1076,20 @@ function parseGrabPayload(dto: GrabBookRequestDto): ParsedGrab {
     releaseSizeBytes: metadata.totalLength,
     inspection: torrentInspection(metadata),
   };
+}
+
+/**
+ * What the grab will actually download, so inspection and the size speak about the one file and
+ * not the pack it sits in. An index the .torrent does not have is refused before any client is
+ * asked, rather than falling back to the whole pack.
+ */
+function selectedFileMetadata(metadata: TorrentFileMetadata, fileIndex: number | undefined): TorrentFileMetadata {
+  if (fileIndex === undefined) return metadata;
+  const file = metadata.files[fileIndex];
+  if (!file) {
+    throw grabError('GRAB_RELEASE_REFUSED', `The release names file ${fileIndex}, but its .torrent only has ${metadata.files.length} files`);
+  }
+  return { ...metadata, files: [file], totalLength: file.length };
 }
 
 function torrentInspection(metadata: TorrentFileMetadata): ReleaseFileInspection {
