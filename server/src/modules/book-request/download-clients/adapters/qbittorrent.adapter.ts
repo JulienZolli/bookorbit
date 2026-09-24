@@ -52,6 +52,12 @@ interface QbTracker {
   msg?: string;
 }
 
+interface QbFile {
+  size?: number;
+  progress?: number;
+  priority?: number;
+}
+
 interface QbTorrentInfo {
   hash?: string;
   infohash_v1?: string;
@@ -299,13 +305,44 @@ export class QbittorrentAdapter implements DownloadClientAdapter {
     const stuck: Array<{ status: DownloadStatus; primary: string }> = [];
     for (const [hash, entry] of entries) {
       const status = toDownloadStatus(hash, entry);
+      if (isPartialSelection(entry)) await this.measureWantedFiles(status, entry.hash!.toLowerCase(), config);
       results.push(status);
-      if (entry.state !== undefined && STUCK_STATES.has(entry.state) && status.downloadedBytes === 0) {
+      // Raw session bytes, not the wanted-file figure: that one only moves when a whole piece
+      // verifies, and a torrent receiving blocks is not stuck.
+      if (entry.state !== undefined && STUCK_STATES.has(entry.state) && (entry.downloaded ?? 0) === 0) {
         stuck.push({ status, primary: entry.hash!.toLowerCase() });
       }
     }
     await this.attachTrackerErrors(stuck.slice(0, TRACKER_PROBE_LIMIT), config);
     return results;
+  }
+
+  /**
+   * A per-file grab asks for one book out of a pack, and the torrent-level figures describe the
+   * wrong thing: `total_size` is the whole pack, and `size`/`completed` count whole pieces, so a
+   * 445 KB file inside a 64 MiB piece reads as 64 MiB. The file listing is the only place with the
+   * wanted bytes. qBittorrent reports file progress at piece granularity, so the bytes jump from
+   * zero to the file size when the piece holding it verifies. Any failure keeps the torrent-level
+   * figures: a wrong size on screen is better than a poll that stops.
+   */
+  private async measureWantedFiles(status: DownloadStatus, primary: string, config: ResolvedClientConfig): Promise<void> {
+    try {
+      const response = await this.call(config, `/api/v2/torrents/files?hash=${encodeURIComponent(primary)}`, { method: 'GET' });
+      const payload = await readClientJson<unknown>(response, LABEL);
+      if (!Array.isArray(payload)) return;
+      const wanted = (payload as QbFile[]).filter((file) => (file?.priority ?? 0) > 0 && typeof file.size === 'number' && file.size >= 0);
+      const totalBytes = wanted.reduce((sum, file) => sum + file.size!, 0);
+      if (totalBytes <= 0) return;
+      const downloadedBytes = wanted.reduce((sum, file) => sum + Math.round(Math.max(0, Math.min(1, file.progress ?? 0)) * file.size!), 0);
+      status.totalBytes = totalBytes;
+      status.downloadedBytes = downloadedBytes;
+      status.progressPercent = status.state === 'completed' ? 100 : Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[download_client.files] [fail] clientId=${config.id} hash=${status.clientKey} error="${sanitizeLogValue(detail)}" - kept torrent-level progress`,
+      );
+    }
   }
 
   /** Keep the caller's identity while resolving the primary hash required by qBittorrent's API. */
@@ -530,6 +567,11 @@ function validHash(value: unknown, length: 40 | 64): string | undefined {
 function torrentHashes(entry: QbTorrentInfo): string[] {
   const v2 = validHash(entry.infohash_v2, 64);
   return [validHash(entry.hash, 40), validHash(entry.infohash_v1, 40), v2, v2?.slice(0, 40)].filter((hash): hash is string => hash !== undefined);
+}
+
+/** Some files are skipped, so the torrent-level sizes describe more than the grab wants. */
+function isPartialSelection(entry: QbTorrentInfo): boolean {
+  return typeof entry.size === 'number' && typeof entry.total_size === 'number' && entry.size > 0 && entry.size < entry.total_size;
 }
 
 function toDownloadStatus(hash: string, entry: QbTorrentInfo): DownloadStatus {
