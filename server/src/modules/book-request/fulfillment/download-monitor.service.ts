@@ -9,7 +9,8 @@ import { BookRequestGateway } from '../book-request.gateway';
 import { BookRequestRepository } from '../book-request.repository';
 import { DownloadClientConfigService } from '../download-clients/download-client-config.service';
 import { DownloadClientRegistry } from '../download-clients/download-client-registry';
-import type { DownloadStatus } from '../download-clients/download-client-adapter';
+import { FileIndexOutOfRangeException } from '../download-clients/download-client-adapter';
+import type { DownloadClientAdapter, DownloadStatus, ResolvedClientConfig } from '../download-clients/download-client-adapter';
 import { BookRequestDownloadRepository } from './book-request-download.repository';
 import { DirectDownloadService } from './direct-download.service';
 import { DownloadRemovalService } from './download-removal.service';
@@ -29,6 +30,12 @@ const MISSING_CLIENT_ITEM_GRACE_MS = 2 * 60 * 1000;
  * Transport failures and unknown tracker errors stay recoverable until the stalled watchdog.
  */
 const TRACKER_ERROR_GRACE_MS = 5 * 60 * 1000;
+/**
+ * How long a torrent added for one file may wait, stopped, for its file list. A magnet whose
+ * metadata has not arrived in this long has no reachable peer, and it has downloaded nothing, so
+ * giving up costs nobody anything.
+ */
+const FILE_SELECTION_TIMEOUT_MS = 10 * 60 * 1000;
 const DIRECT_PROGRESS_INTERVAL_MS = 1_000;
 const TORRENT_PROGRESS_INTERVAL_MS = 5_000;
 /**
@@ -67,6 +74,11 @@ const STAGE_RETRY_BACKOFF_MS = 30_000;
  * started before a person settled the request must not drag it back.
  */
 const DOWNLOADING_FROM: readonly BookRequestStatus[] = ['grabbed', 'downloading'];
+
+interface SelectingClient {
+  config: ResolvedClientConfig;
+  adapter: DownloadClientAdapter;
+}
 
 /** A client id, or the built-in downloader, which has no id because it has no row. */
 const DIRECT = 'direct' as const;
@@ -254,6 +266,7 @@ export class DownloadMonitorService implements OnModuleDestroy {
 
     let statuses: DownloadStatus[];
     let stageCapable = false;
+    let client: SelectingClient | null = null;
     try {
       if (target === DIRECT) {
         statuses = await this.direct.status(clientKeys);
@@ -261,6 +274,7 @@ export class DownloadMonitorService implements OnModuleDestroy {
         const config = await this.clients.resolveConfig(target);
         const adapter = this.registry.require(config.adapterType);
         stageCapable = typeof adapter.stage === 'function';
+        client = { config, adapter };
         statuses = await adapter.status(clientKeys, config);
       }
     } catch (error) {
@@ -284,6 +298,15 @@ export class DownloadMonitorService implements OnModuleDestroy {
         await this.handleMissing(row);
         continue;
       }
+      if (row.fileSelectionPendingSince && client && !(await this.finishFileSelection(row, client))) continue;
+      if (
+        typeof row.fileIndex === 'number' &&
+        status.state === 'completed' &&
+        !row.selectedFilePath &&
+        !(await this.recordSelectedFile(row, client))
+      ) {
+        continue;
+      }
       await this.applyStatus(row, status, viewers.get(row.requestId) ?? [], target, stageCapable);
     }
   }
@@ -301,6 +324,85 @@ export class DownloadMonitorService implements OnModuleDestroy {
         ? 'The download was interrupted before it finished and cannot be resumed'
         : 'The download client no longer has this download',
     );
+  }
+
+  /**
+   * Keeps one file of a torrent that was added stopped, and starts it. False when the attempt was
+   * failed instead, so the caller does not go on to report progress for it. Never falls back to
+   * the whole pack: a torrent that cannot be narrowed to its one file is removed, having
+   * downloaded nothing.
+   */
+  private async finishFileSelection(row: BookRequestDownloadRow & { clientKey: string }, { config, adapter }: SelectingClient): Promise<boolean> {
+    const fileIndex = row.fileIndex!;
+    if (!adapter.selectFile) {
+      await this.fulfillment.failDownload(row, `${adapter.label} cannot download one file of a torrent`);
+      return false;
+    }
+
+    let outcome: 'pending' | 'selected' = 'pending';
+    try {
+      outcome = await adapter.selectFile(row.clientKey, fileIndex, config);
+    } catch (error) {
+      if (error instanceof FileIndexOutOfRangeException) {
+        await this.fulfillment.failDownload(row, error.message);
+        return false;
+      }
+      // The client being unreachable says nothing about the torrent; the next poll asks again.
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[book_request.select_file] [fail] requestId=${row.requestId} downloadId=${row.id} fileIndex=${fileIndex} error="${sanitizeLogValue(message)}" - could not select the file yet`,
+      );
+    }
+
+    if (outcome === 'selected') {
+      await this.downloads.updateIf(row.id, ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES, { fileSelectionPendingSince: null });
+      // The same row goes on to `applyStatus` in this tick, and a failure read off it there must
+      // not take the flag for a selection still pending and remove the torrent just started.
+      row.fileSelectionPendingSince = null;
+      this.logger.log(
+        `[book_request.select_file] [end] requestId=${row.requestId} downloadId=${row.id} fileIndex=${fileIndex} - selected the one file`,
+      );
+      return true;
+    }
+
+    const since = row.fileSelectionPendingSince ?? row.grabbedAt ?? row.createdAt;
+    if (Date.now() - since.getTime() < FILE_SELECTION_TIMEOUT_MS) return true;
+    // `failDownload` removes the torrent first, as it does for every attempt still waiting on its
+    // selection, so an automatic retry never finds the whole pack left behind to adopt.
+    await this.fulfillment.failDownload(
+      row,
+      `The torrent's file list did not arrive within ${FILE_SELECTION_TIMEOUT_MS / 60_000} minutes, so its one file could not be selected`,
+    );
+    return false;
+  }
+
+  /**
+   * Reads where the client wrote the one file, before the attempt is marked completed: the import
+   * reads that file alone, never the folder around it, which on a shared pack holds the books of
+   * other attempts and, on Transmission, the edges of neighbouring files. False keeps the attempt
+   * where it is, either for the next poll or because it was failed instead.
+   */
+  private async recordSelectedFile(row: BookRequestDownloadRow & { clientKey: string }, client: SelectingClient | null): Promise<boolean> {
+    if (!client?.adapter.filePath) {
+      await this.fulfillment.failDownload(row, 'The download client cannot say where the one file of this torrent was written');
+      return false;
+    }
+    let path: string | null;
+    try {
+      path = await client.adapter.filePath(row.clientKey, row.fileIndex!, client.config);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `[book_request.select_file] [fail] requestId=${row.requestId} downloadId=${row.id} fileIndex=${row.fileIndex} error="${sanitizeLogValue(message)}" - could not read where the file was written`,
+      );
+      return false;
+    }
+    if (!path) {
+      await this.fulfillment.failDownload(row, `The download client has no file ${row.fileIndex} in this torrent`);
+      return false;
+    }
+    await this.downloads.updateIf(row.id, ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES, { selectedFilePath: path });
+    return true;
   }
 
   private olderThan(row: BookRequestDownloadRow, graceMs: number): boolean {
@@ -321,11 +423,15 @@ export class DownloadMonitorService implements OnModuleDestroy {
 
     // A tracker timeout does not end the torrent in the client. Failing it here would remove it
     // from polling and miss a later completion, so only an explicit rejection ends the attempt.
+    //
+    // Not while a file selection is pending: the torrent is stopped on purpose then, with nothing
+    // downloaded, and the selection has its own ten-minute limit.
     if (
       status.state !== 'completed' &&
       status.trackerError &&
       isTrackerRejection(status.trackerError) &&
       status.downloadedBytes === 0 &&
+      !row.fileSelectionPendingSince &&
       this.olderThan(row, TRACKER_ERROR_GRACE_MS)
     ) {
       await this.fulfillment.failDownload(row, `The tracker rejected this download: ${status.trackerError}`);

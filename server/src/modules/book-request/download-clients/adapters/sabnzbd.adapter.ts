@@ -14,6 +14,7 @@ import type {
   ResolvedClientConfig,
 } from '../download-client-adapter';
 import { type ContentRemovalPlan, DownloadContentRemovalService, remoteFolderName } from '../download-content-removal.service';
+import { NO_FILE_SELECTION } from '../download-client-adapter';
 import { endpointUrl, fetchClient, readClientJson, throwForClientServerError } from './client-http.utils';
 
 const LABEL = 'SABnzbd';
@@ -49,6 +50,7 @@ export class SabnzbdAdapter implements DownloadClientAdapter {
   readonly type = 'sabnzbd' as const;
   readonly label = LABEL;
   readonly delivers = 'usenet' as const;
+  readonly fileSelection = NO_FILE_SELECTION;
 
   private readonly logger = new Logger(SabnzbdAdapter.name);
 

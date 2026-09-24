@@ -17,6 +17,9 @@ const UNRELEASED_MIGRATION_HASHES = [
   // `server_identity`, created by local connection-address builds before
   // 0112_add_server_connection_identity, which creates the same table if it is missing.
   '1ec15e36d30f9bf4e79f92cb59eb461e5f76f53f43293d1b08a15253f22f35cf',
+  // The fork's `0097_per_file_selection`, recorded after 0096 and newer than the released
+  // 0097_add_book_covers, which it would hide. 0162_per_file_selection adds the same columns if missing.
+  'a3315f422bf737961cf6b134fc610f4405b583ef9bc3727550a4e841a82f5c2e',
 ] as const;
 
 export async function dropUnreleasedMigrationRows(

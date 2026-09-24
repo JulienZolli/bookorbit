@@ -19,7 +19,7 @@ import type {
   StagedDownloadResult,
   ResolvedClientConfig,
 } from '../download-client-adapter';
-import { legacyStagedClientDir, stagedClientDir } from '../download-client-adapter';
+import { legacyStagedClientDir, NO_FILE_SELECTION, stagedClientDir } from '../download-client-adapter';
 import { TORBOX_LABEL, TorboxApiClient } from './torbox.api';
 import type { TorboxTorrent } from './torbox.api';
 
@@ -66,6 +66,8 @@ export class TorboxAdapter implements DownloadClientAdapter {
   readonly type = 'torbox' as const;
   readonly label = TORBOX_LABEL;
   readonly delivers = 'torrent' as const;
+  /** TorBox fetches whole torrents, so a release naming one file of a pack is refused before anything is added. */
+  readonly fileSelection = NO_FILE_SELECTION;
 
   private readonly logger = new Logger(TorboxAdapter.name);
   private readonly appDataPath: string;

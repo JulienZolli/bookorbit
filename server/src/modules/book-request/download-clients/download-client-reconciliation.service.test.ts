@@ -131,8 +131,41 @@ describe('DownloadClientReconciliationService', () => {
       downloadedBytes: 350,
       totalBytes: 1000,
       contentPath: '/downloads/item',
+      selectedFilePath: null,
     });
     expect(gateway.emitChanged).toHaveBeenCalledTimes(1);
+  });
+
+  /** Failed by the watchdog mid-download, finished in the client later: the import needs its one file. */
+  it('reads where the one file of a pack was written when adopting a one-file attempt', async () => {
+    const { service, adapter, downloads } = makeService();
+    const candidate = attempt(12, 8, ORPHAN_KEY, 'failed', 'Retry this book');
+    candidate.download = { ...candidate.download, fileIndex: 1 } as BookRequestDownloadRow;
+    Object.assign(adapter, { filePath: vi.fn().mockResolvedValue('/downloads/item/Book 2.epub') });
+    adapter.listOwned.mockResolvedValue({ supported: true, truncated: false, items: [owned(ORPHAN_KEY, 'completed')] });
+    downloads.findAdoptableForClientKeys.mockResolvedValue([candidate]);
+    downloads.adoptFailedAttempt.mockResolvedValue({ ...candidate.download, downloadClientId: 4, status: 'completed' });
+
+    await service.adopt(4, ORPHAN_KEY, 12);
+
+    expect(downloads.adoptFailedAttempt).toHaveBeenCalledWith(
+      12,
+      4,
+      ORPHAN_KEY,
+      expect.objectContaining({ selectedFilePath: '/downloads/item/Book 2.epub' }),
+    );
+  });
+
+  it('refuses to adopt a one-file attempt onto an item without that file, rather than import the folder', async () => {
+    const { service, adapter, downloads } = makeService();
+    const candidate = attempt(12, 8, ORPHAN_KEY, 'failed', 'Retry this book');
+    candidate.download = { ...candidate.download, fileIndex: 3 } as BookRequestDownloadRow;
+    Object.assign(adapter, { filePath: vi.fn().mockResolvedValue(null) });
+    adapter.listOwned.mockResolvedValue({ supported: true, truncated: false, items: [owned(ORPHAN_KEY, 'completed')] });
+    downloads.findAdoptableForClientKeys.mockResolvedValue([candidate]);
+
+    await expect(service.adopt(4, ORPHAN_KEY, 12)).rejects.toThrow('has no file 3');
+    expect(downloads.adoptFailedAttempt).not.toHaveBeenCalled();
   });
 
   it('refuses to remove an item once any database attempt owns it', async () => {

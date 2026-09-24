@@ -12,6 +12,7 @@ import type {
   ResolvedClientConfig,
   SeedInfo,
 } from '../download-client-adapter';
+import { NO_FILE_SELECTION } from '../download-client-adapter';
 import { type ClientContent, DownloadContentRemovalService } from '../download-content-removal.service';
 import { basicAuthHeader, fetchClient, readClientText, throwForClientServerError } from './client-http.utils';
 import {
@@ -121,6 +122,8 @@ export class RtorrentAdapter implements DownloadClientAdapter {
   readonly type = 'rtorrent' as const;
   readonly label = LABEL;
   readonly delivers = 'torrent' as const;
+  /** Per-file selection is not implemented here: a release naming one file of a pack is refused before anything is added. */
+  readonly fileSelection = NO_FILE_SELECTION;
 
   private readonly logger = new Logger(RtorrentAdapter.name);
 

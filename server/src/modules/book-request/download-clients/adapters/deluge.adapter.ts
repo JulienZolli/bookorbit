@@ -3,7 +3,10 @@ import type { DownloadClientTestResult } from '@bookorbit/types';
 
 import { ensureSafeUrl } from '../../../../common/utils/ssrf.utils';
 import { sanitizeLogValue } from '../../../../common/utils/log-sanitize.utils';
+import { torrentMetadataFromFile } from '../../fulfillment/torrent.utils';
+import { FileIndexOutOfRangeException } from '../download-client-adapter';
 import type {
+  AddResult,
   DownloadClientAdapter,
   DownloadState,
   DownloadStatus,
@@ -21,6 +24,9 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 /** A Web UI with a long host list is misconfigured rather than interesting, so stop trying. */
 const HOST_ATTEMPT_LIMIT = 5;
 const RECONCILIATION_LIMIT = 1000;
+/** 0 is "do not download" on every Deluge; 1 is wanted on both 1.3 (normal) and 2.x (low). */
+const SKIPPED_PRIORITY = 0;
+const WANTED_PRIORITY = 1;
 
 /**
  * Asked for on every poll. Both spellings of the download folder are requested because 1.3 knows
@@ -103,17 +109,29 @@ export class DelugeAdapter implements DownloadClientAdapter {
   readonly type = 'deluge' as const;
   readonly label = LABEL;
   readonly delivers = 'torrent' as const;
+  /**
+   * Only with a .torrent. Deluge has no way to stop a magnet once its metadata arrives, and a
+   * paused magnet never fetches it, so a magnet would download pieces of the whole pack before any
+   * file could be skipped.
+   */
+  readonly fileSelection = { magnet: false, torrentFile: true };
 
   private readonly logger = new Logger(DelugeAdapter.name);
   private readonly sessions = new Map<number, DelugeSession>();
   private requestId = 0;
 
-  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<{ clientKey: string }> {
+  async add(release: GrabPayload, config: ResolvedClientConfig): Promise<AddResult> {
     if (!release.torrentFile && !release.magnet) {
       throw new BadRequestException('A grab needs either a magnet link or a .torrent file');
     }
+    if (release.fileIndex !== undefined && !release.torrentFile) {
+      throw new BadRequestException('Per-file selection on magnet links needs qBittorrent');
+    }
 
     const options: Record<string, unknown> = { add_paused: false };
+    if (release.torrentFile && release.fileIndex !== undefined) {
+      options.file_priorities = onlyFilePriorities(release.torrentFile, release.fileIndex);
+    }
     // The client enforces the goal, BookOrbit never stops a seed itself. Deluge has no seed-time
     // goal of any kind, so a tracker's minimum time is left seeding rather than stopped early.
     if (release.seedRatioGoal !== undefined) {
@@ -123,6 +141,7 @@ export class DelugeAdapter implements DownloadClientAdapter {
     }
 
     let hash: string;
+    let adopted = false;
     try {
       const added = release.torrentFile
         ? await this.rpc<string | null>(config, 'core.add_torrent_file', [
@@ -141,10 +160,49 @@ export class DelugeAdapter implements DownloadClientAdapter {
         `[download_client.add] [end] clientId=${config.id} hash=${release.clientKey.toLowerCase()} adopted=true - the client already held this torrent`,
       );
       hash = release.clientKey.toLowerCase();
+      adopted = true;
+      // The priorities on the add only apply to a torrent the daemon did not have yet.
+      if (release.fileIndex !== undefined) await this.wantFileNow(hash, release.fileIndex, config);
     }
 
     await this.applyLabel(hash, config);
-    return { clientKey: hash };
+    return { clientKey: hash, ...(adopted ? { adopted: true } : {}) };
+  }
+
+  async filePath(clientKey: string, fileIndex: number, config: ResolvedClientConfig): Promise<string | null> {
+    const status = await this.rpc<{ download_location?: string; save_path?: string; files?: Array<{ path?: unknown }> } | null>(
+      config,
+      'core.get_torrent_status',
+      [clientKey.toLowerCase(), ['download_location', 'save_path', 'files']],
+    );
+    const dir = (status?.download_location ?? status?.save_path)?.trim();
+    const path = status?.files?.[fileIndex]?.path;
+    return dir && typeof path === 'string' && path ? `${dir.replace(/\/+$/, '')}/${path}` : null;
+  }
+
+  /**
+   * The adopted torrent is somebody else's download too, typically a finished one still seeding,
+   * so this only ever adds a file: skipping the rest would take away what the other attempt
+   * imported or is still fetching. Removing either attempt with its data still removes the files
+   * of both, which is the price of sharing one torrent.
+   */
+  private async wantFileNow(hash: string, fileIndex: number, config: ResolvedClientConfig): Promise<void> {
+    const status = await this.rpc<{ files?: unknown[]; file_priorities?: number[] } | null>(config, 'core.get_torrent_status', [
+      hash,
+      ['files', 'file_priorities'],
+    ]);
+    const count = status?.files?.length ?? 0;
+    if (count === 0) {
+      throw new BadRequestException('Deluge already holds this torrent but has no file list for it yet, so one file cannot be selected');
+    }
+    if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+    const priorities = Array.from({ length: count }, (_, index) => status?.file_priorities?.[index] ?? WANTED_PRIORITY);
+    if (priorities[fileIndex] === SKIPPED_PRIORITY) priorities[fileIndex] = WANTED_PRIORITY;
+    await this.rpc(config, 'core.set_torrent_options', [[hash], { file_priorities: priorities }]);
+    await this.rpc(config, 'core.resume_torrent', [[hash]]);
+    this.logger.log(
+      `[download_client.select_file] [end] clientId=${config.id} hash=${hash} fileIndex=${fileIndex} files=${count} adopted=true - added one file to a torrent the client already held`,
+    );
   }
 
   /**
@@ -347,6 +405,13 @@ export class DelugeAdapter implements DownloadClientAdapter {
  * An operator may paste the Web UI's root or the JSON endpoint itself, and appending the path to a
  * URL that already carries it produces a 404 that reads like the client is down.
  */
+/** One priority per file in `info.files` order, applied by Deluge before the torrent first starts. */
+function onlyFilePriorities(torrentFile: Buffer, fileIndex: number): number[] {
+  const count = torrentMetadataFromFile(torrentFile).files.length;
+  if (fileIndex >= count) throw new FileIndexOutOfRangeException(fileIndex, count);
+  return Array.from({ length: count }, (_, index) => (index === fileIndex ? WANTED_PRIORITY : SKIPPED_PRIORITY));
+}
+
 function jsonPath(base: URL): string {
   return /\/json\/?$/.test(base.pathname) ? '' : JSON_PATH;
 }
