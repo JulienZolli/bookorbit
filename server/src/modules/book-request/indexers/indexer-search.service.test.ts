@@ -863,3 +863,52 @@ describe('IndexerSearchService', () => {
     await expect(service.refreshCandidate(7, 1, stale)).resolves.toMatchObject({ downloadUrl: 'https://prowlarr.test/fresh' });
   });
 });
+
+describe('IndexerSearchService subtitle search', () => {
+  const renamed = { title: 'Off-campus - Tome 02', subtitle: 'The mistake', authors: ['Elle Kennedy'], language: 'fr' };
+
+  it('searches the subtitle as a title when the title finds next to nothing, and ranks what it finds', async () => {
+    const torznab = {
+      search: vi.fn((query: { title: string }) =>
+        Promise.resolve(
+          query.title === 'The mistake'
+            ? [release({ guid: 'mistake', title: 'The Mistake Off-campus Saison 2', author: 'Elle Kennedy' })]
+            : [release({ guid: 'tome', title: 'Off-campus - Tome 02', author: 'Elle Kennedy', seeders: 1 })],
+        ),
+      ),
+    };
+    const { service } = makeService([indexer()], { torznab });
+
+    const result = await service.search(request(renamed));
+
+    expect(torznab.search).toHaveBeenCalledTimes(2);
+    expect(torznab.search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: 'The mistake', author: 'Elle Kennedy', isbn13: null }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(result.releases.map((item) => item.guid).sort()).toEqual(['mistake', 'tome']);
+  });
+
+  it('does not search the subtitle when the title already found enough', async () => {
+    const torznab = {
+      search: vi.fn(() => Promise.resolve([release({ guid: 'a' }), release({ guid: 'b' }), release({ guid: 'c' })])),
+    };
+    const { service } = makeService([indexer()], { torznab });
+
+    await service.search(request({ subtitle: 'The mistake' }));
+
+    expect(torznab.search).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the subtitle once the approver typed a title of their own', async () => {
+    const torznab = { search: vi.fn(() => Promise.resolve([])) };
+    const { service } = makeService([indexer()], { torznab });
+
+    await service.search(request(renamed), { overrides: { title: 'Something else' } });
+
+    for (const [query] of torznab.search.mock.calls as unknown as Array<[{ title: string }]>) {
+      expect(query.title).not.toBe('The mistake');
+    }
+  });
+});

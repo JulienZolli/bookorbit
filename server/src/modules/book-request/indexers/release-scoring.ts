@@ -110,6 +110,9 @@ const SCENE_LANGUAGE_NAMES: ReadonlyMap<string, string> = new Map([
   ['swedish', 'sv'],
 ]);
 
+/** How closely the author must agree before a release may match the edition's subtitle alone. */
+const SUBTITLE_AUTHOR_AGREEMENT = 0.8;
+
 /** Release-scene labels that describe packaging rather than the work's title. */
 const RELEASE_TITLE_NOISE = new Set([
   ...FORMAT_TOKENS,
@@ -129,6 +132,11 @@ const RELEASE_TITLE_NOISE = new Set([
 /** The work a release is scored against: the request snapshot, never the library. */
 export interface ScoringRequest {
   title: string;
+  /**
+   * The edition's subtitle. A publisher that renames a series can leave the title a release is
+   * known by only here: "Off-campus - Tome 02", subtitle "The mistake", ships as "The Mistake".
+   */
+  subtitle?: string | null;
   authors: string[];
   isbn13: string | null;
   isbn10: string | null;
@@ -247,9 +255,9 @@ export function toReleaseItem(scored: ScoredRelease, indexerName: string, reques
  * while a sequel or a picture book that merely contains the requested title loses points.
  */
 function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): ReleaseScoreReason {
-  const titleScore = titleSimilarity(candidate, request);
   const authors = request.authors.filter(Boolean);
   const authorScore = authors.length > 0 ? authorSimilarity(candidate, authors) : null;
+  const titleScore = Math.max(...requestedTitles(request, authorScore).map((title) => titleSimilarity(candidate, title, request.authors)));
 
   const requestedIsbns = [...request.isbns, normalizeMetadataIsbn(request.isbn13), normalizeMetadataIsbn(request.isbn10)].filter(Boolean);
   if (requestedIsbns.length > 0 && (titleScore > 0 || (authorScore ?? 0) > 0)) {
@@ -274,11 +282,11 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
  * whole identity of a title such as 1984; other bare numbers are years, series positions or
  * version flags. Requested author tokens are removed only where they are not also title tokens.
  */
-function titleSimilarity(candidate: ReleaseCandidate, request: ScoringRequest): number {
-  if (candidate.bookTitle?.trim()) return symmetricTitleSimilarity(request.title, candidate.bookTitle);
+function titleSimilarity(candidate: ReleaseCandidate, requestTitle: string, requestAuthors: string[]): number {
+  if (candidate.bookTitle?.trim()) return symmetricTitleSimilarity(requestTitle, candidate.bookTitle);
 
-  const requestedTokens = new Set(significantTokens(tokenizeTitleText(normalizeTitleText(request.title))));
-  const authorTokens = new Set(request.authors.flatMap((author) => significantTokens(tokenizeTitleText(normalizeTitleText(author)))));
+  const requestedTokens = new Set(significantTokens(tokenizeTitleText(normalizeTitleText(requestTitle))));
+  const authorTokens = new Set(requestAuthors.flatMap((author) => significantTokens(tokenizeTitleText(normalizeTitleText(author)))));
   const candidateTokens = tokenizeTitleText(normalizeTitleText(candidate.title));
   const hasTerminalReleaseGroup = /-\s*[\p{L}\p{N}]{2,20}$/u.test(candidate.title.trim());
   const comparable = candidateTokens.filter((token, index) => {
@@ -289,7 +297,20 @@ function titleSimilarity(candidate: ReleaseCandidate, request: ScoringRequest): 
     return true;
   });
 
-  return symmetricTitleSimilarity(request.title, comparable.join(' '));
+  return symmetricTitleSimilarity(requestTitle, comparable.join(' '));
+}
+
+/**
+ * The titles a release may carry for this work: the request's own, and where the edition has a
+ * subtitle, the subtitle alone and the two joined. The subtitle alone only counts once the author
+ * agrees, because on its own a subtitle is often a phrase any book could share.
+ */
+function requestedTitles(request: ScoringRequest, authorScore: number | null): string[] {
+  const subtitle = request.subtitle?.trim();
+  if (!subtitle) return [request.title];
+  const titles = [request.title, `${request.title} ${subtitle}`];
+  if (authorScore !== null && authorScore >= SUBTITLE_AUTHOR_AGREEMENT) titles.push(subtitle);
+  return titles;
 }
 
 /** An author embedded in a decorated release name is still an exact author signal. */

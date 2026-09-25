@@ -20,6 +20,7 @@ import { IndexerConfigService } from './indexer-config.service';
 import { IndexerOperationLock } from './indexer-operation-lock';
 import { IndexerRegistry } from './indexer-registry';
 import { rejectRelease, scoreRelease, toReleaseItem, type ScoredRelease, type ScoringRequest } from './release-scoring';
+import { normalizeTitleText } from '../../../common/text-match/title-match';
 import { buildSearchText } from './search-text';
 
 /**
@@ -35,6 +36,12 @@ const MAX_CACHE_ENTRIES_PER_REQUEST = 10;
 const MAX_CACHE_ENTRIES = 500;
 /** A ceiling on the merged list. The picker shows a ranked shortlist, not a tracker browser. */
 const MAX_MERGED_RELEASES = 100;
+/**
+ * Below this many releases, a request with a subtitle is searched again under the subtitle. A
+ * renamed edition can be all but invisible under its own title: "Off-campus - Tome 02" found one
+ * release, "The mistake Elle Kennedy" found the editions that could actually be downloaded.
+ */
+const SUBTITLE_SEARCH_THRESHOLD = 3;
 
 interface CacheEntry {
   requestId: number;
@@ -417,6 +424,16 @@ export class IndexerSearchService {
           () => new IndexerSearchException('timeout', `${config.name} did not answer in time`),
         );
       }
+      const subtitle = query.subtitle?.trim();
+      if (releases.length < SUBTITLE_SEARCH_THRESHOLD && subtitle && normalizeTitleText(subtitle) !== normalizeTitleText(query.title)) {
+        const bySubtitle = await withDeadline(
+          adapter.search({ ...query, title: subtitle, subtitle: null, isbn13: null, isbn13s: [] }, config, deadline),
+          deadline,
+          () => new IndexerSearchException('timeout', `${config.name} did not answer in time`),
+        );
+        // Duplicates are fine here: the merge keys releases by guid and keeps the first.
+        releases = [...releases, ...bySubtitle];
+      }
       return { config, releases, query: indexerQuery };
     } catch (error) {
       const failure: IndexerSearchFailure = error instanceof IndexerSearchException ? error.failure : 'error';
@@ -472,6 +489,7 @@ function sameRelease(candidate: ReleaseCandidate, stale: ReleaseCandidate): bool
 function toQuery(request: ScoringRequest): ReleaseQuery {
   return {
     title: request.title,
+    subtitle: request.subtitle ?? null,
     author: request.authors[0] ?? null,
     isbn13: request.isbns[0] ?? null,
     isbn13s: request.isbns,
@@ -492,6 +510,8 @@ function prepareScoringRequest(
   return {
     scoringRequest: {
       title: overrides?.title ?? request.title,
+      // A title the approver typed replaces the work being searched for, subtitle included.
+      subtitle: overrides?.title !== undefined ? null : request.subtitle,
       authors: overrides?.authors ?? request.authors ?? [],
       isbn13: activeIsbn,
       isbn10: null,

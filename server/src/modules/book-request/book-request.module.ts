@@ -66,6 +66,8 @@ import { RequestSeedService } from './fulfillment/request-seed.service';
 import { RequestUserCleanupService } from './fulfillment/request-user-cleanup.service';
 import { RequestVerificationService } from './fulfillment/request-verification.service';
 import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
+import { RequestIdentifierEnrichmentService } from './request-identifier-enrichment.service';
+import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
 
 /**
  * The dependency on `BookDockModule` is one way and must stay that way. The dock must not learn
@@ -80,6 +82,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
     UploadModule,
     AuthModule,
     UserModule,
+    MetadataFetchModule,
     forwardRef(() => NotificationModule),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -100,6 +103,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
   ],
   providers: [
     BookRequestService,
+    RequestIdentifierEnrichmentService,
     BookRequestRepository,
     BookRequestAttributionService,
     BookRequestDedupeService,
