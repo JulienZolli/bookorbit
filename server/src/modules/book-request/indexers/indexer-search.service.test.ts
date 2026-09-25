@@ -901,6 +901,30 @@ describe('IndexerSearchService subtitle search', () => {
     expect(torznab.search).toHaveBeenCalledTimes(1);
   });
 
+  it('counts only the releases the filters keep when deciding to search the subtitle', async () => {
+    const english = (guid: string) => release({ guid, title: 'The Mistake (Off-Campus Book 2)', author: 'Elle Kennedy', language: 'en' });
+    const torznab = {
+      search: vi.fn((query: { title: string }) =>
+        Promise.resolve(
+          query.title === 'The mistake'
+            ? [release({ guid: 'mistake', title: 'The mistake', author: 'Elle Kennedy', language: 'fr' })]
+            : [
+                release({ guid: 'tome', title: 'Off-campus - Tome 02', author: 'Elle Kennedy', language: 'fr' }),
+                english('en1'),
+                english('en2'),
+                english('en3'),
+              ],
+        ),
+      ),
+    };
+    const { service } = makeService([indexer()], { torznab });
+
+    const result = await service.search(request(renamed));
+
+    expect(torznab.search).toHaveBeenCalledTimes(2);
+    expect(result.releases.map((item) => item.guid).sort()).toEqual(['mistake', 'tome']);
+  });
+
   it('drops the subtitle once the approver typed a title of their own', async () => {
     const torznab = { search: vi.fn(() => Promise.resolve([])) };
     const { service } = makeService([indexer()], { torznab });

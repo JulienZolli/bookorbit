@@ -40,6 +40,10 @@ const MAX_MERGED_RELEASES = 100;
  * Below this many releases, a request with a subtitle is searched again under the subtitle. A
  * renamed edition can be all but invisible under its own title: "Off-campus - Tome 02" found one
  * release, "The mistake Elle Kennedy" found the editions that could actually be downloaded.
+ *
+ * Counted on the releases the hard filters keep, not on what the indexer sent: a source that
+ * ignores the language answered "Off-campus - Tome 02" with six rows, four of them English, and
+ * the two French ones left the picker as thin as one, with the subtitle search never run.
  */
 const SUBTITLE_SEARCH_THRESHOLD = 3;
 
@@ -425,7 +429,7 @@ export class IndexerSearchService {
         );
       }
       const subtitle = query.subtitle?.trim();
-      if (releases.length < SUBTITLE_SEARCH_THRESHOLD && subtitle && normalizeTitleText(subtitle) !== normalizeTitleText(query.title)) {
+      if (usableCount(releases, query) < SUBTITLE_SEARCH_THRESHOLD && subtitle && normalizeTitleText(subtitle) !== normalizeTitleText(query.title)) {
         const bySubtitle = await withDeadline(
           adapter.search({ ...query, title: subtitle, subtitle: null, isbn13: null, isbn13s: [] }, config, deadline),
           deadline,
@@ -472,6 +476,19 @@ interface SearchOutcome {
   query?: IndexerSearchQuery;
   failure?: IndexerSearchFailure;
   error?: string;
+}
+
+/** Distinct releases the merge will keep: the same hard filters, the same one-row-per-guid. */
+function usableCount(releases: ReleaseCandidate[], query: ReleaseQuery): number {
+  // A row the filter cannot read is the merge's to report; here it simply does not count.
+  const readable = (candidate: ReleaseCandidate): boolean => {
+    try {
+      return !rejectRelease(candidate, query);
+    } catch {
+      return false;
+    }
+  };
+  return new Set(releases.filter(readable).map(candidateKey)).size;
 }
 
 function candidateKey(candidate: ReleaseCandidate): string {

@@ -164,7 +164,7 @@ export interface ScoringRequest {
  * Hard filters, applied before scoring. A release that fails one of these is not a worse choice,
  * it is not a choice: no weighting should be able to float it back up the list.
  */
-export function rejectRelease(candidate: ReleaseCandidate, request: ScoringRequest): string | null {
+export function rejectRelease(candidate: ReleaseCandidate, request: Pick<ScoringRequest, 'mediaKind' | 'language'>): string | null {
   // Only where the indexer actually stated a count. Some report no swarm data at all, and
   // reading that as zero would reject everything they return.
   if (candidate.seeders !== null && candidate.seeders <= 0) return 'no seeders';
