@@ -295,6 +295,15 @@ describe('scoreRelease', () => {
     expect(scored.score).toBe(scoreRelease(release({ seeders: null }), request()).score);
   });
 
+  it('scores a torrent release from a file-serving source on its swarm, not as a direct one', () => {
+    const torrent = release({ seeders: 3, magnet: 'magnet:?xt=urn:btih:abc', infoHash: 'abc', fileIndex: 0 });
+
+    expect(pointsFor(scoreRelease(torrent, request(), 'file'), 'seeders')).toBe(pointsFor(scoreRelease(torrent, request(), 'torrent'), 'seeders'));
+    expect(scoreRelease(release({ seeders: null, infoHash: 'abc' }), request(), 'file').reasons.some((reason) => reason.code === 'seeders')).toBe(
+      false,
+    );
+  });
+
   it('scores a saturated torrent level with a direct release', () => {
     const direct = scoreRelease(release({ seeders: null, leechers: null }), request(), 'file');
 
