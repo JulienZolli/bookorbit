@@ -151,7 +151,11 @@ export class IndexerSearchService {
           if (candidates.has(key)) continue;
 
           candidates.set(key, candidate);
-          scored.push({ scored: scoreRelease(candidate, scoringRequest), indexerName: config.name, managerPriority: config.managerPriority });
+          scored.push({
+            scored: scoreRelease(candidate, scoringRequest, delivery),
+            indexerName: config.name,
+            managerPriority: config.managerPriority,
+          });
           kept++;
         }
       } catch (error) {
