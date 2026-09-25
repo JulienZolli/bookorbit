@@ -416,3 +416,30 @@ describe('toReleaseItem', () => {
     });
   });
 });
+
+describe('scoreRelease with an edition subtitle', () => {
+  const renamed = request({ title: 'Off-campus - Tome 02', subtitle: 'The mistake', authors: ['Elle Kennedy'] });
+  const mistake = release({ title: 'The Mistake', bookTitle: 'The Mistake', author: 'Elle Kennedy' });
+
+  it('matches a release carrying the subtitle as its title once the author agrees', () => {
+    const withSubtitle = scoreRelease(mistake, renamed);
+    const withoutSubtitle = scoreRelease(mistake, request({ title: 'Off-campus - Tome 02', authors: ['Elle Kennedy'] }));
+
+    expect(withSubtitle.score).toBeGreaterThanOrEqual(70);
+    expect(withSubtitle.score).toBeGreaterThan(withoutSubtitle.score);
+  });
+
+  it('does not match the subtitle alone when the author is someone else', () => {
+    const stranger = release({ title: 'The Mistake', bookTitle: 'The Mistake', author: 'Somebody Else' });
+
+    // Only the title and subtitle joined can still overlap it, which is far from a match.
+    expect(scoreRelease(stranger, renamed).score).toBeLessThan(40);
+    expect(scoreRelease(stranger, renamed).score).toBeLessThan(scoreRelease(mistake, renamed).score - 40);
+  });
+
+  it('keeps scoring the title itself at least as well as before', () => {
+    const tome = release({ title: 'Off-campus - Tome 02', bookTitle: 'Off-campus - Tome 02', author: 'Elle Kennedy' });
+
+    expect(scoreRelease(tome, renamed).score).toBe(scoreRelease(tome, request({ ...renamed, subtitle: null })).score);
+  });
+});

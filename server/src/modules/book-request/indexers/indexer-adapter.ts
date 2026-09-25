@@ -63,6 +63,8 @@ export interface ResolvedIndexerSeedPolicy {
 
 export interface ReleaseQuery {
   title: string;
+  /** The edition's subtitle, searched as a title of its own when the title finds next to nothing. */
+  subtitle?: string | null;
   author: string | null;
   isbn13: string | null;
   /** Every canonical ISBN accepted for the work. `isbn13` remains the first for older plugins. */

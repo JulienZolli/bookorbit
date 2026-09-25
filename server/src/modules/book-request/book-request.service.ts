@@ -55,6 +55,7 @@ import { BookRequestRepository, type BookRequestJoinedRow } from './book-request
 import { RequestAutomationService } from './fulfillment/request-automation.service';
 import { RequestAutomationSettingsService } from './fulfillment/request-automation-settings.service';
 import { IndexerConfigService } from './indexers/indexer-config.service';
+import { RequestIdentifierEnrichmentService } from './request-identifier-enrichment.service';
 import type { CreateBookRequestDto } from './dto/create-book-request.dto';
 import type { DecideBookRequestDto } from './dto/decide-book-request.dto';
 import type { FulfillBookRequestDto } from './dto/fulfill-book-request.dto';
@@ -176,6 +177,7 @@ export class BookRequestService {
     private readonly gateway: BookRequestGateway,
     private readonly attribution: BookRequestAttributionService,
     private readonly indexers: IndexerConfigService,
+    private readonly enrichment: RequestIdentifierEnrichmentService,
   ) {}
 
   canManageAll(user: RequestUser): boolean {
@@ -234,10 +236,20 @@ export class BookRequestService {
     const subject = await this.attribution.resolveSubject(actor, dto.userId);
 
     const metadataSources = normalizeMetadataSources(dto.metadataSources);
+    // Before the dedupe, so a request that gains an ISBN here folds into one filed under it.
+    const enriched = dto.title.trim()
+      ? await this.enrichment.enrich({
+          title: dto.title.trim(),
+          subtitle: dto.subtitle ?? null,
+          isbn10: dto.isbn10 ?? null,
+          isbn13: dto.isbn13 ?? null,
+          coverUrl: dto.coverUrl ?? null,
+        })
+      : { subtitle: dto.subtitle ?? null, isbn13: dto.isbn13 ?? null };
     const work = {
       title: dto.title.trim(),
       authors: dto.authors ?? [],
-      isbn13: dto.isbn13 ?? null,
+      isbn13: enriched.isbn13,
       providerKey: dto.providerKey ?? null,
       providerId: dto.providerId ?? null,
       metadataSources,
@@ -316,12 +328,12 @@ export class BookRequestService {
       status: availableOnCreate ? ('available' as const) : approvedOnCreate ? ('approved' as const) : ('pending' as const),
       selfServe,
       title: work.title,
-      subtitle: dto.subtitle ?? null,
+      subtitle: enriched.subtitle,
       authors: work.authors,
       seriesName: dto.seriesName ?? null,
       seriesIndex: dto.seriesIndex ?? null,
       isbn10: dto.isbn10 ?? null,
-      isbn13: dto.isbn13 ?? null,
+      isbn13: work.isbn13,
       publishedYear: dto.publishedYear ?? null,
       // Normalised on the way in, because providers state it every which way: "spa", "English",
       // or nothing at all. The matcher compares codes, so anything else is a filter that either
