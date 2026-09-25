@@ -443,3 +443,71 @@ describe('scoreRelease with an edition subtitle', () => {
     expect(scoreRelease(tome, renamed).score).toBe(scoreRelease(tome, request({ ...renamed, subtitle: null })).score);
   });
 });
+
+describe('scoreRelease with a numbered volume', () => {
+  const tome2 = request({ title: 'Off-campus - Tome 02', authors: ['Elle Kennedy'] });
+  const byKennedy = (title: string) => release({ title, bookTitle: title, author: 'Elle Kennedy' });
+
+  it('gives no title credit to another volume of the same series', () => {
+    const tome3 = scoreRelease(byKennedy('Off-campus - Tome 03'), tome2);
+
+    expect(tome3.score).toBeLessThan(40);
+    expect(tome3.score).toBeLessThan(scoreRelease(byKennedy('Off-campus - Tome 02'), tome2).score - 30);
+  });
+
+  it('reads the volume under any common marker, arabic or roman', () => {
+    for (const other of ['Off-campus T3', 'Off-campus vol. 3', 'Off-campus Saison III', 'Off-Campus Book 4']) {
+      expect(scoreRelease(byKennedy(other), tome2).score, other).toBeLessThan(40);
+    }
+  });
+
+  it('credits the requested volume under another marker when every other word agrees', () => {
+    const saison = scoreRelease(byKennedy('The Mistake Off-campus Saison 2'), tome2);
+
+    expect(saison.score).toBeGreaterThanOrEqual(70);
+  });
+
+  it('leaves a release that names no volume scored on its title alone', () => {
+    const series = scoreRelease(byKennedy('Off-campus'), tome2);
+    const unrelated = scoreRelease(byKennedy('The Deal'), tome2);
+
+    expect(series.score).toBeGreaterThan(unrelated.score);
+    expect(series.score).toBeLessThan(70);
+  });
+
+  it('keeps a release naming several volumes, the requested one among them, below a sole match', () => {
+    const omnibus = scoreRelease(byKennedy('Off-campus Tome 2 Tome 3'), tome2);
+
+    expect(omnibus.score).toBeGreaterThan(40);
+    expect(omnibus.score).toBeLessThan(scoreRelease(byKennedy('Off-campus - Tome 02'), tome2).score);
+  });
+
+  it('changes nothing for a request that names no volume', () => {
+    const cases: [string, string, string][] = [
+      ['1984', 'George Orwell', '1984'],
+      ['Fahrenheit 451', 'Ray Bradbury', 'Fahrenheit 451'],
+      ['Dune', 'Frank Herbert', 'Dune Book 1'],
+      ['The Stand', 'Stephen King', 'The Stand Part 2'],
+    ];
+    for (const [title, author, released] of cases) {
+      const candidate = release({ title: released, bookTitle: released, author });
+      const withoutVolume = scoreRelease(candidate, request({ title, authors: [author] }));
+
+      expect(withoutVolume.score, released).toBeGreaterThanOrEqual(title === 'Dune' || title === 'The Stand' ? 40 : 70);
+    }
+  });
+
+  it('does not read a bare t before a roman numeral as a volume', () => {
+    const request_ = request({ title: "Don't I Know You - Tome 2", authors: ['Someone'] });
+    const candidate = release({ title: "Don't I Know You - Tome 2", bookTitle: "Don't I Know You - Tome 2", author: 'Someone' });
+
+    expect(scoreRelease(candidate, request_).score).toBeGreaterThanOrEqual(70);
+  });
+
+  it('lets an ISBN match stand whatever the numbering says', () => {
+    const withIsbn = request({ ...tome2, isbn13: '9782755626933' });
+    const tagged = release({ title: 'Off-campus - Tome 03', bookTitle: 'Off-campus - Tome 03', author: 'Elle Kennedy', isbn: '9782755626933' });
+
+    expect(pointsFor(scoreRelease(tagged, withIsbn), 'isbnMatch')).toBe(61);
+  });
+});
