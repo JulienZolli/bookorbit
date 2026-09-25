@@ -279,6 +279,29 @@ describe('scoreRelease', () => {
     expect(scored.reasons.some((reason) => reason.code === 'seeders')).toBe(false);
   });
 
+  it('gives a direct release the full availability axis, ahead of a thinly seeded torrent of the same book', () => {
+    const direct = scoreRelease(release({ seeders: null, leechers: null }), request(), 'file');
+    const torrent = scoreRelease(release({ seeders: 6 }), request(), 'torrent');
+
+    expect(pointsFor(direct, 'seeders')).toBe(12);
+    expect(direct.reasons.find((reason) => reason.code === 'seeders')?.detail).toBe('direct');
+    expect(direct.score).toBeGreaterThan(torrent.score);
+  });
+
+  it('leaves a torrent source without swarm data where it was', () => {
+    const scored = scoreRelease(release({ seeders: null }), request(), 'torrent');
+
+    expect(scored.reasons.some((reason) => reason.code === 'seeders')).toBe(false);
+    expect(scored.score).toBe(scoreRelease(release({ seeders: null }), request()).score);
+  });
+
+  it('scores a saturated torrent level with a direct release', () => {
+    const direct = scoreRelease(release({ seeders: null, leechers: null }), request(), 'file');
+
+    expect(scoreRelease(release({ seeders: 60 }), request(), 'torrent').score).toBe(direct.score);
+    expect(scoreRelease(release({ seeders: 400 }), request(), 'torrent').score).toBe(direct.score);
+  });
+
   it('penalises a size that cannot be the requested medium', () => {
     const sample = scoreRelease(release({ sizeBytes: 4 * 1024 }), request());
 

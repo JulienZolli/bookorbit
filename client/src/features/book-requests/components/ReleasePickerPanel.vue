@@ -524,6 +524,8 @@ function credits(release: ReleaseCandidateItem): ReleaseCandidateItem['reasons']
 }
 
 function reasonText(reason: ReleaseCandidateItem['reasons'][number]): string {
+  // A direct release takes the availability axis without a swarm, and says so instead of a count.
+  if (reason.code === 'seeders' && reason.detail === 'direct') return t('bookRequests.releases.protocol.direct')
   return t(`bookRequests.releases.reasons.${reason.code}`, { detail: reason.detail ?? '' })
 }
 

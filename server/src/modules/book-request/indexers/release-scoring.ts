@@ -11,7 +11,7 @@ import {
   languagesAgree,
   matchReleaseTier,
 } from '@bookorbit/types';
-import type { BookRequestMediaKind, ReleaseCandidateItem, ReleaseScoreReason, ReleaseTier } from '@bookorbit/types';
+import type { BookRequestMediaKind, DownloadDelivery, ReleaseCandidateItem, ReleaseScoreReason, ReleaseTier } from '@bookorbit/types';
 
 import { normalizeIsbn, normalizeMetadataIsbn } from '../../../common/text-match/isbn-normalize';
 import { normalizeTitleText, significantTokens, symmetricTitleSimilarity, tokenizeTitleText } from '../../../common/text-match/title-match';
@@ -192,7 +192,17 @@ export interface ScoredRelease {
   reasons: ReleaseScoreReason[];
 }
 
-export function scoreRelease(candidate: ReleaseCandidate, request: ScoringRequest): ScoredRelease {
+/**
+ * The `detail` a direct release's availability reason carries in place of a seeder count, so the
+ * picker can name the delivery rather than print a count that does not exist.
+ */
+export const DIRECT_AVAILABILITY_DETAIL = 'direct';
+
+/**
+ * `delivery` is the source's, as the registry reports it: a release carries no field that says how
+ * it will be fetched, and a null seeder count only means the indexer published no swarm data.
+ */
+export function scoreRelease(candidate: ReleaseCandidate, request: ScoringRequest, delivery: DownloadDelivery = 'torrent'): ScoredRelease {
   const reasons: ReleaseScoreReason[] = [];
 
   reasons.push(matchReason(candidate, request));
@@ -201,7 +211,12 @@ export function scoreRelease(candidate: ReleaseCandidate, request: ScoringReques
   const sizeReason = sizeReasonFor(candidate, request);
   if (sizeReason) reasons.push(sizeReason);
 
-  if (candidate.seeders !== null) {
+  // A source that serves the file itself has no swarm to run dry: its availability is the best a
+  // release can have, so it takes the full axis. Scored nothing, it lost to a six-seed torrent of
+  // the same book on this axis alone.
+  if (delivery === 'file') {
+    reasons.push({ code: 'seeders', points: WEIGHTS.seeders, detail: DIRECT_AVAILABILITY_DETAIL });
+  } else if (candidate.seeders !== null) {
     reasons.push({ code: 'seeders', points: round(seederScore(candidate.seeders)), detail: String(candidate.seeders) });
   }
 
