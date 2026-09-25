@@ -199,8 +199,10 @@ export interface ScoredRelease {
 export const DIRECT_AVAILABILITY_DETAIL = 'direct';
 
 /**
- * `delivery` is the source's, as the registry reports it: a release carries no field that says how
- * it will be fetched, and a null seeder count only means the indexer published no swarm data.
+ * `delivery` is the source's, as the registry reports it. A null seeder count only means the
+ * indexer published no swarm data, so it cannot be the test on its own; neither can the source's
+ * delivery, since a plugin that serves files can also emit torrent releases (a magnet and
+ * `fileIndex` into a pack), and the grab sends those to the download client, not to `resolveFile`.
  */
 export function scoreRelease(candidate: ReleaseCandidate, request: ScoringRequest, delivery: DownloadDelivery = 'torrent'): ScoredRelease {
   const reasons: ReleaseScoreReason[] = [];
@@ -214,7 +216,7 @@ export function scoreRelease(candidate: ReleaseCandidate, request: ScoringReques
   // A source that serves the file itself has no swarm to run dry: its availability is the best a
   // release can have, so it takes the full axis. Scored nothing, it lost to a six-seed torrent of
   // the same book on this axis alone.
-  if (delivery === 'file') {
+  if (isDirectRelease(candidate, delivery)) {
     reasons.push({ code: 'seeders', points: WEIGHTS.seeders, detail: DIRECT_AVAILABILITY_DETAIL });
   } else if (candidate.seeders !== null) {
     reasons.push({ code: 'seeders', points: round(seederScore(candidate.seeders)), detail: String(candidate.seeders) });
@@ -425,6 +427,11 @@ function sizeReasonFor(candidate: ReleaseCandidate, request: ScoringRequest): Re
 }
 
 /** Log-scaled: the gap between 1 and 20 seeders matters, the gap between 200 and 400 does not. */
+/** Served by the source itself: no magnet or infohash, so the grab goes through `resolveFile`. */
+function isDirectRelease(candidate: ReleaseCandidate, delivery: DownloadDelivery): boolean {
+  return delivery === 'file' && !candidate.magnet && !candidate.infoHash;
+}
+
 function seederScore(seeders: number): number {
   if (seeders <= 0) return 0;
   return WEIGHTS.seeders * Math.min(1, Math.log10(seeders + 1) / Math.log10(SEEDER_SATURATION + 1));
