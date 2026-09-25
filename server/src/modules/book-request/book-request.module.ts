@@ -73,6 +73,8 @@ import { RequestUserCleanupService } from './fulfillment/request-user-cleanup.se
 import { RequestCompanionService } from './fulfillment/request-companion.service';
 import { RequestVerificationService } from './fulfillment/request-verification.service';
 import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
+import { RequestIdentifierEnrichmentService } from './request-identifier-enrichment.service';
+import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
 
 /**
  * The dependency on `BookDockModule` is one way and must stay that way. The dock must not learn
@@ -89,6 +91,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
     AuthModule,
     UserModule,
     JobsModule,
+    MetadataFetchModule,
     forwardRef(() => NotificationModule),
   ],
   controllers: [
@@ -103,6 +106,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
   providers: [
     BookRequestSetupFlow,
     BookRequestService,
+    RequestIdentifierEnrichmentService,
     BookRequestRepository,
     BookRequestAttributionService,
     BookRequestDedupeService,

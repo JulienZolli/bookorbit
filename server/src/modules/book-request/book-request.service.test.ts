@@ -204,6 +204,11 @@ function makeService(
     {} as never,
     companions as never,
     libraryScope as never,
+    {
+      enrich: vi.fn((request: { subtitle: string | null; isbn13: string | null }) =>
+        Promise.resolve({ subtitle: request.subtitle, isbn13: request.isbn13 }),
+      ),
+    } as never,
   );
 
   return { service, repo, dedupe, libraryService, notifications, downloads, automation, automationSettings, removal, gateway, auth, companions };
