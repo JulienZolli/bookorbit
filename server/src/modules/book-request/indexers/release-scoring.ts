@@ -110,6 +110,15 @@ const SCENE_LANGUAGE_NAMES: ReadonlyMap<string, string> = new Map([
   ['swedish', 'sv'],
 ]);
 
+/**
+ * A marker then a number, on normalized text: "tome 02", "t2", "vol 3", "saison ii", "book 4".
+ * A roman numeral needs a word marker; after a bare "t" it would read "don't i" as volume one.
+ */
+const VOLUME_PATTERN = /(^| )(tome|t|vol|volume|livre|saison|season|book|part|partie|band|libro)\s?(\d{1,3}|[ivx]{1,5})(?= |$)/g;
+
+/** Title credit for a release naming the requested volume and every other requested word. */
+const VOLUME_AGREEMENT_TITLE_SCORE = 0.9;
+
 /** How closely the author must agree before a release may match the edition's subtitle alone. */
 const SUBTITLE_AUTHOR_AGREEMENT = 0.8;
 
@@ -270,9 +279,10 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
     }
   }
 
-  const combined = authorScore === null ? titleScore : titleScore * TITLE_WEIGHT + authorScore * AUTHOR_WEIGHT;
+  const workScore = volumeAdjustedTitleScore(candidate, request.title, titleScore);
+  const combined = authorScore === null ? workScore : workScore * TITLE_WEIGHT + authorScore * AUTHOR_WEIGHT;
   return {
-    code: authorScore !== null && authorScore > 0 && titleScore > 0 ? 'authorMatch' : 'titleMatch',
+    code: authorScore !== null && authorScore > 0 && workScore > 0 ? 'authorMatch' : 'titleMatch',
     points: round(combined * WEIGHTS.match),
   };
 }
@@ -298,6 +308,56 @@ function titleSimilarity(candidate: ReleaseCandidate, requestTitle: string, requ
   });
 
   return symmetricTitleSimilarity(requestTitle, comparable.join(' '));
+}
+
+/**
+ * A numbered volume of a series is its own work. The title comparison ignores bare numbers, so
+ * "Off-campus - Tome 03" read as a 94% match for "Off-campus - Tome 02" and was grabbed on its
+ * own. Only a number introduced by a volume marker counts, on both sides, so a title without one
+ * - most books, and "1984" - is scored exactly as before:
+ * - both name a volume and none agree: a different book, no title credit at all;
+ * - the release names only the requested volume and carries every other word of the requested
+ *   title: the same book under another numbering ("Off-campus Saison 2" for "Off-campus - Tome
+ *   02"), credited as a near-exact title.
+ */
+function volumeAdjustedTitleScore(candidate: ReleaseCandidate, requestTitle: string, titleScore: number): number {
+  const requested = volumesIn(requestTitle);
+  if (requested.volumes.size === 0) return titleScore;
+
+  const released = volumesIn(candidate.bookTitle?.trim() || candidate.title);
+  if (released.volumes.size === 0) return titleScore;
+  if (![...released.volumes].some((volume) => requested.volumes.has(volume))) return 0;
+
+  const onlyRequested = [...released.volumes].every((volume) => requested.volumes.has(volume));
+  const words = significantTokens(tokenizeTitleText(requested.rest));
+  const releaseWords = new Set(tokenizeTitleText(released.rest));
+  if (onlyRequested && words.length > 0 && words.every((word) => releaseWords.has(word))) {
+    return Math.max(titleScore, VOLUME_AGREEMENT_TITLE_SCORE);
+  }
+  return titleScore;
+}
+
+/** The volume numbers a title states after a marker, and the normalized title without them. */
+function volumesIn(title: string): { volumes: Set<number>; rest: string } {
+  const volumes = new Set<number>();
+  const rest = normalizeTitleText(title).replace(VOLUME_PATTERN, (_match, lead: string, marker: string, number: string) => {
+    const value = /^\d+$/.test(number) ? Number(number) : marker === 't' ? null : romanToNumber(number);
+    if (value === null || value === 0) return _match;
+    volumes.add(value);
+    return lead;
+  });
+  return { volumes, rest: rest.replace(/\s+/g, ' ').trim() };
+}
+
+function romanToNumber(roman: string): number | null {
+  const values: Record<string, number> = { i: 1, v: 5, x: 10 };
+  let total = 0;
+  for (let index = 0; index < roman.length; index++) {
+    const value = values[roman[index]!]!;
+    const next = values[roman[index + 1] ?? ''] ?? 0;
+    total += value < next ? -value : value;
+  }
+  return total > 0 && total <= 30 ? total : null;
 }
 
 /**
