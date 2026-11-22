@@ -65,12 +65,15 @@ describe('reconcileMigrationLedgerTimestamps', () => {
 
 describe('dropUnreleasedMigrationRows', () => {
   const unreleasedIdentity = '1ec15e36d30f9bf4e79f92cb59eb461e5f76f53f43293d1b08a15253f22f35cf';
+  const forkPerFileSelection = 'a3315f422bf737961cf6b134fc610f4405b583ef9bc3727550a4e841a82f5c2e';
 
-  it('drops the unreleased identity record so release migrations recorded before it still run', async () => {
+  it('drops the unreleased records so release migrations recorded before them still run', async () => {
     const { pool, query, release } = createPool('drizzle.__drizzle_migrations');
 
     await expect(dropUnreleasedMigrationRows(pool, migrations)).resolves.toEqual({ removedRows: 1 });
-    expect(query).toHaveBeenCalledWith('DELETE FROM drizzle.__drizzle_migrations WHERE hash = ANY($1::text[])', [[unreleasedIdentity]]);
+    expect(query).toHaveBeenCalledWith('DELETE FROM drizzle.__drizzle_migrations WHERE hash = ANY($1::text[])', [
+      [unreleasedIdentity, forkPerFileSelection],
+    ]);
     expect(query).toHaveBeenLastCalledWith('COMMIT');
     expect(release).toHaveBeenCalledOnce();
   });
@@ -85,7 +88,9 @@ describe('dropUnreleasedMigrationRows', () => {
   it('keeps a record the current journal owns', async () => {
     const { pool } = createPool('drizzle.__drizzle_migrations');
 
-    await expect(dropUnreleasedMigrationRows(pool, [...migrations, { hash: unreleasedIdentity }])).resolves.toEqual({ removedRows: 0 });
+    await expect(dropUnreleasedMigrationRows(pool, [...migrations, { hash: unreleasedIdentity }, { hash: forkPerFileSelection }])).resolves.toEqual({
+      removedRows: 0,
+    });
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
