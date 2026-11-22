@@ -196,7 +196,7 @@ function isExpired(expiresAt: string | null | undefined): boolean {
 
   <DialogRoot :open="showCreateForm" @update:open="handleCreateOpenChange">
     <DialogPortal>
-      <DialogOverlay class="fixed inset-0 z-50 bg-foreground/50" />
+      <DialogOverlay class="fixed inset-0 z-50 bg-scrim" />
       <DialogContent
         aria-modal="true"
         class="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-card p-6 shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -323,7 +323,7 @@ function isExpired(expiresAt: string | null | undefined): boolean {
                       <TooltipTrigger as-child>
                         <button
                           type="button"
-                          class="rounded p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          class="rounded-xs p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           :class="copiedId === token.id ? 'text-[var(--pill-success)]' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
                           :aria-label="t('settings.magicLinks.copyLinkAria', { label: token.label })"
                           @click="copyMagicUrl(token.id, token.rawToken)"
@@ -402,7 +402,7 @@ function isExpired(expiresAt: string | null | undefined): boolean {
             <div class="mt-3 flex items-center gap-1 border-t border-border pt-3">
               <button
                 type="button"
-                class="rounded p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                class="rounded-xs p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 :class="copiedId === token.id ? 'text-[var(--pill-success)]' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
                 :aria-label="t('settings.magicLinks.copyLinkAria', { label: token.label })"
                 @click="copyMagicUrl(token.id, token.rawToken)"

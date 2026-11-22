@@ -2,21 +2,18 @@
 import { computed, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { X, Loader2 } from '@lucide/vue'
-import { isValidSeriesIndex, type BookDockBulkEditResult, type BookDockMetadata } from '@bookorbit/types'
+import { isValidSeriesIndex, type BookDockBulkEditResult, type BookDockMetadata, type IdentifierInputKind } from '@bookorbit/types'
 import { api } from '@/lib/api'
+import IdentifierInput from '@/components/ui/IdentifierInput.vue'
+import InputWithSuggestions from '@/components/ui/InputWithSuggestions.vue'
+import { useSeriesNameSearch } from '@/features/book/composables/useMetadataFieldSearch'
+import type { BookDockSelectionPayload } from '../composables/useBookDockFiles'
 
 const { t } = useI18n()
+const { search: searchSeries } = useSeriesNameSearch()
 
 const props = defineProps<{
-  selectionPayload: {
-    fileIds?: number[]
-    selectAll?: boolean
-    excludedIds?: number[]
-    status?: string
-    needsReview?: boolean
-    readyToFile?: boolean
-    search?: string
-  }
+  selectionPayload: BookDockSelectionPayload
   selectionCount: number
 }>()
 
@@ -29,22 +26,29 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const result = ref<BookDockBulkEditResult | null>(null)
 
-const FIELDS = computed<{ key: keyof BookDockMetadata; label: string; type: 'text' | 'number' | 'array' }[]>(() => [
+const FIELDS = computed<{ key: keyof BookDockMetadata; label: string; type: 'text' | 'number' | 'array'; identifier?: IdentifierInputKind }[]>(() => [
   { key: 'title', label: t('bookDock.field.title'), type: 'text' },
   { key: 'authors', label: t('bookDock.field.authors'), type: 'array' },
   { key: 'publisher', label: t('bookDock.field.publisher'), type: 'text' },
   { key: 'publishedYear', label: t('bookDock.field.year'), type: 'number' },
   { key: 'language', label: t('bookDock.field.language'), type: 'text' },
-  { key: 'isbn13', label: t('bookDock.field.isbn13'), type: 'text' },
-  { key: 'isbn10', label: t('bookDock.field.isbn10'), type: 'text' },
+  { key: 'isbn13', label: t('bookDock.field.isbn13'), type: 'text', identifier: 'isbn' },
+  { key: 'isbn10', label: t('bookDock.field.isbn10'), type: 'text', identifier: 'isbn' },
   { key: 'seriesName', label: t('bookDock.field.series'), type: 'text' },
   { key: 'seriesIndex', label: t('bookDock.field.seriesIndex'), type: 'text' },
   { key: 'genres', label: t('bookDock.field.genres'), type: 'array' },
 ])
 
+const FIELD_INPUT_CLASS =
+  'w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-40'
+
 const enabledFields = reactive<Set<string>>(new Set())
 const values = reactive<Record<string, string>>({})
 const mergeArrays = ref(true)
+
+function onSeriesNameInput(value: string | null) {
+  values.seriesName = value ?? ''
+}
 
 function toggleField(key: string) {
   if (enabledFields.has(key)) enabledFields.delete(key)
@@ -114,7 +118,7 @@ function handleClose() {
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="handleClose" />
+      <div class="absolute inset-0 bg-scrim" @click="handleClose" />
       <div class="relative z-10 w-full max-w-md mx-4 bg-card border border-border rounded-lg shadow-2xl overflow-hidden">
         <div class="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 class="text-base font-semibold text-foreground">
@@ -136,23 +140,39 @@ function handleClose() {
               <input
                 type="checkbox"
                 :checked="enabledFields.has(f.key)"
-                class="size-3.5 rounded border-input accent-primary shrink-0"
+                class="size-3.5 rounded-xs border-input accent-primary shrink-0"
                 @change="toggleField(f.key)"
               />
               <label class="flex-1">
                 <span class="text-xs font-medium text-muted-foreground block mb-0.5">{{ f.label }}</span>
+                <IdentifierInput
+                  v-if="f.identifier"
+                  v-model="values[f.key]"
+                  :kind="f.identifier"
+                  :disabled="!enabledFields.has(f.key)"
+                  :class="FIELD_INPUT_CLASS"
+                />
+                <InputWithSuggestions
+                  v-else-if="f.key === 'seriesName'"
+                  :model-value="values.seriesName ?? ''"
+                  :search-fn="searchSeries"
+                  :disabled="!enabledFields.has(f.key)"
+                  :class="FIELD_INPUT_CLASS"
+                  @update:model-value="onSeriesNameInput"
+                />
                 <input
+                  v-else
                   v-model="values[f.key]"
                   :disabled="!enabledFields.has(f.key)"
                   :placeholder="f.type === 'array' ? t('bookDock.commaSeparated') : ''"
-                  class="w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-40"
+                  :class="FIELD_INPUT_CLASS"
                 />
               </label>
             </div>
           </div>
 
           <label class="flex items-center gap-2 text-xs text-muted-foreground">
-            <input v-model="mergeArrays" type="checkbox" class="size-3.5 rounded border-input accent-primary" />
+            <input v-model="mergeArrays" type="checkbox" class="size-3.5 rounded-xs border-input accent-primary" />
             {{ t('bookDock.bulkEdit.mergeArrays') }}
           </label>
 

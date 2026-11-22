@@ -727,7 +727,11 @@ function handleTestCurrent() {
 
       <template #default>
         <SettingsSection :title="t('settings.system.requests.sections.connection')">
-          <SettingsField v-if="draft.id === null" :label="t('settings.system.requests.indexers.fields.type')" input-id="indexer-type">
+          <SettingsField
+            v-if="draft.id === null && isBuiltInAdapter(draft.adapterType)"
+            :label="t('settings.system.requests.indexers.fields.type')"
+            input-id="indexer-type"
+          >
             <template #default="{ describedBy }">
               <select
                 id="indexer-type"
@@ -1061,7 +1065,7 @@ function handleTestCurrent() {
         </SettingsSection>
 
         <details class="border-t border-border pt-4" :open="Boolean(draft.resolvers.length || draft.proxyUrl)">
-          <summary class="settings-label cursor-pointer rounded focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none">
+          <summary class="settings-label cursor-pointer rounded-xs focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none">
             {{ t('settings.system.requests.indexers.network.title') }}
           </summary>
           <p class="settings-hint mt-1">

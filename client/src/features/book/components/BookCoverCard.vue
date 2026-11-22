@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import type { BookCard, BookFileRef, CoverAspectRatio } from '@bookorbit/types'
-import { FORMAT_TO_GROUP, getBookMediaProfile, READER_OPENABLE_FORMATS } from '@bookorbit/types'
-import { getFormatColor } from '../lib/format-colors'
+import type { BookCard, BookFileRef, ConcreteBookMediaKind, CoverAspectRatio } from '@bookorbit/types'
+import { getBookMediaKind, getBookMediaProfile, isAudioFormat, READER_OPENABLE_FORMATS } from '@bookorbit/types'
+import BookCardFormatBadges from './BookCardFormatBadges.vue'
+import BookCardFormatList from './BookCardFormatList.vue'
+import { bookFormatEntries, fileFormatKey, formatKeyName } from '../lib/book-formats'
+import { cardMediaView } from '../lib/card-media'
 import { computed, inject, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -12,7 +15,6 @@ import {
   Eye,
   FolderInput,
   FolderPlus,
-  Headphones,
   Image,
   Lock,
   LockOpen,
@@ -44,6 +46,7 @@ import { useRefreshMetadata } from '../composables/useRefreshMetadata'
 import { useRefreshingBooks } from '../composables/useRefreshingBooks'
 import { mergeBookCardWithDetail } from '../lib/book-card-mapper'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { useDisplaySettings, type GridCardLabelField } from '@/composables/useDisplaySettings'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO, coverAspectRatioValue, fittedCoverFrameStyle } from '../lib/cover-aspect-ratio'
 import { useBookDownload } from '@/features/book/composables/useBookDownload'
@@ -53,7 +56,7 @@ import BookCoverArtwork from './BookCoverArtwork.vue'
 import BookCoverSurface from './BookCoverSurface.vue'
 import { fetchAuthors } from '@/features/author/api/author'
 import { useI18n } from 'vue-i18n'
-import { hasReadAlong, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
+import { toast } from 'vue-sonner'
 
 const { t } = useI18n()
 
@@ -68,6 +71,8 @@ const props = defineProps<{
   coverAspectRatio?: CoverAspectRatio
   /** Opt-in: only views that host the destination sheet should offer this. */
   allowMoveToLibrary?: boolean
+  /** The medium the surrounding grid shows, such as a series' Audiobooks group. */
+  mediaKind?: ConcreteBookMediaKind | null
 }>()
 
 type BookActionType = 'quick-view' | 'add-to-collection' | 'move-to-library' | 'delete'
@@ -80,31 +85,39 @@ const emit = defineEmits<{
 const authorLine = computed(() => props.book.authors.join(', ') || null)
 const authorQuery = computed(() => props.book.authors[0] ?? null)
 
-const readableFiles = computed(() => props.book.files.filter((f) => f.format && READER_OPENABLE_FORMATS.has(f.format)))
-const primaryFile = computed(() => readableFiles.value.find((f) => f.role === 'primary') ?? readableFiles.value[0] ?? null)
-const mediaProfile = computed(() => getBookMediaProfile(readableFiles.value))
-const readAlongFile = computed(() => readableFiles.value.find((file) => hasReadAlong(file)) ?? null)
-const formatOverlayFile = computed(() => readAlongFile.value ?? primaryFile.value)
-const isAudiobook = computed(() => mediaProfile.value.primaryMediaKind === 'audiobook')
-const isComic = computed(() => mediaProfile.value.primaryMediaKind === 'comic')
+// Card files arrive in edition order, so the first entry is the primary edition.
+const formatEntries = computed(() => bookFormatEntries(props.book.files))
+/** One file per edition: an audiobook downloads as a whole and opens from its first track. */
+const downloadableFiles = computed(() => formatEntries.value.map((entry) => entry.files[0]!))
+const openableFiles = computed(() => downloadableFiles.value.filter((file) => READER_OPENABLE_FORMATS.has(file.format!.toLowerCase())))
+const mediaView = computed(() => cardMediaView(props.book, props.mediaKind))
+const primaryFile = computed(() => {
+  const kind = mediaView.value?.kind
+  const fileOfKind = kind ? openableFiles.value.find((f) => getBookMediaKind(f.format) === kind) : undefined
+  return fileOfKind ?? openableFiles.value.find((f) => f.role === 'primary') ?? openableFiles.value[0] ?? null
+})
+const primaryDownloadFile = computed(() => downloadableFiles.value[0] ?? null)
+const mediaProfile = computed(() => getBookMediaProfile(formatEntries.value.flatMap((entry) => entry.files)))
+const formatOverlayKey = computed(() => {
+  const kind = mediaView.value?.kind
+  const entry = kind ? formatEntries.value.find((e) => getBookMediaKind(e.files[0]?.format) === kind) : formatEntries.value[0]
+  return entry?.key ?? null
+})
+/** Every edition the card offers, the one its media view leads with first; linked formats follow. */
+const ownFormatKeys = computed(() => {
+  const keys = formatEntries.value.map((entry) => entry.key)
+  const lead = formatOverlayKey.value
+  return lead ? [lead, ...keys.filter((key) => key !== lead)] : keys
+})
+const hasFormatBadges = computed(() => ownFormatKeys.value.length > 0 || (props.book.linked?.books.length ?? 0) > 0)
+const displayMediaKind = computed(() => mediaView.value?.kind ?? mediaProfile.value.primaryMediaKind)
+const isAudiobook = computed(() => displayMediaKind.value === 'audiobook')
+const isComic = computed(() => displayMediaKind.value === 'comic')
 
-// For multi-file audiobooks, collapse all tracks into one representative entry.
-// The audio reader loads the full track queue from the book, so opening any track is equivalent.
-const isMultiTrackAudio = computed(() => {
-  const audioFiles = readableFiles.value.filter((f) => FORMAT_TO_GROUP[f.format!] === 'audio')
-  return audioFiles.length > 1
-})
-const openableFiles = computed(() => {
-  if (isMultiTrackAudio.value) {
-    const first = readableFiles.value.find((f) => FORMAT_TO_GROUP[f.format!] === 'audio')
-    const nonAudio = readableFiles.value.filter((f) => FORMAT_TO_GROUP[f.format!] !== 'audio')
-    return first ? [first, ...nonAudio] : nonAudio
-  }
-  return readableFiles.value
-})
+const isMultiTrackAudio = computed(() => formatEntries.value.some((entry) => entry.audio && entry.files.length > 1))
 
 const { coverUrl, bumpVersion } = useCoverVersions()
-const coverSrc = computed(() => coverUrl(props.book.id, 'thumbnail', props.book.updatedAt ?? props.book.addedAt))
+const coverSrc = computed(() => coverUrl(props.book.id, 'thumbnail', props.book.coverVersion, mediaView.value?.coverMedium))
 
 const { refreshing, refreshWithFeedback } = useRefreshMetadata()
 const { isRefreshing } = useRefreshingBooks()
@@ -115,8 +128,14 @@ async function reExtractCover() {
   if (reExtractingCover.value) return
   reExtractingCover.value = true
   try {
-    await fetch(`/api/v1/books/${props.book.id}/re-extract-cover`, { method: 'POST' })
+    const res = await fetch(`/api/v1/books/${props.book.id}/re-extract-cover`, { method: 'POST' })
+    if (!res.ok) {
+      toast.error(t('book.coverRegeneration.failed'))
+      return
+    }
     bumpVersion(props.book.id)
+  } catch {
+    toast.error(t('book.coverRegeneration.failed'))
   } finally {
     reExtractingCover.value = false
   }
@@ -127,16 +146,21 @@ async function handleRefreshMetadata() {
   if (updated) emit('update:book', mergeBookCardWithDetail(props.book, updated))
 }
 const { hasPermission } = usePermissions()
-const { cardOverlays, bookCoverDisplayMode, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, thumbnailClickAction } = useDisplaySettings()
+const { hasLibraryPermission } = useLibraryPermissions()
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', props.book?.libraryId, 'editor'))
+const { cardOverlays, formatBadgeStyle, bookCoverDisplayMode, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, thumbnailClickAction } =
+  useDisplaySettings()
 const injectedCoverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
 const effectiveCoverAspectRatio = computed<CoverAspectRatio>(
-  () => props.coverAspectRatio ?? props.book.coverAspectRatio ?? injectedCoverAspectRatio.value,
+  () => props.coverAspectRatio ?? mediaView.value?.coverAspectRatio ?? props.book.coverAspectRatio ?? injectedCoverAspectRatio.value,
 )
 const showSendDialog = ref(false)
 
 const hasProgress = computed(() => props.book.readingProgress != null && props.book.readingProgress > 0)
 const showProgressBar = computed(() => cardOverlays.value.includes('progress-bar') && hasProgress.value)
-const showFormatOverlay = computed(() => cardOverlays.value.includes('format') && formatOverlayFile.value?.format != null)
+const showFormatOverlay = computed(() => cardOverlays.value.includes('format') && hasFormatBadges.value)
+/** Every badge style but the plain pill hides which formats a book has, so the hover overlay lists them. */
+const showFormatList = computed(() => showFormatOverlay.value && formatBadgeStyle.value !== 'primary')
 const showRatingOverlay = computed(() => cardOverlays.value.includes('rating') && props.book.rating != null)
 const showLockStatusPill = computed(() => cardOverlays.value.includes('lock-status') && !props.selectionMode && !isMissing.value)
 const metadataLocked = computed(() => props.book.hasMetadataLocks)
@@ -161,13 +185,6 @@ const ratingColor = computed(() => {
   if (r === 3) return '#ca8a04'
   if (r === 4) return '#65a30d'
   return '#059669'
-})
-
-const formatOverlayStyle = computed(() => {
-  const file = formatOverlayFile.value
-  if (!file?.format) return {}
-  const color = hasReadAlong(file) ? READ_ALONG_FORMAT_COLOR : getFormatColor(file.format)
-  return { backgroundColor: `${color}e6` }
 })
 
 const coverLoaded = ref(false)
@@ -361,7 +378,12 @@ const showBelowCoverLabelArea = computed(() => props.showLabel && cardInfoMode.v
 const { downloadFile, exportBooks } = useBookDownload()
 
 function isAudioFile(file: BookFileRef) {
-  return !!file.format && FORMAT_TO_GROUP[file.format] === 'audio'
+  return !!file.format && isAudioFormat(file.format)
+}
+
+function fileFormatName(file: BookFileRef): string {
+  const key = fileFormatKey(file)
+  return key ? formatKeyName(key) : t('book.unknownFormat')
 }
 
 function handleDownloadFile(file: BookFileRef) {
@@ -428,7 +450,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
     <div class="group">
       <BookCoverSurface
         class="book-cover-surface--spine-fitted relative w-full rounded-sm overflow-hidden transition-[box-shadow,transform,ring] duration-150 will-change-transform"
-        :class="isMissing || selectionMode ? '' : 'group-hover:scale-[1.02]'"
+        :class="isMissing || selectionMode ? '' : 'group-hover:[transform:var(--cover-hover-transform)] motion-reduce:group-hover:[transform:none]'"
         :interactive="!isMissing && !selectionMode"
         :disable-spine="isAudiobook"
         :is-comic="isComic"
@@ -449,6 +471,11 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
           :image-class="isMissing ? 'brightness-50' : ''"
           :spine="!isAudiobook"
           :is-comic="isComic"
+          :authors="book.authors"
+          :subtitle="book.subtitle"
+          :series-name="book.seriesName"
+          :series-index="book.seriesIndex"
+          :genres="book.genres"
           @load="handleArtworkLoad"
           @error="handleArtworkError"
         />
@@ -499,20 +526,13 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
             <span class="text-[9px] font-bold text-white leading-none">{{ Math.round(book.rating!) }}</span>
           </div>
 
-          <!-- Bottom-right overlay: format badge -->
+          <!-- Bottom-right overlay: the format badge, in the style the user chose; it places itself -->
           <div
             v-if="showFormatOverlay && !selectionMode"
-            class="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 pointer-events-none transition-opacity duration-150"
+            class="absolute inset-0 z-10 pointer-events-none transition-opacity duration-150"
             :class="overlayFadeClass"
           >
-            <span
-              class="inline-flex items-center gap-0.5 text-[8px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded text-white"
-              :style="formatOverlayStyle"
-              :title="hasReadAlong(formatOverlayFile) ? READ_ALONG_FORMAT_TITLE : undefined"
-            >
-              {{ formatOverlayFile!.format!.toUpperCase() }}
-              <Headphones v-if="hasReadAlong(formatOverlayFile)" class="size-2.5 shrink-0" :stroke-width="2.5" aria-hidden="true" />
-            </span>
+            <BookCardFormatBadges :own-keys="ownFormatKeys" :linked="book.linked" :badge-style="formatBadgeStyle" />
           </div>
 
           <!-- Reading progress bar - bottom edge -->
@@ -531,7 +551,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
             :class="selected ? 'bg-primary/20 ring-2 ring-inset ring-primary' : ''"
           >
             <div
-              class="absolute top-1.5 left-1.5 h-5 w-5 rounded flex items-center justify-center transition-colors"
+              class="absolute top-1.5 left-1.5 h-5 w-5 rounded-xs flex items-center justify-center transition-colors"
               :class="selected ? 'bg-primary' : 'bg-black/40 border border-white/50'"
             >
               <Check v-if="selected" class="text-primary-foreground" :size="12" />
@@ -540,7 +560,9 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
 
           <!-- Missing badge -->
           <div v-if="isMissing" class="absolute top-1.5 right-1.5 z-20">
-            <span class="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-600/95 text-white">
+            <span
+              class="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded-xs bg-amber-600/95 text-white"
+            >
               <TriangleAlert class="size-2.5 shrink-0" />
               {{ t('book.card.missing') }}
             </span>
@@ -610,6 +632,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
 
             <!-- Bottom: title/author (hover-overlay mode only) + kebab (when not in below-cover label row) -->
             <div class="shrink-0 flex flex-col pr-10">
+              <BookCardFormatList v-if="showFormatList" class="mb-1" :own-keys="ownFormatKeys" :linked="book.linked" />
               <div class="flex items-start justify-between gap-2">
                 <p v-if="showHoverTitle" class="text-xs font-semibold text-white leading-tight min-w-0 flex-1" :class="hoverTitleClampClass">
                   {{ book.title ?? '-' }}
@@ -644,8 +667,8 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent>
                       <DropdownMenuItem v-for="file in openableFiles" :key="file.id" @click="openFile(file)">
-                        <span v-if="isMultiTrackAudio && FORMAT_TO_GROUP[file.format!] === 'audio'">{{ t('book.file.audiobook') }}</span>
-                        <span v-else>{{ file.format?.toUpperCase() ?? '?' }}</span>
+                        <span v-if="isMultiTrackAudio && isAudioFile(file)">{{ t('book.file.audiobook') }}</span>
+                        <span v-else>{{ fileFormatName(file) }}</span>
                         <span v-if="file.role === 'primary' && !isMultiTrackAudio" class="ml-auto pl-4 text-[10px] text-primary">{{
                           t('book.file.primary')
                         }}</span>
@@ -659,21 +682,21 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
 
                   <!-- Download submenu -->
                   <DropdownMenuItem
-                    v-if="hasPermission('library_download') && openableFiles.length === 1 && primaryFile"
-                    @click="handleDownloadFile(primaryFile)"
+                    v-if="hasPermission('library_download') && downloadableFiles.length === 1 && primaryDownloadFile"
+                    @click="handleDownloadFile(primaryDownloadFile)"
                   >
                     <Download class="size-4 mr-2" />
                     {{ t('book.actions.download') }}
                   </DropdownMenuItem>
-                  <DropdownMenuSub v-else-if="hasPermission('library_download') && openableFiles.length > 1">
+                  <DropdownMenuSub v-else-if="hasPermission('library_download') && downloadableFiles.length > 1">
                     <DropdownMenuSubTrigger>
                       <Download class="size-4 mr-2" />
                       {{ t('book.actions.download') }}
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent>
-                      <DropdownMenuItem v-for="file in openableFiles" :key="file.id" @click="handleDownloadFile(file)">
+                      <DropdownMenuItem v-for="file in downloadableFiles" :key="file.id" @click="handleDownloadFile(file)">
                         <span v-if="isMultiTrackAudio && isAudioFile(file)">{{ t('book.download.audiobookZip') }}</span>
-                        <span v-else>{{ file.format?.toUpperCase() ?? '?' }}</span>
+                        <span v-else>{{ fileFormatName(file) }}</span>
                         <span v-if="file.role === 'primary' && !isMultiTrackAudio" class="ml-auto pl-4 text-[10px] text-primary">{{
                           t('book.file.primary')
                         }}</span>
@@ -687,8 +710,8 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
                     <BookText class="size-4 mr-2" />
                     {{ t('book.actions.bookDetails') }}
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator v-if="hasPermission('library_edit_metadata')" />
-                  <DropdownMenuSub v-if="hasPermission('library_edit_metadata')">
+                  <DropdownMenuSeparator v-if="canEditMetadata" />
+                  <DropdownMenuSub v-if="canEditMetadata">
                     <DropdownMenuSubTrigger>
                       <Pencil class="size-4 mr-2" />
                       {{ t('book.actions.metadata') }}
@@ -703,7 +726,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
                         <RefreshCw v-else class="size-4 mr-2" />
                         {{ t('book.actions.refreshMetadata') }}
                       </DropdownMenuItem>
-                      <DropdownMenuItem :disabled="reExtractingCover" @click="reExtractCover()">
+                      <DropdownMenuItem :disabled="reExtractingCover" @click="reExtractCover">
                         <Loader2 v-if="reExtractingCover" class="size-4 mr-2 animate-spin" />
                         <Image v-else class="size-4 mr-2" />
                         {{ t('book.actions.regenerateCover') }}
@@ -714,7 +737,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
                     <FolderPlus class="size-4 mr-2" />
                     {{ t('book.actions.addToCollection') }}
                   </DropdownMenuItem>
-                  <DropdownMenuItem v-if="allowMoveToLibrary && hasPermission('library_edit_metadata')" @click="emit('action', 'move-to-library')">
+                  <DropdownMenuItem v-if="allowMoveToLibrary && canEditMetadata" @click="emit('action', 'move-to-library')">
                     <FolderInput class="size-4 mr-2" />
                     {{ t('book.move.action') }}
                   </DropdownMenuItem>
@@ -771,7 +794,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
         <div v-else class="flex-1" />
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
-            <button class="shrink-0 p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors" data-testid="grid-card-kebab">
+            <button class="shrink-0 p-0.5 rounded-xs text-muted-foreground hover:text-foreground transition-colors" data-testid="grid-card-kebab">
               <MoreVertical class="size-3.5" />
             </button>
           </DropdownMenuTrigger>
@@ -787,8 +810,8 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 <DropdownMenuItem v-for="file in openableFiles" :key="file.id" @click="openFile(file)">
-                  <span v-if="isMultiTrackAudio && FORMAT_TO_GROUP[file.format!] === 'audio'">{{ t('book.file.audiobook') }}</span>
-                  <span v-else>{{ file.format?.toUpperCase() ?? '?' }}</span>
+                  <span v-if="isMultiTrackAudio && isAudioFile(file)">{{ t('book.file.audiobook') }}</span>
+                  <span v-else>{{ fileFormatName(file) }}</span>
                   <span v-if="file.role === 'primary' && !isMultiTrackAudio" class="ml-auto pl-4 text-[10px] text-primary">{{
                     t('book.file.primary')
                   }}</span>
@@ -801,21 +824,21 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
             </DropdownMenuItem>
 
             <DropdownMenuItem
-              v-if="hasPermission('library_download') && openableFiles.length === 1 && primaryFile"
-              @click="handleDownloadFile(primaryFile)"
+              v-if="hasPermission('library_download') && downloadableFiles.length === 1 && primaryDownloadFile"
+              @click="handleDownloadFile(primaryDownloadFile)"
             >
               <Download class="size-4 mr-2" />
               {{ t('book.actions.download') }}
             </DropdownMenuItem>
-            <DropdownMenuSub v-else-if="hasPermission('library_download') && openableFiles.length > 1">
+            <DropdownMenuSub v-else-if="hasPermission('library_download') && downloadableFiles.length > 1">
               <DropdownMenuSubTrigger>
                 <Download class="size-4 mr-2" />
                 {{ t('book.actions.download') }}
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
-                <DropdownMenuItem v-for="file in openableFiles" :key="file.id" @click="handleDownloadFile(file)">
+                <DropdownMenuItem v-for="file in downloadableFiles" :key="file.id" @click="handleDownloadFile(file)">
                   <span v-if="isMultiTrackAudio && isAudioFile(file)">{{ t('book.download.audiobookZip') }}</span>
-                  <span v-else>{{ file.format?.toUpperCase() ?? '?' }}</span>
+                  <span v-else>{{ fileFormatName(file) }}</span>
                   <span v-if="file.role === 'primary' && !isMultiTrackAudio" class="ml-auto pl-4 text-[10px] text-primary">{{
                     t('book.file.primary')
                   }}</span>
@@ -829,8 +852,8 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
               <BookText class="size-4 mr-2" />
               {{ t('book.actions.bookDetails') }}
             </DropdownMenuItem>
-            <DropdownMenuSeparator v-if="hasPermission('library_edit_metadata')" />
-            <DropdownMenuSub v-if="hasPermission('library_edit_metadata')">
+            <DropdownMenuSeparator v-if="canEditMetadata" />
+            <DropdownMenuSub v-if="canEditMetadata">
               <DropdownMenuSubTrigger>
                 <Pencil class="size-4 mr-2" />
                 {{ t('book.actions.metadata') }}
@@ -845,7 +868,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
                   <RefreshCw v-else class="size-4 mr-2" />
                   {{ t('book.actions.refreshMetadata') }}
                 </DropdownMenuItem>
-                <DropdownMenuItem :disabled="reExtractingCover" @click="reExtractCover()">
+                <DropdownMenuItem :disabled="reExtractingCover" @click="reExtractCover">
                   <Loader2 v-if="reExtractingCover" class="size-4 mr-2 animate-spin" />
                   <Image v-else class="size-4 mr-2" />
                   {{ t('book.actions.regenerateCover') }}
@@ -904,6 +927,7 @@ const secondaryLabelText = computed(() => resolveBookLabel(gridCardSecondaryLabe
     :selected-count="1"
     :book-files="book.files"
     :book-title="book.title ?? undefined"
+    :book-authors="authorLine ?? undefined"
     @update:open="showSendDialog = $event"
   />
 </template>

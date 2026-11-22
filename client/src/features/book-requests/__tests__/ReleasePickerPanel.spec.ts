@@ -1,4 +1,5 @@
 import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
+import { defineComponent, h, nextTick } from 'vue'
 import type { DOMWrapper, VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Permission } from '@bookorbit/types'
@@ -13,12 +14,22 @@ const hasPermission = vi.fn<(permission: string) => boolean>()
 vi.mock('@/features/auth/composables/usePermissions', () => ({
   usePermissions: () => ({ hasPermission: (permission: string) => hasPermission(permission) }),
 }))
-vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: '7' }, query: {} }),
-  useRouter: () => ({ push: vi.fn<() => void>() }),
+// A route that can move, so a pair's tabs and the hop after a send can be followed. Pushing to a
+// release picker moves it the way the router would; every other destination is only recorded.
+const nav = vi.hoisted(() => ({
+  route: null as unknown as { params: { id: string }; query: Record<string, string> },
+  push: vi.fn<(to: { name: string; params?: { id: number } }) => void>(),
 }))
+vi.mock('vue-router', async () => {
+  const { reactive } = await import('vue')
+  nav.route = reactive({ params: { id: '7' }, query: {} })
+  return { useRoute: () => nav.route, useRouter: () => ({ push: nav.push }) }
+})
+// The real composable builds the router at module scope.
+vi.mock('@/features/auth/composables/useAuth', () => ({ useAuth: () => ({ user: { value: { id: 1 } } }) }))
 
 import ReleasePickerPanel from '../components/ReleasePickerPanel.vue'
+import { clearReleaseSearchCache } from '../composables/useReleasePicker'
 
 function request(overrides: Partial<BookRequestItem> = {}): BookRequestItem {
   return {
@@ -35,6 +46,7 @@ function request(overrides: Partial<BookRequestItem> = {}): BookRequestItem {
     targetFolderId: null,
     decidedByUserId: null,
     decidedByUsername: null,
+    decidedByName: null,
     decidedAt: null,
     decisionNote: null,
     matchedBookId: null,
@@ -47,6 +59,8 @@ function request(overrides: Partial<BookRequestItem> = {}): BookRequestItem {
     subscribers: [],
     download: null,
     dismissed: false,
+    companionRequestId: null,
+    targetBookId: null,
     createdAt: '2026-08-01T00:00:00.000Z',
     updatedAt: '2026-08-01T00:00:00.000Z',
     title: 'Spark of the Everflame',
@@ -72,6 +86,7 @@ function release(overrides: Partial<ReleaseCandidateItem> = {}): ReleaseCandidat
     indexerName: 'MyAnonaMouse',
     guid: 'g1',
     title: 'Spark of the Everflame',
+    infoUrl: null,
     sizeBytes: 3_100_000,
     seeders: 506,
     leechers: 2,
@@ -166,9 +181,39 @@ const READY_INSPECTION = {
   containerCount: 0,
 }
 
-/** The release list, not the source transcript above it: both are lists, so both hold `li`. */
+/** One box per release; the group headings around them are not releases. */
 function releaseRows(wrapper: VueWrapper): DOMWrapper<Element>[] {
-  return wrapper.findAll('ul[aria-label="Releases, ranked"] > li')
+  return wrapper.findAll('li[data-release]')
+}
+
+/** Menus render in place, so a filter's options can be read and clicked without opening a portal. */
+const passthrough = defineComponent({
+  setup:
+    (_, { slots }) =>
+    () =>
+      h('div', slots.default?.()),
+})
+
+const menuItem = defineComponent({
+  setup:
+    (_, { slots }) =>
+    () =>
+      h('button', { type: 'button' }, slots.default?.()),
+})
+
+const STUBS = {
+  RouterLink: RouterLinkStub,
+  Popover: passthrough,
+  PopoverTrigger: passthrough,
+  PopoverContent: passthrough,
+  DropdownMenu: passthrough,
+  DropdownMenuTrigger: passthrough,
+  DropdownMenuContent: passthrough,
+  DropdownMenuItem: menuItem,
+}
+
+function formatPills(row: DOMWrapper<Element>): string[] {
+  return row.findAll('[data-format]').map((pill) => pill.text())
 }
 
 function changeSearch(wrapper: VueWrapper): DOMWrapper<Element> {
@@ -186,7 +231,7 @@ async function render(search: unknown = MIXED) {
     return respond(request())
   })
 
-  const wrapper = mount(ReleasePickerPanel, { global: { stubs: { RouterLink: RouterLinkStub } } })
+  const wrapper = mount(ReleasePickerPanel, { global: { stubs: STUBS } })
   await flushPromises()
   return wrapper
 }
@@ -195,20 +240,29 @@ beforeEach(() => {
   api.mockReset()
   // A moderator by default, which is the path every existing case in this file was written against.
   hasPermission.mockReturnValue(true)
+  clearReleaseSearchCache()
+  nav.push.mockReset()
+  nav.push.mockImplementation((to) => {
+    if (to.name === 'book-request-releases' && to.params) nav.route.params.id = String(to.params.id)
+  })
+  nav.route.params.id = '7'
+  nav.route.query = {}
 })
 
 describe('ReleasePickerPanel', () => {
   it('states the searched key once, and what every source did with it', async () => {
     const wrapper = await render()
-    const panel = wrapper.get('section[aria-label="Active search"]')
-    const sources = panel.get('ul[aria-label="Sources"]').text()
+    const panel = wrapper.get('[aria-label="Active search"]')
+    const [tracker, libgen] = panel.get('ul[aria-label="Sources"]').findAll('li')
 
-    expect(panel.text()).toContain('Searched9781234567897')
-    // The source that was handed the same key says so rather than repeating the digits.
-    expect(sources).toContain('Library Genesissearched the ISBN')
-    expect(sources).toContain('1 release')
-    // The one that could not take an ISBN shows the string it was actually sent.
-    expect(sources).toContain('MyAnonaMouseSpark of the Everflame Penn Cole')
+    expect(panel.text()).toContain('Searched ISBN 9781234567897')
+    // The source that was handed the same key does not repeat the digits stated once above it.
+    expect(libgen!.text()).toContain('Library Genesis')
+    expect(libgen!.text()).toContain('1 release')
+    expect(libgen!.text()).not.toContain('9781234567897')
+    // The one that could not take an ISBN says so, with the string it was actually sent on hover.
+    expect(tracker!.text()).toContain('by title and author')
+    expect(tracker!.find('[title="Spark of the Everflame Penn Cole"]').exists()).toBe(true)
   })
 
   it('counts the releases a source had dropped by the hard filters', async () => {
@@ -259,7 +313,7 @@ describe('ReleasePickerPanel', () => {
       indexers: [{ ...MIXED.indexers[0], count: 0 }],
     })
 
-    const panel = wrapper.get('section[aria-label="Active search"]')
+    const panel = wrapper.get('[aria-label="Active search"]')
     expect(panel.text()).toContain('Nothing found for Spark of the Everflame Penn Cole')
     expect(wrapper.get('#release-search-options').text()).toContain('9781250301697')
     // The panel is the empty state now, so nothing repeats it under the list.
@@ -274,9 +328,9 @@ describe('ReleasePickerPanel', () => {
     const wrapper = await render({ ...MIXED, releases: [], indexers: [], enabledIndexerCount: 0, configuredIndexerCount: 0 })
 
     expect(wrapper.text()).not.toContain('Nothing found for')
-    expect(wrapper.text()).not.toContain('Searched9781234567897')
+    expect(wrapper.text()).not.toContain('Searched ISBN 9781234567897')
     // The whole search transcript goes with it: its filters and alternate keys describe a search.
-    expect(wrapper.find('section[aria-label="Active search"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Active search"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('No search sources are set up yet.')
     expect(wrapper.text()).toContain('Add a source')
   })
@@ -425,7 +479,7 @@ describe('ReleasePickerPanel', () => {
     await changeSearch(wrapper).trigger('click')
 
     expect(wrapper.get('[aria-labelledby="release-search-local-criteria"]').text()).toContain('Media:E-book')
-    expect(wrapper.get('section[aria-label="Active search"]').text()).toContain('Searched9781234567897')
+    expect(wrapper.get('[aria-label="Active search"]').text()).toContain('Searched ISBN 9781234567897')
   })
 
   /**
@@ -433,9 +487,17 @@ describe('ReleasePickerPanel', () => {
    * read "AZW3" for a release that carries the requested EPUB.
    */
   it('labels a release with every format it carries, the requested one first', async () => {
-    const text = (await render()).text()
+    const rows = releaseRows(await render())
 
-    expect(text).toContain('EPUB + AZW3 + MOBI')
+    expect(formatPills(rows[0]!)).toEqual(['EPUB', 'AZW3', 'MOBI'])
+  })
+
+  /** Each format wears the colour the library gives it everywhere else. */
+  it('colours each format pill by its format', async () => {
+    const pills = releaseRows(await render())[0]!.findAll('[data-format]')
+
+    expect(pills[0]!.attributes('style')).toContain('--pill-format-epub')
+    expect(pills[1]!.attributes('style')).toContain('--pill-format-azw3')
   })
 
   it('offers a format chip for every format a release carries, not just its first', async () => {
@@ -445,13 +507,24 @@ describe('ReleasePickerPanel', () => {
     expect(chips.some((chip) => chip.startsWith('MOBI'))).toBe(true)
   })
 
-  /** Per-theme tokens, not one hex for both themes: the chip's own text is what carries the colour. */
-  it('paints format chips from the shared per-theme format tokens', async () => {
+  /** A choice in a menu says it is the active one, and the menu's trigger names it with a way out. */
+  it('names an active filter on its trigger and clears it in one step', async () => {
     const wrapper = await render()
-    const epub = wrapper.findAll('[aria-pressed]').find((chip) => chip.text().startsWith('EPUB'))
+    const epub = wrapper
+      .get('[aria-label="Format"]')
+      .findAll('[aria-pressed]')
+      .find((option) => option.text().startsWith('EPUB'))!
+    await epub.trigger('click')
 
-    expect(epub!.attributes('style')).toContain('color: var(--pill-format-epub)')
-    expect(epub!.attributes('style')).toContain('background-color: color-mix(in oklch, var(--pill-format-epub) 10%, transparent)')
+    expect(
+      wrapper
+        .get('[aria-label="Format"]')
+        .findAll('[aria-pressed="true"]')
+        .map((option) => option.text()),
+    ).toEqual([expect.stringMatching(/^EPUB/)])
+    await wrapper.get('button[aria-label="Clear the Format filter"]').trigger('click')
+    expect(wrapper.find('button[aria-label="Clear the Format filter"]').exists()).toBe(false)
+    expect(releaseRows(wrapper)).toHaveLength(2)
   })
 
   /** Filtering to EPUB used to hide the very release that carries one. */
@@ -460,7 +533,7 @@ describe('ReleasePickerPanel', () => {
     const epub = wrapper.findAll('[aria-pressed]').find((chip) => chip.text().startsWith('EPUB'))
     await epub!.trigger('click')
 
-    expect(releaseRows(wrapper).some((row) => row.text().includes('EPUB + AZW3 + MOBI'))).toBe(true)
+    expect(releaseRows(wrapper).some((row) => formatPills(row).join(' ') === 'EPUB AZW3 MOBI')).toBe(true)
   })
 
   /** A plain HTTP library has no swarm, so silence there is not a missing count. */
@@ -469,16 +542,17 @@ describe('ReleasePickerPanel', () => {
     const libgen = rows.find((row) => row.text().includes('Library Genesis'))
 
     expect(libgen!.text()).not.toContain('Seeders unknown')
+    expect(libgen!.text()).not.toContain('Unknown')
     expect(libgen!.text()).toContain('Direct')
   })
 
   /**
-   * The two chips carry different facts, and before this they carried the same hue: a scan down
-   * the list could not tell a swarm row from a direct download without reading either one.
+   * The two facts are different, and once read the same hue: a scan down the list could not tell
+   * a swarm row from a direct download without reading either one.
    */
   it('separates torrent and direct download by colour', async () => {
     const rows = releaseRows(await render())
-    const chipClass = (row: (typeof rows)[number], label: string) =>
+    const factClass = (row: (typeof rows)[number], label: string) =>
       row
         .findAll('span')
         .find((span) => span.text() === label)!
@@ -487,8 +561,8 @@ describe('ReleasePickerPanel', () => {
     const tracker = rows.find((row) => row.text().includes('MyAnonaMouse'))!
     const libgen = rows.find((row) => row.text().includes('Library Genesis'))!
 
-    expect(chipClass(tracker, 'Torrent')).toContain('--pill-torrent')
-    expect(chipClass(libgen, 'Direct')).toContain('--pill-direct')
+    expect(factClass(tracker, 'Torrent')).toContain('--pill-torrent')
+    expect(factClass(libgen, 'Direct')).toContain('--pill-direct')
   })
 
   it('labels a Newznab release as Usenet without showing swarm counts', async () => {
@@ -498,16 +572,13 @@ describe('ReleasePickerPanel', () => {
       releases: [release({ seeders: null })],
     }
 
-    const row = releaseRows(await render(search))[0]!
-    expect(row.text()).toContain('Usenet')
+    const wrapper = await render(search)
+    const row = releaseRows(wrapper)[0]!
+    // One source, so the protocol is said once above the list rather than on every row.
+    expect(wrapper.text()).toContain('all from MyAnonaMouse')
     expect(row.text()).not.toContain('Seeders')
-    expect(
-      row
-        .findAll('span')
-        .find((span) => span.text() === 'Usenet')
-        ?.attributes('class'),
-    ).toContain('--pill-usenet')
-    expect(row.text()).toContain('About contents')
+    expect(row.text()).not.toContain('Unknown')
+    expect(row.find('button[aria-label="View details of Spark of the Everflame"]').exists()).toBe(true)
   })
 
   it('headlines the title and author query that actually returned a Newznab fallback', async () => {
@@ -523,9 +594,9 @@ describe('ReleasePickerPanel', () => {
       releases: [release({ seeders: null })],
     }
 
-    const panel = (await render(search)).get('section[aria-label="Active search"]')
-    expect(panel.text()).toContain('Searched title and authorSpark of the Everflame Penn Cole')
-    expect(panel.text()).not.toContain('Searched9781234567897')
+    const panel = (await render(search)).get('[aria-label="Active search"]')
+    expect(panel.text()).toContain('Searched title and author Spark of the Everflame Penn Cole')
+    expect(panel.text()).not.toContain('Searched ISBN 9781234567897')
   })
 
   it('wears the colour the operator gave the source, and stays neutral for one with none', async () => {
@@ -534,24 +605,33 @@ describe('ReleasePickerPanel', () => {
       indexers: [status({ color: 'orange' }), status({ indexerId: 2, indexerName: 'Library Genesis', seedsBack: false, delivery: 'file' })],
     }
     const rows = releaseRows(await render(search))
-    const chipClass = (row: (typeof rows)[number], name: string) =>
-      row
+    const chipClass = (name: string) =>
+      rows
+        .find((row) => row.text().includes(name))!
         .findAll('span')
         .find((span) => span.text() === name)!
         .attributes('class')
 
-    expect(
-      chipClass(
-        rows.find((row) => row.text().includes('MyAnonaMouse'))!,
-        'MyAnonaMouse',
-      ),
-    ).toContain('--pill-source-orange')
-    expect(
-      chipClass(
-        rows.find((row) => row.text().includes('Library Genesis'))!,
-        'Library Genesis',
-      ),
-    ).toContain('text-muted-foreground')
+    expect(chipClass('MyAnonaMouse')).toContain('--pill-source-orange')
+    expect(chipClass('Library Genesis')).not.toContain('--pill-source')
+  })
+
+  /** Green for a swarm worth relying on, amber for a thin one, red for none at all. */
+  it('colours the seeder count by how healthy the swarm is', async () => {
+    const search = {
+      ...MIXED,
+      releases: [release({ guid: 'many', seeders: 506 }), release({ guid: 'few', seeders: 3 }), release({ guid: 'none', seeders: 0 })],
+      indexers: [status()],
+    }
+    const rows = releaseRows(await render(search))
+    const seederClass = (index: number, text: string) =>
+      rows[index]!.findAll('span')
+        .find((span) => span.text() === text)!
+        .attributes('class')
+
+    expect(seederClass(0, '506 seeders')).toContain('text-success')
+    expect(seederClass(1, '3 seeders')).toContain('text-warning')
+    expect(seederClass(2, '0 seeders')).toContain('text-destructive')
   })
 
   it('uses the assigned source color when every release comes from one tracker', async () => {
@@ -563,7 +643,7 @@ describe('ReleasePickerPanel', () => {
     const wrapper = await render(search)
     const sourceSummary = wrapper.findAll('span').find((span) => span.text() === 'all from MyAnonaMouse')
 
-    expect(sourceSummary?.classes().join(' ')).toContain('--pill-source-orange')
+    expect(sourceSummary?.find('span[aria-hidden="true"]').classes().join(' ')).toContain('--pill-source-orange')
   })
 
   it('uses each source color on its indexer filter pill', async () => {
@@ -585,6 +665,7 @@ describe('ReleasePickerPanel', () => {
     const classesFor = (name: string) =>
       buttons
         .find((button) => button.text().startsWith(name))
+        ?.findAll('span')[0]
         ?.classes()
         .join(' ')
 
@@ -597,7 +678,7 @@ describe('ReleasePickerPanel', () => {
     const rows = releaseRows(await render())
     const tracker = rows.find((row) => row.text().includes('MyAnonaMouse'))
 
-    expect(tracker!.text()).toContain('506 seeders')
+    expect(tracker!.text()).toContain('506')
     expect(tracker!.text()).toContain('Torrent')
   })
 
@@ -634,7 +715,7 @@ describe('ReleasePickerPanel', () => {
       return respond(request())
     })
 
-    const wrapper = mount(ReleasePickerPanel, { global: { stubs: { RouterLink: RouterLinkStub } } })
+    const wrapper = mount(ReleasePickerPanel, { global: { stubs: STUBS } })
     await flushPromises()
 
     const grabButton = (row: ReturnType<typeof wrapper.findAll>[number]) =>
@@ -649,6 +730,70 @@ describe('ReleasePickerPanel', () => {
     // The other source was never asked, so nothing has been established about it.
     expect(rowFor('libgen-1').text()).not.toContain('turned down')
     expect(grabButton(rowFor('libgen-1')).attributes('disabled')).toBeUndefined()
+  })
+
+  describe('the release page', () => {
+    it("links the release title to its source's page, out of this instance's referrer", async () => {
+      const wrapper = await render({ ...MIXED, releases: [release({ infoUrl: 'https://tracker.example.com/t/42' })], indexers: [status()] })
+
+      const link = releaseRows(wrapper)[0]!.get('a[href="https://tracker.example.com/t/42"]')
+      expect(link.attributes('target')).toBe('_blank')
+      expect(link.attributes('rel')).toBe('noopener noreferrer')
+      // The visible title leads the accessible name, which also says where the link goes.
+      expect(link.attributes('aria-label')).toMatch(/^.+, release page on MyAnonaMouse$/)
+    })
+
+    it('leaves the title as plain text when the source published no page', async () => {
+      const wrapper = await render({ ...MIXED, releases: [release({ infoUrl: null })], indexers: [status()] })
+
+      expect(releaseRows(wrapper)[0]!.find('a').exists()).toBe(false)
+    })
+  })
+
+  describe('reviewing before filing', () => {
+    function grabBodies(): Array<Record<string, unknown>> {
+      return api.mock.calls.filter(([input]) => input.includes('/grab')).map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)
+    }
+
+    async function renderGrabbable() {
+      api.mockImplementation((input: string) => {
+        if (input.includes('/releases/inspect')) return respond(READY_INSPECTION)
+        if (input.includes('/releases')) return respond({ ...MIXED, releases: [release()], indexers: [status()] })
+        if (input.includes('download-clients')) return respond([])
+        if (input.includes('/grab')) return respond(request({ status: 'grabbed' }))
+        return respond(request())
+      })
+      const wrapper = mount(ReleasePickerPanel, { global: { stubs: STUBS } })
+      await flushPromises()
+      return wrapper
+    }
+
+    function sendButton(wrapper: VueWrapper) {
+      return releaseRows(wrapper)[0]!
+        .findAll('button')
+        .find((button) => /Download release|Send/.test(button.text()))!
+    }
+
+    it('asks the server to hold the import when the approver ticks the box', async () => {
+      const wrapper = await renderGrabbable()
+
+      await wrapper.get('footer [role="switch"]').trigger('click')
+      await sendButton(wrapper).trigger('click')
+      await flushPromises()
+
+      expect(grabBodies()).toEqual([expect.objectContaining({ releaseGuid: 'g1', holdForReview: true })])
+    })
+
+    /** An older server rejects a field it does not know, so an unticked grab must not send it at all. */
+    it('sends nothing new when the box is left alone', async () => {
+      const wrapper = await renderGrabbable()
+
+      await sendButton(wrapper).trigger('click')
+      await flushPromises()
+
+      expect(grabBodies()).toHaveLength(1)
+      expect(grabBodies()[0]).not.toHaveProperty('holdForReview')
+    })
   })
 
   it('still reports an unknown count on a swarm source', async () => {
@@ -789,8 +934,13 @@ describe('ReleasePickerPanel', () => {
       indexers: [status()],
     }
 
-    it('names the tier on the row', async () => {
-      expect((await render(TIERED)).text()).toContain('M4B single file')
+    it('groups the rows under the tier that would take them', async () => {
+      const wrapper = await render(TIERED)
+      const headings = wrapper.findAll('[data-release-group]').map((heading) => heading.text())
+
+      expect(headings[0]).toContain('M4B single file')
+      expect(headings[0]).toContain('Automatic download can take these')
+      expect(headings[1]).toContain('Outside every tier')
     })
 
     /**
@@ -826,9 +976,12 @@ describe('ReleasePickerPanel', () => {
 
       expect(wrapper.text()).toContain('1 release was found, but automatic download will skip it')
       expect(wrapper.text()).toContain('Match score and profile rules are separate checks')
-      expect(wrapper.text()).toContain('Closest tier: EPUB fallback')
-      expect(wrapper.text()).toContain('NZB.life did not state a format; this tier requires EPUB')
       expect(wrapper.text()).not.toContain('add a tier with fewer conditions')
+      // The row carries the short form; the full reason is one click away under the score.
+      const row = releaseRows(wrapper)[0]!
+      expect(row.text()).toContain('No format stated, tier needs EPUB')
+      await row.get('button[aria-expanded]').trigger('click')
+      expect(wrapper.text()).toContain('Closest tier: EPUB fallback. NZB.life did not state a format; this tier requires EPUB.')
 
       const link = wrapper.findAllComponents(RouterLinkStub).find((item) => item.text().includes('Review E-book profile'))
       expect(link?.props('to')).toEqual({
@@ -857,9 +1010,127 @@ describe('ReleasePickerPanel', () => {
         ],
       })
 
+      expect(releaseRows(wrapper)[0]!.text()).toContain('PDF, tier needs EPUB (+1 more)')
+      await releaseRows(wrapper)[0]!.get('button[aria-expanded]').trigger('click')
       expect(wrapper.text()).toContain('Format is PDF; this tier requires EPUB')
       expect(wrapper.text()).toContain('did not state a language; this tier requires English')
       expect(wrapper.text()).not.toContain('Review E-book profile')
     })
+  })
+})
+
+describe('ReleasePickerPanel for a pair', () => {
+  const ebookHalf = (overrides: Partial<BookRequestItem> = {}) => request({ id: 7, companionRequestId: 8, ...overrides })
+  const audioHalf = (overrides: Partial<BookRequestItem> = {}) => request({ id: 8, mediaKind: 'audiobook', companionRequestId: 7, ...overrides })
+  const AUDIO_SEARCH = {
+    ...MIXED,
+    releases: [release({ guid: 'audio-1', format: 'm4b', formats: ['m4b'] })],
+    criteria: { ...MIXED.criteria, mediaKind: 'audiobook' },
+    indexers: [status()],
+  }
+
+  async function renderPair(audio: BookRequestItem = audioHalf()) {
+    api.mockImplementation((input: string) => {
+      if (input.includes('/releases/inspect')) return respond(READY_INSPECTION)
+      if (input.includes('/7/releases')) return respond(MIXED)
+      if (input.includes('/8/releases')) return respond(AUDIO_SEARCH)
+      if (input.includes('/7/grab')) return respond(ebookHalf({ status: 'grabbed' }))
+      if (input.includes('download-clients')) return respond([])
+      if (input.endsWith('/book-requests/8')) return respond(audio)
+      return respond(ebookHalf())
+    })
+    const wrapper = mount(ReleasePickerPanel, { global: { stubs: STUBS } })
+    await flushPromises()
+    return wrapper
+  }
+
+  const tabs = (wrapper: VueWrapper) => wrapper.get('nav[aria-label="Formats to pick releases for"]')
+  const searchesFor = (id: number) => api.mock.calls.filter(([input]) => input.endsWith(`/${id}/releases`)).length
+
+  async function sendFirstRelease(wrapper: VueWrapper) {
+    const send = releaseRows(wrapper)[0]!
+      .findAll('button')
+      .find((button) => /Download release|Send/.test(button.text()))!
+    await send.trigger('click')
+    await flushPromises()
+  }
+
+  it('tabs between the halves, each with its release count and what it still needs', async () => {
+    const wrapper = await renderPair()
+
+    expect(wrapper.text()).toContain('Pick releases')
+    // The open half is where you are, so only the other one is a link.
+    const ebook = tabs(wrapper).get('[aria-current="page"]')
+    const [audiobook, ...rest] = tabs(wrapper).findAll('a')
+    expect(rest).toHaveLength(0)
+    expect(ebook.text()).toContain('E-book')
+    expect(ebook.text()).toContain('2 releases')
+    expect(ebook.text()).toContain('To choose')
+    expect(audiobook!.text()).toContain('Audiobook')
+    expect(audiobook!.text()).toContain('1 release')
+    expect(audiobook!.text()).toContain('To choose')
+  })
+
+  it('searches the other half once, as the picker opens, and switches to it without a loading state', async () => {
+    const wrapper = await renderPair()
+    expect(searchesFor(8)).toBe(1)
+
+    nav.route.params.id = '8'
+    await nextTick()
+
+    expect(releaseRows(wrapper)).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('Searching')
+    await flushPromises()
+    expect(searchesFor(8)).toBe(1)
+    expect(searchesFor(7)).toBe(1)
+  })
+
+  it('moves to the other half once a release is sent for this one', async () => {
+    const wrapper = await renderPair()
+
+    await sendFirstRelease(wrapper)
+
+    expect(nav.push).toHaveBeenCalledWith({ name: 'book-request-releases', params: { id: 8 }, query: {} })
+  })
+
+  it('ends on a closing state once neither half needs a release', async () => {
+    const wrapper = await renderPair(audioHalf({ status: 'downloading' }))
+
+    await sendFirstRelease(wrapper)
+
+    expect(wrapper.text()).toContain('Nothing left to choose')
+    expect(releaseRows(wrapper)).toHaveLength(0)
+    expect(tabs(wrapper).text().match(/Sent/g)).toHaveLength(2)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Done')!
+      .trigger('click')
+    expect(nav.push).toHaveBeenLastCalledWith({ name: 'book-requests', query: {} })
+  })
+
+  it('returns to the request when the other half is not waiting on a release', async () => {
+    const wrapper = await renderPair(audioHalf({ status: 'pending' }))
+
+    await sendFirstRelease(wrapper)
+
+    expect(nav.push).toHaveBeenCalledWith({ name: 'book-request-detail', params: { id: 7 }, query: {} })
+    expect(wrapper.text()).not.toContain('Nothing left to choose')
+  })
+
+  it('shows a half nobody can pick a release for yet as a label, not a link, and never searches it', async () => {
+    const wrapper = await renderPair(audioHalf({ status: 'pending' }))
+
+    expect(tabs(wrapper).findAll('a')).toHaveLength(0)
+    expect(tabs(wrapper).text()).toContain('Pending')
+    expect(searchesFor(8)).toBe(0)
+  })
+
+  it('leaves the ISBN one half was opened with out of the link to the other', async () => {
+    nav.route.query = { tab: 'mine', isbn: '9781234567897' }
+    const wrapper = await renderPair()
+
+    const links = wrapper.findAllComponents(RouterLinkStub)
+    const toAudiobook = links.find((link) => (link.props('to') as { params?: { id: number } }).params?.id === 8)!
+    expect(toAudiobook.props('to')).toEqual({ name: 'book-request-releases', params: { id: 8 }, query: { tab: 'mine' } })
   })
 })

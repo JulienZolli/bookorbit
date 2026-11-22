@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -14,6 +14,7 @@ import { KoreaderStatsService } from './koreader-stats.service';
 import {
   AnnotationExchangeAckDto,
   AnnotationExchangeDto,
+  AnnotationPendingDto,
   AnnotationsUploadDto,
   BookStatesUploadDto,
   BookmarkExchangeAckDto,
@@ -58,6 +59,11 @@ export class KoreaderPluginController {
     return this.annotationExchangeService.exchange(user, dto);
   }
 
+  @Post('annotations/pending')
+  pendingAnnotationBooks(@CurrentUser() user: RequestUser, @Body() dto: AnnotationPendingDto) {
+    return this.annotationExchangeService.pendingBooks(user, dto);
+  }
+
   @Post('annotations/exchange-ack')
   exchangeAnnotationsAck(@CurrentUser() user: RequestUser, @Body() dto: AnnotationExchangeAckDto) {
     return this.annotationExchangeService.exchangeAck(user, dto);
@@ -89,8 +95,12 @@ export class KoreaderPluginController {
   }
 
   @Get('version')
-  getVersion(@CurrentUser() user: RequestUser) {
-    return this.packageService.getVersionInfoForSelfUpdate(user.id);
+  getVersion(
+    @CurrentUser() user: RequestUser,
+    @Headers('x-bookorbit-device-id') deviceId?: string,
+    @Headers('x-bookorbit-plugin-version') pluginVersion?: string,
+  ) {
+    return this.packageService.getVersionInfoForSelfUpdate(user.id, { deviceId, pluginVersion });
   }
 
   @Get('package')

@@ -4,6 +4,9 @@
 import { randomUUID } from 'crypto';
 
 export interface SevenZipFS {
+  filesystems: { NODEFS: unknown };
+  mount(type: unknown, opts: { root: string }, mountpoint: string): unknown;
+  unmount(mountpoint: string): void;
   open(path: string, flags: string): number;
   write(fd: number, buf: Uint8Array, offset: number, length: number): number;
   close(fd: number): void;
@@ -12,7 +15,13 @@ export interface SevenZipFS {
   readFile(path: string): Uint8Array;
   /** An entry's size and kind without reading it, which is what bounds an extraction. */
   stat(path: string): { mode: number; size: number };
+  /** Like `stat`, but describes a symbolic link itself rather than what it points at. */
+  lstat(path: string): { mode: number; size: number };
+  /** Resolves a path; with `follow`, the returned path is the final target of any links. */
+  lookupPath(path: string, opts?: { follow?: boolean }): { path: string };
   isDir(mode: number): boolean;
+  isFile(mode: number): boolean;
+  isLink(mode: number): boolean;
   unlink(path: string): void;
   rmdir(path: string): void;
 }

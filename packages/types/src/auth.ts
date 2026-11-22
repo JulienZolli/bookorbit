@@ -9,6 +9,7 @@ export const AuthenticationMethod = {
   MagicLink: "magic_link",
   Setup: "setup",
   Legacy: "legacy",
+  ApiKey: "api_key",
 } as const;
 
 export type AuthenticationMethod = (typeof AuthenticationMethod)[keyof typeof AuthenticationMethod];
@@ -33,6 +34,8 @@ export const ProvisioningMethod = {
 export type ProvisioningMethod = (typeof ProvisioningMethod)[keyof typeof ProvisioningMethod];
 
 export interface UserSettings {
+  metadataReminderPreferences?: import("./metadata-reminders").MetadataReminderPreferences;
+  showBookRequests?: boolean;
   syncReaderPreferences?: boolean;
   syncThemePreferences?: boolean;
   statisticsConfig?: import("./statistics").StatisticsSettings;
@@ -42,7 +45,13 @@ export interface UserSettings {
   notificationPreferences?: import("./notification").NotificationPreferences;
   seriesCollapsePreferences?: import("./series-collapse").SeriesCollapsePreferences;
   dashboardConfig?: import("./dashboard").DashboardConfig;
+  /** Separate from dashboardConfig so legacy clients replacing it preserve shelf preferences. */
+  dashboardShelfConfig?: import("./dashboard").DashboardShelfConfig;
   sidebarConfig?: import("./sidebar").SidebarConfig;
+  /** Separate from sidebarConfig so an older client rewriting that key cannot wipe the layout. */
+  sidebarLayout?: import("./sidebar").SidebarLayout | null;
+  /** Separate key so an older client rewriting dashboardConfig cannot wipe it. */
+  libraryVisibility?: import("./library-visibility").LibraryVisibilitySettings;
   achievementPreferences?: {
     enabled?: boolean;
   };

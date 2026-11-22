@@ -2,12 +2,11 @@ import { readdir } from 'fs/promises';
 import { join } from 'path';
 
 /**
- * Generic recursive directory traversal shared by the book scanner and the podcast importer.
+ * Generic recursive directory traversal behind the book scanner.
  *
- * Only the traversal itself lives here: what a directory's files *mean* differs per library type,
- * so each caller receives the entries through `visit` and does its own grouping. Behaviour that is
- * genuinely common stays here - dotfile and symlink skips, the path-length ceiling, tolerating an
- * unreadable directory instead of failing the whole walk, and bounding how many directories are
+ * Only the traversal itself lives here: callers receive the entries through `visit` and do their own
+ * grouping. The behaviour lives here - dotfile and symlink skips, the path-length ceiling, tolerating
+ * an unreadable directory instead of failing the whole walk, and bounding how many directories are
  * read at once so a deep tree cannot exhaust the file descriptor table.
  */
 
@@ -29,6 +28,8 @@ export interface WalkDirectoryTreeOptions {
   /** Called for every readable directory, parents before children. */
   visit: (directory: WalkedDirectory) => Promise<void> | void;
   shouldExclude?: (name: string) => boolean;
+  /** Absolute directory paths the walk neither visits nor descends into, the root included. */
+  skipDirectories?: ReadonlySet<string>;
   logger?: (message: string) => void;
   /** Entries the walk refused to hand to `visit`, for callers that have to account for them. */
   onSkippedEntry?: (entry: { path: string; reason: WalkSkippedEntryReason }) => void;
@@ -62,6 +63,7 @@ export function buildNameExcludeMatcher(patterns: string[]): (name: string) => b
 
 export async function walkDirectoryTree(root: string, options: WalkDirectoryTreeOptions): Promise<WalkDirectoryTreeResult> {
   const skippedDirs = new Set<string>();
+  if (options.skipDirectories?.has(root)) return { skippedDirs };
   await collectDirectory(root, options, skippedDirs);
   return { skippedDirs };
 }
@@ -98,6 +100,7 @@ async function collectDirectory(dir: string, options: WalkDirectoryTreeOptions, 
       continue;
     }
     if (entry.isDirectory()) {
+      if (options.skipDirectories?.has(full)) continue;
       subdirectoryPaths.push(full);
     } else if (entry.isFile()) {
       if (full.length > maxPathLength) {

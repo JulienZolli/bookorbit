@@ -25,13 +25,13 @@ import { randomUUID } from 'crypto';
 import { access, copyFile } from 'fs/promises';
 import { join } from 'path';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 import type { BookMovePreviewResult, BookMoveProgressEvent, BookMoveSummary } from '@bookorbit/types';
 import { Permission } from '@bookorbit/types';
 
-import { annotations, bookFiles, bookMoveJobs, books, collectionBooks, collections, libraries, userBookStatus } from '../src/db/schema';
-import { createEpubFixture, createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
+import { annotations, bookFiles, bookMerges, bookMoveJobs, books, collectionBooks, collections, libraries, userBookStatus } from '../src/db/schema';
+import { createEpubFixture, createM4bFixture, createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
 import {
   authHeader,
   closeMetadataWriteE2EContext,
@@ -481,6 +481,37 @@ describe('Cross-library book move (e2e)', () => {
 
   describe('execute', () => {
     it(
+      'moves the KOReader hash revision of both libraries on, so devices re-read both hash lists',
+      async () => {
+        const src = await createSource();
+        const dst = await createTarget();
+        const book = await seedEpub(src, 'revision.epub', `Revision ${randomUUID().slice(0, 8)}`);
+
+        const readRevisions = async () => {
+          const rows = await ctx.db
+            .select({ id: libraries.id, revision: libraries.koreaderHashRevision })
+            .from(libraries)
+            .where(inArray(libraries.id, [src.libraryId, dst.libraryId]));
+          return new Map(rows.map((row) => [row.id, row.revision]));
+        };
+        const before = await readRevisions();
+
+        const summary = await moveAndSummarize({
+          selection: { bookIds: [book.bookId] },
+          targetLibraryId: dst.libraryId,
+          targetFolderId: dst.libraryFolderId,
+          collisionPolicy: 'suggested',
+        });
+        expect(summary).toMatchObject({ succeeded: 1, failed: 0 });
+
+        const after = await readRevisions();
+        expect(after.get(src.libraryId)).toBeGreaterThan(before.get(src.libraryId)!);
+        expect(after.get(dst.libraryId)).toBeGreaterThan(before.get(dst.libraryId)!);
+      },
+      SCENARIO_TIMEOUT_MS,
+    );
+
+    it(
       're-parents the book, relocates the file, and preserves user state',
       async () => {
         const src = await createSource();
@@ -666,6 +697,46 @@ describe('Cross-library book move (e2e)', () => {
     );
 
     it(
+      'keeps the replaced copy’s readers on the moved book under the merge policy',
+      async () => {
+        const src = await createSource();
+        const dst = await createTarget();
+        const title = `Absorb ${randomUUID().slice(0, 8)}`;
+        const { existing, incoming } = await seedIdenticalPair(src, dst, title);
+
+        const reader = await createUserAndLogin(ctx);
+        await ctx.db.insert(userBookStatus).values({ userId: reader.userId, bookId: existing.bookId, status: 'read', source: 'manual' });
+        await ctx.db.insert(annotations).values({ userId: reader.userId, bookId: existing.bookId, text: 'kept through the move' });
+        const [collection] = await ctx.db
+          .insert(collections)
+          .values({ userId: reader.userId, name: `collection-${randomUUID()}` })
+          .returning({ id: collections.id });
+        await ctx.db.insert(collectionBooks).values({ collectionId: collection.id, bookId: existing.bookId });
+
+        const summary = await moveAndSummarize({
+          selection: { bookIds: [incoming.bookId] },
+          targetLibraryId: dst.libraryId,
+          targetFolderId: dst.libraryFolderId,
+          collisionPolicy: 'merge',
+        });
+
+        expect(summary).toMatchObject({ merged: 1, failed: 0 });
+        expect(await readBookRow(existing.bookId)).toBeNull();
+        expect((await readBookRow(incoming.bookId))?.libraryId).toBe(dst.libraryId);
+
+        const [status] = await ctx.db.select().from(userBookStatus).where(eq(userBookStatus.bookId, incoming.bookId));
+        expect(status).toMatchObject({ userId: reader.userId, status: 'read' });
+        const notes = await ctx.db.select().from(annotations).where(eq(annotations.bookId, incoming.bookId));
+        expect(notes.map((note) => note.text)).toEqual(['kept through the move']);
+        const shelved = await ctx.db.select().from(collectionBooks).where(eq(collectionBooks.collectionId, collection.id));
+        expect(shelved.map((row) => row.bookId)).toEqual([incoming.bookId]);
+        const [alias] = await ctx.db.select().from(bookMerges).where(eq(bookMerges.sourceBookId, existing.bookId));
+        expect(alias?.targetBookId).toBe(incoming.bookId);
+      },
+      SCENARIO_TIMEOUT_MS,
+    );
+
+    it(
       'lets a per-book override win over the job-level policy',
       async () => {
         const src = await createSource();
@@ -712,6 +783,37 @@ describe('Cross-library book move (e2e)', () => {
         const files = await readFileRows(book.bookId);
         expect(files[0].absolutePath).toBe(expectedPath);
         expect(await pathExists(expectedPath)).toBe(true);
+      },
+      SCENARIO_TIMEOUT_MS,
+    );
+
+    it(
+      'picks the primary file by the format priority of the library the book moved into',
+      async () => {
+        const src = await createSource({ mode: 'book_per_folder' });
+        const dst = await createTarget({ mode: 'book_per_folder' });
+        await ctx.db
+          .update(libraries)
+          .set({ formatPriority: ['m4b', 'epub'] })
+          .where(eq(libraries.id, dst.libraryId));
+        const title = `Both formats ${randomUUID().slice(0, 8)}`;
+        await createM4bFixture(src.folderPath, `${title}/${title}.m4b`, { title });
+        const book = await seedEpub(src, `${title}/${title}.epub`, title);
+
+        const formatOf = async (fileId: number | null) => (await readFileRows(book.bookId)).find((file) => file.id === fileId)?.relPath ?? null;
+        const primaryOf = async () =>
+          (await ctx.db.select({ primaryFileId: books.primaryFileId }).from(books).where(eq(books.id, book.bookId)))[0]?.primaryFileId ?? null;
+        expect(await formatOf(await primaryOf())).toMatch(/\.epub$/);
+
+        const summary = await moveAndSummarize({
+          selection: { bookIds: [book.bookId] },
+          targetLibraryId: dst.libraryId,
+          targetFolderId: dst.libraryFolderId,
+          collisionPolicy: 'suggested',
+        });
+
+        expect(summary.succeeded).toBe(1);
+        expect(await formatOf(await primaryOf())).toMatch(/\.m4b$/);
       },
       SCENARIO_TIMEOUT_MS,
     );

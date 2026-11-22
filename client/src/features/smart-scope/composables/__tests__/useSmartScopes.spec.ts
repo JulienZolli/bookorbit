@@ -11,13 +11,12 @@ function makeSmartScope(overrides: Partial<SmartScope> = {}): SmartScope {
   return {
     id: 11,
     userId: 3,
-    mediaType: 'books',
-    libraryId: null,
     name: 'Unread Sci-Fi',
     icon: null,
     filter: null,
     defaultSort: [],
     isPublic: false,
+    coverAspectRatio: '2/3',
     syncToKobo: false,
     koboSyncEnabled: false,
     isOwner: true,
@@ -41,27 +40,30 @@ describe('useSmartScopes', () => {
     apiMock.mockReset()
   })
 
-  it('replaces the smartScope array when creating a smartScope', async () => {
-    const created = makeSmartScope()
+  it('adds the created scope and its book count to the shared sidebar state', async () => {
+    const created = makeSmartScope({ bookCount: 7 })
     apiMock.mockResolvedValueOnce(makeResponse(created))
 
     const { useSmartScopes } = await import('../useSmartScopes')
     const { smartScopes, createSmartScope } = useSmartScopes()
     const previous = smartScopes.value
+    const sidebar = useSmartScopes()
 
     await createSmartScope({ name: created.name, icon: 'Aperture', defaultSort: [] })
 
     expect(smartScopes.value).toEqual([created])
     expect(smartScopes.value).not.toBe(previous)
+    expect(sidebar.smartScopes.value[0]?.bookCount).toBe(7)
   })
 
-  it('replaces the smartScope array when updating a smartScope', async () => {
-    const created = makeSmartScope()
-    const updated = makeSmartScope({ name: 'Updated SmartScope' })
+  it('replaces the cached book count with the count returned after an update', async () => {
+    const created = makeSmartScope({ bookCount: 7 })
+    const updated = makeSmartScope({ name: 'Updated SmartScope', bookCount: 3 })
     apiMock.mockResolvedValueOnce(makeResponse(created)).mockResolvedValueOnce(makeResponse(updated))
 
     const { useSmartScopes } = await import('../useSmartScopes')
     const { smartScopes, createSmartScope, updateSmartScope } = useSmartScopes()
+    const sidebar = useSmartScopes()
 
     await createSmartScope({ name: created.name, icon: 'Aperture', defaultSort: [] })
     const previous = smartScopes.value
@@ -69,6 +71,7 @@ describe('useSmartScopes', () => {
 
     expect(smartScopes.value).toEqual([updated])
     expect(smartScopes.value).not.toBe(previous)
+    expect(sidebar.smartScopes.value[0]?.bookCount).toBe(3)
   })
 
   it('patches the sharing flag and reflects the shared scope returned by the server', async () => {
@@ -168,50 +171,5 @@ describe('useSmartScopes', () => {
     expect(smartScopes.value).toEqual([])
     expect(loaded.value).toBe(false)
     expect(loading.value).toBe(false)
-  })
-
-  it('splits scopes by medium so each surface renders only its own', async () => {
-    const { useSmartScopes } = await import('../useSmartScopes')
-    apiMock.mockResolvedValueOnce(
-      makeResponse([makeSmartScope({ id: 1, mediaType: 'books' }), makeSmartScope({ id: 2, mediaType: 'podcasts', libraryId: 4 })]),
-    )
-    const { bookScopes, podcastScopes, fetchSmartScopes } = useSmartScopes()
-
-    await fetchSmartScopes()
-
-    expect(bookScopes.value.map((scope) => scope.id)).toEqual([1])
-    expect(podcastScopes.value.map((scope) => scope.id)).toEqual([2])
-  })
-
-  it('pages a podcast scope through the episodes endpoint', async () => {
-    const { useSmartScopes } = await import('../useSmartScopes')
-    apiMock.mockResolvedValueOnce(makeResponse({ items: [], total: 0, totalDurationSeconds: 0, page: 2, size: 25 }))
-    const { fetchScopeEpisodes } = useSmartScopes()
-
-    await fetchScopeEpisodes(9, 2, 25, '  dune  ')
-
-    expect(apiMock).toHaveBeenCalledWith('/api/v1/smart-scopes/9/episodes?page=2&size=25&q=dune')
-  })
-
-  it('coalesces concurrent requests for the same podcast scope page', async () => {
-    let resolveRequest!: (response: Response) => void
-    apiMock.mockReturnValueOnce(new Promise<Response>((resolve) => (resolveRequest = resolve)))
-    const { useSmartScopes } = await import('../useSmartScopes')
-    const { fetchScopeEpisodes } = useSmartScopes()
-
-    const first = fetchScopeEpisodes(9, 1, 50)
-    const second = fetchScopeEpisodes(9, 1, 50)
-
-    expect(apiMock).toHaveBeenCalledTimes(1)
-    resolveRequest(makeResponse({ items: [], total: 0, totalDurationSeconds: 0, page: 1, size: 50 }))
-    await Promise.all([first, second])
-  })
-
-  it('throws when the episodes request fails, so the view can surface it', async () => {
-    const { useSmartScopes } = await import('../useSmartScopes')
-    apiMock.mockResolvedValueOnce(makeResponse(null, false))
-    const { fetchScopeEpisodes } = useSmartScopes()
-
-    await expect(fetchScopeEpisodes(9, 1, 50)).rejects.toMatchObject({ name: 'ApiError' })
   })
 })

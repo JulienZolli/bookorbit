@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import type { BookCard } from '@bookorbit/types'
+import { COVER_ASPECT_RATIO_KEY } from '../lib/cover-aspect-ratio'
 import VirtualBookGrid from './VirtualBookGrid.vue'
 
 const scrollToItemMock = vi.fn<(index: number, options?: { align?: string }) => void>()
@@ -23,11 +24,11 @@ vi.mock('vue-virtual-scroller', () => ({
 vi.mock('./BookCoverCard.vue', () => ({
   default: {
     name: 'BookCoverCard',
-    props: ['book', 'selectionMode', 'selected', 'showLabel', 'coverAspectRatio'],
+    props: ['book', 'selectionMode', 'selected', 'showLabel', 'coverAspectRatio', 'mediaKind'],
     emits: ['action', 'select', 'update:book'],
     template:
       '<div>' +
-      '<button data-testid="book-card" :data-cover-ratio="coverAspectRatio || \'\'" @click="$emit(\'action\', \'quick-view\')">' +
+      '<button data-testid="book-card" :data-cover-ratio="coverAspectRatio || \'\'" :data-media-kind="mediaKind || \'\'" @click="$emit(\'action\', \'quick-view\')">' +
       '{{ book.id }}<span v-if="showLabel" data-testid="book-card-label-slot" /></button>' +
       '<button data-testid="book-card-select" @click="$emit(\'select\', $event)">select</button>' +
       '<button data-testid="book-card-update" @click="$emit(\'update:book\', { ...book, title: \'Updated\' })">update</button>' +
@@ -38,9 +39,9 @@ vi.mock('./BookCoverCard.vue', () => ({
 vi.mock('./CollapsedSeriesCard.vue', () => ({
   default: {
     name: 'CollapsedSeriesCard',
-    props: ['book', 'showLabel', 'selectionMode'],
+    props: ['book', 'showLabel', 'selectionMode', 'coverAspectRatio'],
     template:
-      '<div data-testid="collapsed-series-card" :data-selection-mode="String(selectionMode)">{{ book.id }}<span v-if="showLabel" data-testid="series-card-label-slot" /></div>',
+      '<div data-testid="collapsed-series-card" :data-selection-mode="String(selectionMode)" :data-cover-ratio="coverAspectRatio || \'\'">{{ book.id }}<span v-if="showLabel" data-testid="series-card-label-slot" /></div>',
   },
 }))
 
@@ -74,6 +75,7 @@ function makeBook(id: number, overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -177,6 +179,24 @@ describe('VirtualBookGrid', () => {
     expect(updatedBook?.title).toBe('Updated')
   })
 
+  it("gives every virtualized tile the grid's shape, whatever the book's own", () => {
+    const series = makeBook(3, {
+      coverAspectRatio: '2/3',
+      collapsedSeries: { bookCount: 2, readCount: 0, coverBookIds: [3], seriesLatestAddedAt: null },
+    })
+    const wrapper = mount(VirtualBookGrid, {
+      props: {
+        books: [makeBook(1, { coverAspectRatio: '2/3' }), makeBook(2, { coverAspectRatio: '1/1' }), series],
+        coverSize: 120,
+        gridGap: 12,
+      },
+      global: { provide: { [COVER_ASPECT_RATIO_KEY as symbol]: ref('1/1') } },
+    })
+
+    expect(wrapper.findAll('[data-testid="book-card"]').map((card) => card.attributes('data-cover-ratio'))).toEqual(['1/1', '1/1'])
+    expect(wrapper.get('[data-testid="collapsed-series-card"]').attributes('data-cover-ratio')).toBe('1/1')
+  })
+
   it.each([false, true])('forwards selection mode to collapsed series cards when virtualized=%s', (virtualized) => {
     const seriesBook = makeBook(4, {
       collapsedSeries: {
@@ -234,6 +254,38 @@ describe('VirtualBookGrid', () => {
 
     expect(ebookWrapperStyle).toContain('width: 120px;')
     expect(audioWrapperStyle).toContain('width: 150px;')
+  })
+
+  it("frames and sizes each book as the grid's medium when it has that medium", () => {
+    const books = [
+      makeBook(1, {
+        coverAspectRatio: '2/3',
+        files: [
+          { id: 11, format: 'epub', role: 'primary', sizeBytes: null },
+          { id: 12, format: 'm4b', role: 'content', sizeBytes: null },
+        ],
+      }),
+      makeBook(2, { coverAspectRatio: '2/3', files: [{ id: 22, format: 'epub', role: 'primary', sizeBytes: null }] }),
+    ]
+
+    const wrapper = mount(VirtualBookGrid, {
+      props: { books, coverSize: 120, gridGap: 12, virtualized: false, squareCoverScale: 1.25, mediaKind: 'audiobook' },
+    })
+
+    const cards = wrapper.findAll('[data-testid="book-card"]')
+    expect(cards.map((card) => card.attributes('data-cover-ratio'))).toEqual(['1/1', '2/3'])
+    expect(cards.map((card) => card.attributes('data-media-kind'))).toEqual(['audiobook', 'audiobook'])
+    const itemWrappers = wrapper.findAll('.min-w-0.shrink-0')
+    expect(itemWrappers[0]!.attributes('style')).toContain('width: 150px;')
+    expect(itemWrappers[1]!.attributes('style')).toContain('width: 120px;')
+  })
+
+  it.each([true, false])('forwards the media kind to every card when virtualized=%s', (virtualized) => {
+    const wrapper = mount(VirtualBookGrid, {
+      props: { books: [makeBook(1), makeBook(2)], coverSize: 120, gridGap: 12, virtualized, mediaKind: 'comic' },
+    })
+
+    expect(wrapper.findAll('[data-testid="book-card"]').map((card) => card.attributes('data-media-kind'))).toEqual(['comic', 'comic'])
   })
 
   describe('windowed slots', () => {

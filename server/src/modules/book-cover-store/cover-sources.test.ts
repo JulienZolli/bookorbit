@@ -1,0 +1,80 @@
+import { hasAudioFiles, selectEmbeddedCoverSources, selectFolderImages } from './cover-sources';
+
+let nextId = 1;
+function file(absolutePath: string, overrides: { role?: string; mediaOverlayAvailable?: boolean; sizeBytes?: number } = {}) {
+  return {
+    id: nextId++,
+    absolutePath,
+    format: absolutePath.split('.').pop()!,
+    role: overrides.role ?? 'content',
+    sizeBytes: overrides.sizeBytes ?? 100,
+    mediaOverlayAvailable: overrides.mediaOverlayAvailable ?? false,
+  };
+}
+
+describe('selectEmbeddedCoverSources', () => {
+  it('takes the first ebook by library priority and the first audio track by natural name order', () => {
+    const files = [file('/b/book.pdf'), file('/b/book.kepub'), file('/b/Part 10.mp3'), file('/b/Part 2.mp3'), file('/b/Part 1.mp3')];
+
+    const sources = selectEmbeddedCoverSources(files, ['kepub', 'pdf', 'mp3']);
+
+    expect(sources.ebook?.absolutePath).toBe('/b/book.kepub');
+    expect(sources.audio?.absolutePath).toBe('/b/Part 1.mp3');
+  });
+
+  it('takes the first track of the first disc when discs reuse file names', () => {
+    const files = [file('/b/CD 2/01.mp3'), file('/b/CD 1/02.mp3'), file('/b/CD 1/01.mp3')];
+
+    expect(selectEmbeddedCoverSources(files, ['mp3']).audio?.absolutePath).toBe('/b/CD 1/01.mp3');
+  });
+
+  it('takes the audio art of a book with no audio track from its read-along EPUB', () => {
+    const sources = selectEmbeddedCoverSources(
+      [file('/b/plain.epub'), file('/b/book 2.epub', { mediaOverlayAvailable: true }), file('/b/book 10.epub', { mediaOverlayAvailable: true })],
+      ['epub'],
+    );
+
+    expect(sources.audio?.absolutePath).toBe('/b/book 2.epub');
+  });
+
+  it('gives a plain EPUB no audio source', () => {
+    const sources = selectEmbeddedCoverSources([file('/b/book.epub')], ['epub']);
+
+    expect(sources.ebook?.absolutePath).toBe('/b/book.epub');
+    expect(sources.audio).toBeNull();
+  });
+
+  it('prefers a real audio track over a read-along EPUB', () => {
+    const sources = selectEmbeddedCoverSources([file('/b/book.epub', { mediaOverlayAvailable: true }), file('/b/book.m4b')], ['epub']);
+
+    expect(sources.audio?.absolutePath).toBe('/b/book.m4b');
+  });
+
+  it('does not read audio art from a read-along EPUB that is not a content file', () => {
+    const sources = selectEmbeddedCoverSources([file('/b/book.epub', { role: 'supplement', mediaOverlayAvailable: true })], ['epub']);
+
+    expect(sources.audio).toBeNull();
+  });
+
+  it('ignores folder images, sidecars and supplements', () => {
+    const sources = selectEmbeddedCoverSources(
+      [file('/b/cover.jpg', { role: 'cover' }), file('/b/metadata.opf', { role: 'metadata' }), file('/b/notes.pdf', { role: 'supplement' })],
+      ['pdf'],
+    );
+
+    expect(sources).toEqual({ ebook: null, audio: null });
+  });
+});
+
+describe('folder images', () => {
+  it('lists cover-role images in natural name order', () => {
+    const images = selectFolderImages([file('/b/folder.jpg', { role: 'cover' }), file('/b/book.epub'), file('/b/cover.png', { role: 'cover' })]);
+
+    expect(images.map((image) => image.absolutePath)).toEqual(['/b/cover.png', '/b/folder.jpg']);
+  });
+
+  it('tells real audio tracks apart from read-along audio', () => {
+    expect(hasAudioFiles([file('/b/book.epub', { mediaOverlayAvailable: true })])).toBe(false);
+    expect(hasAudioFiles([file('/b/book.m4b')])).toBe(true);
+  });
+});

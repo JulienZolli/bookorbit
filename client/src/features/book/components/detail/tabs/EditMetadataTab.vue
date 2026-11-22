@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   Check,
@@ -12,32 +12,45 @@ import {
   RefreshCw,
   Sparkles,
   Star,
-  TriangleAlert,
+  ListChecks,
   X,
 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import type {
   BookCommunityRating,
   BookDetail,
+  BookIsbnCandidate,
   BookMetadataLockField,
-  CustomMetadataPrimitiveValue,
+  CoverMedium,
   MetadataProviderInfo,
   WriteResult,
 } from '@bookorbit/types'
-import { BOOK_FILE_WRITE_FIELD_LABELS, FORMAT_TO_GROUP, isValidSeriesIndex, parseSeriesIndex } from '@bookorbit/types'
+import {
+  BOOK_FILE_WRITE_FIELD_LABELS,
+  IDENTIFIER_INPUT_KIND_BY_FIELD,
+  getPrimaryBookFile,
+  isKnownMetadataProviderKey,
+  isValidSeriesIndex,
+  parseSeriesIndex,
+  isComicFormat,
+} from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { api } from '@/lib/api'
+import { registerProviderAppearance } from '@/lib/provider-appearance'
 import { metadataScoreColor } from '@/lib/metadata-score-color'
 import ChipInput from '@/components/ui/ChipInput.vue'
+import IdentifierInput from '@/components/ui/IdentifierInput.vue'
 import CoverEditorPanel from './CoverEditorPanel.vue'
 import MetadataSearchDrawer from './MetadataSearchDrawer.vue'
 import MetadataFieldLabel from './MetadataFieldLabel.vue'
+import IsbnCandidatesPopover from './IsbnCandidatesPopover.vue'
 import RichDescriptionEditor from './RichDescriptionEditor.vue'
 import SeriesMembershipEditor from './SeriesMembershipEditor.vue'
 import WriteAndRenameResultPanel from '../WriteAndRenameResultPanel.vue'
-import type { MetadataPatch } from '../../../composables/useMetadataDiff'
+import type { MetadataDiffApply, MetadataPatch } from '../../../composables/useMetadataDiff'
 import { type EditableSeriesMembership, normalizeSeriesMemberships, useMetadataEditor } from '../../../composables/useMetadataEditor'
-import { type MetadataRefreshPreview, useRefreshMetadata } from '../../../composables/useRefreshMetadata'
+import { type MetadataRefreshPreview, type MetadataRefreshPreviewResult, useRefreshMetadata } from '../../../composables/useRefreshMetadata'
 import { type FileMetadata, useFileMetadata } from '../../../composables/useFileMetadata'
 import { useWriteAndRename } from '../../../composables/useWriteAndRename'
 import { useMetadataLocks } from '../../../composables/useMetadataLocks'
@@ -48,11 +61,18 @@ import { usePublisherSearch, useSeriesNameSearch, useLanguageSearch } from '../.
 import InputWithSuggestions from '@/components/ui/InputWithSuggestions.vue'
 import { RATING_STARS, getRatingStarClass } from '@/features/book/lib/rating-stars'
 import { buildFileMetadataPatch } from '@/features/book/lib/file-metadata-patch'
-import { metadataRefreshAppliedMessage, metadataRefreshEmptyMessage } from '@/features/book/lib/metadata-refresh-feedback'
+import { metadataProviderLabel, metadataRefreshAppliedMessage, metadataRefreshEmptyMessage } from '@/features/book/lib/metadata-refresh-feedback'
+import { showCacheFallbackToast } from '@/features/metadata-cache/lib/cache-feedback'
+import { diagnosticsFallbackProviders } from '@/features/metadata-cache/lib/metadata-cache'
 import { filterProviderIdFields, isProviderIdFieldAvailable, isProviderIdFormField } from '@/features/book/lib/provider-id-fields'
 import { formatCommunityRatingLine } from '@/features/book/lib/community-rating'
-import { formatList } from '@/i18n/formatters'
+import { coverFieldMedium, coverLockField } from '@/features/book/lib/cover-slots'
+import { formatList, formatNumber } from '@/i18n/formatters'
+import { useMetadataReminders } from '@/features/metadata-reminders/composables/useMetadataReminders'
+import { missingMetadataFields } from '@/features/metadata-reminders/lib/missing-metadata'
+import MetadataReminderSheet from '@/features/metadata-reminders/components/MetadataReminderSheet.vue'
 import MetadataSourceCard from './MetadataSourceCard.vue'
+import CustomMetadataValueInput from '../../CustomMetadataValueInput.vue'
 
 const AUTO_FILL_EMPTY_TOAST_DURATION_MS = 10_000
 
@@ -60,7 +80,7 @@ const props = defineProps<{ book: BookDetail }>()
 const emit = defineEmits<{
   saved: [BookDetail]
   locksChanged: [BookMetadataLockField[]]
-  coverChanged: ['extracted' | 'custom' | null]
+  coverChanged: [medium: CoverMedium | null]
   fileRenamed: []
 }>()
 
@@ -109,9 +129,8 @@ const COMIC_FIELD_MAP = {
   locations: 'comicLocations',
 } as const
 
-const primaryFile = computed(() => props.book.files.find((f) => f.role === 'primary') ?? props.book.files[0] ?? null)
-const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
+const primaryFile = computed(() => getPrimaryBookFile(props.book.files))
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
 const fileWriteStatus = computed(() => props.book.fileWriteStatus ?? null)
 const fileWriteWritableFormats = computed(() => fileWriteStatus.value?.writableFormats ?? [])
 const fileWriteFieldLabels = computed(() => (fileWriteStatus.value?.writableFields ?? []).map((field) => BOOK_FILE_WRITE_FIELD_LABELS[field]))
@@ -153,7 +172,7 @@ const FIELD_CONTROL_CLASS =
   'w-full h-10 sm:h-8 rounded-lg border border-input bg-background px-3 pr-11 text-sm outline-none focus:ring-1 focus:ring-ring transition-shadow disabled:opacity-50 disabled:cursor-not-allowed'
 const FIELD_CONTROL_MONO_CLASS = `${FIELD_CONTROL_CLASS} font-mono`
 
-const { form, saving, error, isDirty, syncFromBook, reset, save } = useMetadataEditor()
+const { form, saving, error, isDirty, includeAudioMetadata, syncFromBook, reset, save } = useMetadataEditor()
 const {
   lockedFields,
   updating: updatingLocks,
@@ -166,6 +185,7 @@ const {
   isLocked,
   isUpdating: isUpdatingLock,
   replace: replaceLocks,
+  persist: persistLocks,
   toggle,
   lockAll,
   unlockAll,
@@ -183,6 +203,22 @@ const coverPanel = ref<InstanceType<typeof CoverEditorPanel> | null>(null)
 const searchOpen = ref(false)
 const availableMetadataProviders = ref<MetadataProviderInfo[] | null>(null)
 const visibleProviderIdFields = computed(() => filterProviderIdFields(availableMetadataProviders.value))
+/**
+ * External providers' ids: one row per registered external provider, plus any id the book still
+ * holds from a provider that has since been removed, so it can be read and cleared.
+ */
+const externalProviderIdRows = computed(() => {
+  const rows = new Map<string, { key: string; label: string; registered: boolean }>()
+  for (const provider of availableMetadataProviders.value ?? []) {
+    if (provider.source === 'external' && !isKnownMetadataProviderKey(provider.key)) {
+      rows.set(provider.key, { key: provider.key, label: provider.label, registered: true })
+    }
+  }
+  for (const key of Object.keys(form.externalProviderIds)) {
+    if (!rows.has(key)) rows.set(key, { key, label: key, registered: false })
+  }
+  return [...rows.values()]
+})
 let providerLoadToken = 0
 
 async function loadAvailableMetadataProviders(bookId: number) {
@@ -192,6 +228,7 @@ async function loadAvailableMetadataProviders(bookId: number) {
     const res = await api(`/api/v1/metadata-fetch/providers?bookId=${bookId}`)
     if (!res.ok) return
     const providers = (await res.json()) as MetadataProviderInfo[]
+    registerProviderAppearance(providers)
     if (token === providerLoadToken) availableMetadataProviders.value = providers
   } catch {
     // non-fatal: keep all provider ID fields visible when provider availability cannot be loaded
@@ -216,38 +253,6 @@ function setPublishedDateField(e: Event) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     form.publishedYear = Number(value.slice(0, 4))
   }
-}
-
-function isTextLikeCustomField(type: string): boolean {
-  return type === 'text' || type === 'url'
-}
-
-function setCustomMetadataValue(fieldId: number, value: CustomMetadataPrimitiveValue) {
-  const field = form.customMetadata.find((item) => item.fieldId === fieldId)
-  if (field) field.value = value
-}
-
-function setCustomNumberField(fieldId: number, e: Event) {
-  const val = (e.target as HTMLInputElement).value
-  if (val === '') {
-    setCustomMetadataValue(fieldId, null)
-    return
-  }
-  const n = Number(val)
-  setCustomMetadataValue(fieldId, Number.isFinite(n) ? n : null)
-}
-
-function setCustomTextField(fieldId: number, e: Event) {
-  setCustomMetadataValue(fieldId, (e.target as HTMLInputElement).value)
-}
-
-function setCustomDateField(fieldId: number, e: Event) {
-  const val = (e.target as HTMLInputElement).value
-  setCustomMetadataValue(fieldId, val || null)
-}
-
-function setCustomBooleanField(fieldId: number, e: Event) {
-  setCustomMetadataValue(fieldId, (e.target as HTMLInputElement).checked)
 }
 
 let watchedBookId: number | null = null
@@ -283,23 +288,23 @@ const saveErrorMessage = computed(() => {
 
 const combinedError = computed(() => lockError.value ?? saveErrorMessage.value)
 
-// Fields whose emptiness the toolbar counts. Provider ids are deliberately excluded: most books
-// legitimately have none, so counting them would report a gap on every healthy record.
-const emptyFields = computed(() => {
-  const checks: { label: string; filled: boolean }[] = [
-    { label: t('book.detail.editMetadata.publisherLabel'), filled: Boolean(form.publisher?.trim()) },
-    { label: t('book.detail.editMetadata.languageLabel'), filled: Boolean(form.language?.trim()) },
-    { label: t('book.detail.editMetadata.yearLabel'), filled: form.publishedYear != null },
-    { label: t('book.detail.editMetadata.pageCountLabel'), filled: form.pageCount != null },
-    { label: t('book.detail.editMetadata.isbn13Label'), filled: Boolean(form.isbn13?.trim()) },
-    { label: t('book.detail.editMetadata.isbn10Label'), filled: Boolean(form.isbn10?.trim()) },
-    { label: t('book.detail.editMetadata.genresLabel'), filled: form.genres.length > 0 },
-    { label: t('book.detail.editMetadata.tagsLabel'), filled: form.tags.length > 0 },
-    { label: t('book.detail.editMetadata.descriptionLabel'), filled: Boolean(form.description?.trim()) },
-  ]
-  return checks.filter((check) => !check.filled).map((check) => check.label)
-})
-const emptyFieldsTitle = computed(() => t('book.detail.editMetadata.emptyFieldsTooltip', { fields: formatList(emptyFields.value) }))
+const { fields: reminderFields } = useMetadataReminders()
+const remindersOpen = ref(false)
+const missingFieldsOpen = ref(false)
+const missingFieldsTrigger = ref<HTMLButtonElement | null>(null)
+const metadataToolbar = ref<HTMLElement | null>(null)
+const emptyFields = computed(() => missingMetadataFields(form, props.book.files, reminderFields.value))
+
+function customizeReminders() {
+  missingFieldsOpen.value = false
+  remindersOpen.value = true
+}
+
+async function restoreReminderFocus() {
+  await nextTick()
+  const target = missingFieldsTrigger.value ?? metadataToolbar.value
+  target?.focus()
+}
 const metadataScore = computed(() => props.book.metadataScore)
 const metadataScoreColour = computed(() => (metadataScore.value == null ? null : metadataScoreColor(metadataScore.value)))
 
@@ -315,7 +320,8 @@ const filledProviderIdSummary = computed(() => {
     const value = form[entry.field]
     return typeof value === 'string' && value.trim().length > 0
   }).length
-  return `${filled}/${visibleProviderIdFields.value.length}`
+  const filledExternal = externalProviderIdRows.value.filter((row) => (form.externalProviderIds[row.key] ?? '').trim().length > 0).length
+  return `${filled + filledExternal}/${visibleProviderIdFields.value.length + externalProviderIdRows.value.length}`
 })
 
 const comicCreditFields = computed(
@@ -339,7 +345,7 @@ const comicWideFields = computed(
 )
 
 const hasLockedFields = computed(() => lockedFields.value.length > 0)
-const hasPendingChanges = computed(() => isDirty.value || locksDirty.value)
+const hasPendingChanges = computed(() => isDirty.value || locksDirty.value || Boolean(coverPanel.value?.hasPending))
 const hasInvalidSeriesIndex = computed(() =>
   form.seriesMemberships.some((membership) => membership.seriesIndex !== null && !isValidSeriesIndex(membership.seriesIndex)),
 )
@@ -348,25 +354,60 @@ const communityRatingLines = computed(() =>
   form.communityRatings.map((rating) => formatCommunityRatingLine(rating, availableMetadataProviders.value ?? [])),
 )
 
+// Held while a save runs, so the parent's refetch reads the book after every write, locks included.
+let heldCoverChanges: (CoverMedium | null)[] | null = null
+
 async function submit() {
   if (submitDisabled.value) return
-  if (coverPanel.value?.hasPending) {
-    const ok = await coverPanel.value.confirm()
-    if (ok) emit('coverChanged', 'custom')
+  heldCoverChanges = []
+  try {
+    await saveFormAndCovers()
+  } finally {
+    const held = new Set(heldCoverChanges)
+    heldCoverChanges = null
+    for (const medium of held) emit('coverChanged', medium)
   }
+}
+
+/**
+ * Locks here save with the form, so a pending cover whose slot is locked on the server can only be
+ * written after the form has unlocked it. Every other pending cover is written first, and a failure
+ * there stops the form save. A cover staged while its slot was unlocked here, then locked again, is
+ * still written: the form save leaves that slot open, and it is locked again once the write ends.
+ */
+async function saveFormAndCovers() {
+  const panel = coverPanel.value
+  const pendingMedia = panel?.pendingMedia ?? []
+  const lockedOnServer = (medium: CoverMedium | null) => props.book.lockedFields.includes(coverLockField(medium))
+  if (panel && !(await panel.confirm(pendingMedia.filter((medium) => !lockedOnServer(medium))))) return
+
+  const writeAfterSave = pendingMedia.filter(lockedOnServer)
+  const relockFields: BookMetadataLockField[] = writeAfterSave.map(coverLockField).filter((field) => isLocked(field))
   const locksChanged = locksDirty.value
-  const result = await save(props.book.id, lockedFields.value)
-  if (result) {
-    markLocksPersisted(result.book.lockedFields)
-    emit('saved', result.book)
-    if (locksChanged) emit('locksChanged', result.book.lockedFields)
-    showSaveResultToast(result.write, result.libraryAutoWriteEnabled)
+  const result = await save(
+    props.book.id,
+    lockedFields.value.filter((field) => !relockFields.includes(field)),
+  )
+  if (!result) return
+  markLocksPersisted(result.book.lockedFields)
+  if (relockFields.length > 0) await replaceLocks(props.book.id, [...result.book.lockedFields, ...relockFields], 'all')
+  emit('saved', result.book)
+  showSaveResultToast(result.write, result.libraryAutoWriteEnabled)
+
+  const unlockedBySave = writeAfterSave.filter((medium) => !result.book.lockedFields.includes(coverLockField(medium)))
+  if (panel && unlockedBySave.length > 0) {
+    await nextTick()
+    await panel.confirm(unlockedBySave)
   }
+  const relocked = relockFields.length > 0 ? await persistLocks(props.book.id) : null
+  if (relocked) emit('saved', relocked)
+  if (locksChanged) emit('locksChanged', (relocked ?? result.book).lockedFields)
 }
 
 function handleReset() {
   reset()
   resetLocks()
+  coverPanel.value?.reset()
 }
 
 const hoverRating = ref<number | null>(null)
@@ -397,10 +438,7 @@ function clearHoverRating() {
 }
 
 function formatWritableFormatList(formats: string[]): string {
-  const labels = formats.map((format) => format.toUpperCase())
-  if (labels.length <= 1) return labels[0] ?? ''
-  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`
-  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`
+  return formatList(formats.map((format) => format.toUpperCase()))
 }
 
 function toggleComicSection() {
@@ -589,7 +627,27 @@ function applyCustomMetadataPatch(formPatch: MetadataPatch): number {
   return updated
 }
 
-function applyPatchToForm(formPatch: MetadataPatch, coverUrl: string | undefined): { skippedFields: BookMetadataLockField[]; updatedCount: number } {
+/** An empty id is sent as null on save, which clears it. */
+function clearExternalProviderId(key: string) {
+  form.externalProviderIds = { ...form.externalProviderIds, [key]: '' }
+}
+
+/** External ids have no lock, so a linked candidate's id always lands, with the page it came from. */
+function applyExternalProviderIdsPatch(formPatch: MetadataPatch): number {
+  let updated = 0
+  for (const [key, id] of Object.entries(formPatch.externalProviderIds ?? {})) {
+    if (!id || form.externalProviderIds[key] === id) continue
+    form.externalProviderIds = { ...form.externalProviderIds, [key]: id }
+    const link = formPatch.externalProviderLinks?.[key]
+    if (link) form.externalProviderLinks = { ...form.externalProviderLinks, [key]: link }
+    updated++
+  }
+  return updated
+}
+
+type FetchedCovers = Partial<Record<CoverMedium, string>>
+
+function applyPatchToForm(formPatch: MetadataPatch, covers: FetchedCovers): { skippedFields: BookMetadataLockField[]; updatedCount: number } {
   const skippedFields: BookMetadataLockField[] = []
   let updatedCount = 0
   const hasSeriesMembershipPatch = formPatch.seriesMemberships !== undefined
@@ -603,12 +661,16 @@ function applyPatchToForm(formPatch: MetadataPatch, coverUrl: string | undefined
   updatedCount += applyComicPatch(formPatch, skippedFields)
   updatedCount += applyAudioPatch(formPatch, skippedFields)
   updatedCount += applyCustomMetadataPatch(formPatch)
+  updatedCount += applyExternalProviderIdsPatch(formPatch)
 
-  if (coverUrl) {
-    if (isLocked('cover')) {
-      trackLockedField('cover', skippedFields)
+  for (const [medium, url] of Object.entries(covers) as [CoverMedium, string | undefined][]) {
+    if (!url) continue
+    const target = props.book.coverMedia.includes(medium) ? medium : coverFieldMedium(props.book)
+    const coverField = coverLockField(target)
+    if (isLocked(coverField)) {
+      trackLockedField(coverField, skippedFields)
     } else {
-      coverPanel.value?.setUrl(coverUrl)
+      coverPanel.value?.setUrl(url, target ?? undefined)
       updatedCount++
     }
   }
@@ -623,9 +685,9 @@ function showApplyResult(skippedFields: BookMetadataLockField[], updatedCount: n
   toast.info(t('book.detail.editMetadata.applyResult', { skipped: skippedPart, updated: updatedPart }))
 }
 
-function handleApply({ formPatch, coverUrl }: { formPatch: MetadataPatch; coverUrl?: string }) {
+function handleApply({ formPatch, coverUrl, audioCoverUrl }: MetadataDiffApply) {
   if (formDisabled.value) return
-  const { skippedFields, updatedCount } = applyPatchToForm(formPatch, coverUrl)
+  const { skippedFields, updatedCount } = applyPatchToForm(formPatch, { ebook: coverUrl, audio: audioCoverUrl })
   showApplyResult(skippedFields, updatedCount)
 }
 
@@ -693,8 +755,17 @@ function showSaveResultToast(write: WriteResult | null, libraryAutoWriteEnabled:
   toast.info(reason ? t('book.detail.editMetadata.savedWriteSkippedReason', { reason }) : t('book.detail.editMetadata.savedWriteSkipped'))
 }
 
+function externalIdsFromPreview(preview: MetadataRefreshPreview): MetadataPatch['externalProviderIds'] {
+  const ids = Object.entries(preview.externalProviderIds ?? {}).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== '',
+  )
+  return ids.length > 0 ? Object.fromEntries(ids) : undefined
+}
+
 function buildPreviewPatch(preview: MetadataRefreshPreview): MetadataPatch {
   return {
+    isbn10: preview.isbn10,
+    isbn13: preview.isbn13,
     title: preview.title,
     subtitle: preview.subtitle,
     description: preview.description,
@@ -723,6 +794,7 @@ function buildPreviewPatch(preview: MetadataRefreshPreview): MetadataPatch {
     ranobedbId: preview.ranobedbId,
     lubimyczytacId: preview.lubimyczytacId,
     aladinId: preview.aladinId,
+    externalProviderIds: externalIdsFromPreview(preview),
     comicMetadata: preview.comicMetadata,
     narrators: preview.audioMetadata?.narrators,
     durationSeconds: preview.audioMetadata?.durationSeconds ?? undefined,
@@ -735,10 +807,15 @@ async function autoFill() {
   const result = await previewRefresh(props.book.id)
   if (formDisabled.value) return
   if (!result) {
-    toast.error('Auto-fill failed')
+    toast.error(t('book.detail.editMetadata.autoFillFailed'))
     return
   }
 
+  applyAutoFillResult(result)
+  showCacheFallbackToast(diagnosticsFallbackProviders(result.diagnostics), metadataProviderLabel)
+}
+
+function applyAutoFillResult(result: MetadataRefreshPreviewResult) {
   const preview = result.metadata
   if (Object.keys(preview).length === 0) {
     const message =
@@ -749,7 +826,7 @@ async function autoFill() {
     return
   }
 
-  const { skippedFields, updatedCount } = applyPatchToForm(buildPreviewPatch(preview), preview.coverUrl)
+  const { skippedFields, updatedCount } = applyPatchToForm(buildPreviewPatch(preview), { ebook: preview.coverUrl, audio: preview.audioCoverUrl })
   if (skippedFields.length > 0) {
     showApplyResult(skippedFields, updatedCount)
     return
@@ -761,8 +838,16 @@ async function autoFill() {
 }
 
 function applyFileMetadataToForm(meta: FileMetadata): number {
-  const { updatedCount } = applyPatchToForm(buildFileMetadataPatch(meta), undefined)
+  const { updatedCount } = applyPatchToForm(buildFileMetadataPatch(meta), {})
   return updatedCount
+}
+
+const isbnPickerDisabled = computed(() => formDisabled.value || !primaryFile.value || (isLocked('isbn13') && isLocked('isbn10')))
+
+function handleIsbnCandidateSelect(candidate: BookIsbnCandidate) {
+  if (formDisabled.value) return
+  if (!isLocked('isbn13')) form.isbn13 = candidate.isbn13
+  if (candidate.isbn10 && !isLocked('isbn10')) form.isbn10 = candidate.isbn10
 }
 
 async function handleLoadFromFile() {
@@ -817,8 +902,8 @@ async function handleSeriesLockToggle() {
   await replaceLocks(props.book.id, next, 'seriesName')
 }
 
-function handleCoverLockToggle() {
-  handleLockToggle('cover')
+function handleCoverLockToggle(field: 'cover' | 'audioCover') {
+  void handleLockToggle(field)
 }
 
 async function handleLockAll() {
@@ -831,8 +916,9 @@ async function handleUnlockAll() {
   await unlockAll(props.book.id)
 }
 
-function handleCoverChanged(source: 'extracted' | 'custom' | null) {
-  emit('coverChanged', source)
+function handleCoverChanged(medium: CoverMedium | null) {
+  if (heldCoverChanges) heldCoverChanges.push(medium)
+  else emit('coverChanged', medium)
 }
 </script>
 
@@ -842,7 +928,11 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
   <div class="@container/edit flex min-h-full min-w-0 flex-col">
     <div class="flex flex-1 flex-col gap-3">
       <!-- Command strip -->
-      <div class="sticky top-0 z-30 -mx-4 flex flex-none items-center gap-2 bg-card/95 px-4 py-0.5 backdrop-blur-sm sm:mx-0 sm:px-0">
+      <div
+        ref="metadataToolbar"
+        tabindex="-1"
+        class="sticky top-0 z-30 -mx-4 flex flex-none items-center gap-2 bg-card/95 px-4 py-0.5 backdrop-blur-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:mx-0 sm:px-0"
+      >
         <div class="no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
           <div
             v-if="metadataScore !== null"
@@ -856,17 +946,34 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
             </span>
           </div>
 
-          <button
-            v-if="emptyFields.length > 0"
-            type="button"
-            class="flex h-9 flex-none items-center gap-1.5 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-semibold text-amber-600 transition-colors hover:bg-amber-500/15 sm:h-8 dark:text-amber-400"
-            :title="emptyFieldsTitle"
-            @click="handleOpenSearch"
-          >
-            <TriangleAlert class="size-3.5 shrink-0" aria-hidden="true" />
-            <span>{{ emptyFields.length }}</span>
-            <span class="hidden @3xl/edit:inline">{{ t('book.detail.editMetadata.emptyFields', { count: emptyFields.length }) }}</span>
-          </button>
+          <Popover v-if="emptyFields.length > 0" v-model:open="missingFieldsOpen">
+            <PopoverTrigger as-child>
+              <button
+                ref="missingFieldsTrigger"
+                type="button"
+                class="flex h-9 flex-none items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8"
+                :aria-label="t('metadataReminders.missingCount', { count: emptyFields.length })"
+              >
+                <ListChecks class="size-3.5 shrink-0" aria-hidden="true" />
+                <span>{{ formatNumber(emptyFields.length) }}</span>
+                <span class="hidden @3xl/edit:inline">{{ t('metadataReminders.missingFields', { count: emptyFields.length }) }}</span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" class="w-72 max-w-[calc(100vw-2rem)] p-3" :aria-label="t('metadataReminders.missingHeading')">
+              <p class="text-sm font-semibold">{{ t('metadataReminders.missingHeading') }}</p>
+              <p class="mb-3 mt-1 text-xs text-muted-foreground">{{ t('metadataReminders.missingDescription') }}</p>
+              <ul class="grid gap-1 text-sm text-muted-foreground">
+                <li v-for="field in emptyFields" :key="field">{{ t(`metadataReminders.fields.${field}.label`) }}</li>
+              </ul>
+              <button
+                type="button"
+                class="mt-3 w-full rounded-md border-t border-border pt-3 text-start text-sm text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                @click="customizeReminders"
+              >
+                {{ t('metadataReminders.customize') }}
+              </button>
+            </PopoverContent>
+          </Popover>
 
           <div class="flex-1" />
 
@@ -1027,7 +1134,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
             <CoverEditorPanel
               ref="coverPanel"
               :book="props.book"
-              :locked="isLocked('cover')"
+              :locked-fields="lockedFields"
               :disabled="formDisabled"
               @cover-changed="handleCoverChanged"
               @toggle-lock="handleCoverLockToggle"
@@ -1075,7 +1182,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
               </MetadataFieldLabel>
 
               <MetadataFieldLabel
-                v-if="isPrimaryAudio"
+                v-if="includeAudioMetadata"
                 :label="t('book.detail.editMetadata.narratorsLabel')"
                 field="narrators"
                 :locked="isLocked('narrators')"
@@ -1141,39 +1248,13 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
               </MetadataFieldLabel>
 
               <div v-if="form.customMetadata.length > 0" class="grid grid-cols-1 gap-2.5 border-t border-border pt-2.5 @sm/edit:grid-cols-2">
-                <label v-for="field in form.customMetadata" :key="field.fieldId" class="space-y-1">
-                  <span class="text-[10px] font-bold tracking-[0.1em] text-muted-foreground uppercase">{{ field.label }}</span>
-                  <input
-                    v-if="isTextLikeCustomField(field.type)"
-                    :value="typeof field.value === 'string' ? field.value : ''"
-                    :type="field.type === 'url' ? 'url' : 'text'"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomTextField(field.fieldId, $event)"
-                  />
-                  <input
-                    v-else-if="field.type === 'number'"
-                    :value="typeof field.value === 'number' ? field.value : ''"
-                    type="number"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomNumberField(field.fieldId, $event)"
-                  />
-                  <input
-                    v-else-if="field.type === 'date'"
-                    :value="typeof field.value === 'string' ? field.value : ''"
-                    type="date"
-                    class="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm transition-shadow outline-none focus:ring-1 focus:ring-ring sm:h-8"
-                    @input="setCustomDateField(field.fieldId, $event)"
-                  />
-                  <span v-else class="flex h-10 items-center rounded-lg border border-input bg-background px-3 sm:h-8">
-                    <input
-                      type="checkbox"
-                      class="size-4 rounded border-input accent-primary"
-                      :checked="field.value === true"
-                      :aria-label="field.label"
-                      @change="setCustomBooleanField(field.fieldId, $event)"
-                    />
-                  </span>
-                </label>
+                <CustomMetadataValueInput
+                  v-for="field in form.customMetadata"
+                  :key="field.fieldId"
+                  v-model="field.value"
+                  :label="field.label"
+                  :type="field.type"
+                />
               </div>
             </div>
           </section>
@@ -1266,7 +1347,16 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                   :is-updating="isUpdatingLock"
                   @toggle="handleLockToggle"
                 >
-                  <input v-model="form.isbn13" maxlength="13" :class="controlClass(!form.isbn13, true)" :disabled="isLocked('isbn13')" />
+                  <template #action>
+                    <IsbnCandidatesPopover
+                      :book-id="book.id"
+                      :isbn13="form.isbn13"
+                      :isbn10="form.isbn10"
+                      :disabled="isbnPickerDisabled"
+                      @select="handleIsbnCandidateSelect"
+                    />
+                  </template>
+                  <IdentifierInput v-model="form.isbn13" kind="isbn" :class="controlClass(!form.isbn13, true)" :disabled="isLocked('isbn13')" />
                 </MetadataFieldLabel>
 
                 <MetadataFieldLabel
@@ -1277,11 +1367,11 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                   :is-updating="isUpdatingLock"
                   @toggle="handleLockToggle"
                 >
-                  <input v-model="form.isbn10" maxlength="10" :class="controlClass(!form.isbn10, true)" :disabled="isLocked('isbn10')" />
+                  <IdentifierInput v-model="form.isbn10" kind="isbn" :class="controlClass(!form.isbn10, true)" :disabled="isLocked('isbn10')" />
                 </MetadataFieldLabel>
 
                 <MetadataFieldLabel
-                  v-if="isPrimaryAudio"
+                  v-if="includeAudioMetadata"
                   :label="t('book.detail.editMetadata.durationLabel')"
                   field="durationSeconds"
                   :locked="isLocked('durationSeconds')"
@@ -1299,7 +1389,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                 </MetadataFieldLabel>
 
                 <MetadataFieldLabel
-                  v-if="isPrimaryAudio"
+                  v-if="includeAudioMetadata"
                   :label="t('book.detail.editMetadata.abridgedLabel')"
                   field="abridged"
                   :locked="isLocked('abridged')"
@@ -1313,7 +1403,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                     <input
                       v-model="form.abridged"
                       type="checkbox"
-                      class="size-4 rounded border-input accent-primary"
+                      class="size-4 rounded-xs border-input accent-primary"
                       :aria-label="t('book.detail.editMetadata.abridgedLabel')"
                       :disabled="isLocked('abridged')"
                     />
@@ -1361,7 +1451,10 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                 </div>
               </MetadataFieldLabel>
 
-              <div v-if="visibleProviderIdFields.length > 0" class="col-span-2 flex flex-col gap-1 border-t border-border pt-2.5">
+              <div
+                v-if="visibleProviderIdFields.length > 0 || externalProviderIdRows.length > 0"
+                class="col-span-2 flex flex-col gap-1 border-t border-border pt-2.5"
+              >
                 <div class="flex items-center gap-2">
                   <h4 class="text-[10px] font-bold tracking-[0.1em] text-muted-foreground uppercase">
                     {{ t('book.detail.editMetadata.providerIds') }}
@@ -1377,15 +1470,16 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                     >
                       {{ label }}
                     </label>
-                    <input
+                    <IdentifierInput
                       :id="`provider-id-${field}`"
                       v-model="form[field]"
-                      class="h-8 min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 font-mono text-xs transition-shadow outline-none hover:border-input focus:border-input focus:bg-background focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 sm:h-7"
+                      :kind="IDENTIFIER_INPUT_KIND_BY_FIELD[field]"
+                      class="h-8 min-w-0 flex-1 rounded-xs border border-transparent bg-transparent px-1.5 font-mono text-xs transition-shadow outline-none hover:border-input focus:border-input focus:bg-background focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 sm:h-7"
                       :disabled="isLocked(field)"
                     />
                     <button
                       type="button"
-                      class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors disabled:cursor-not-allowed"
+                      class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-xs border transition-colors disabled:cursor-not-allowed"
                       :class="
                         isLocked(field)
                           ? 'border-primary/30 bg-primary/15 text-primary hover:bg-primary/25'
@@ -1403,6 +1497,37 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                       <Lock v-else-if="isLocked(field)" class="size-3" aria-hidden="true" />
                       <LockOpen v-else class="size-3" aria-hidden="true" />
                     </button>
+                  </div>
+                  <div v-for="row in externalProviderIdRows" :key="`external-${row.key}`" class="flex items-center gap-2 border-b border-border/60">
+                    <label
+                      :for="`provider-id-external-${row.key}`"
+                      class="w-[5.25rem] shrink-0 truncate text-[10px] font-semibold tracking-wide text-muted-foreground uppercase"
+                      :title="row.registered ? row.label : t('book.detail.editMetadata.externalProviderUnavailable', { provider: row.label })"
+                    >
+                      {{ row.label }}
+                    </label>
+                    <input
+                      :id="`provider-id-external-${row.key}`"
+                      v-model="form.externalProviderIds[row.key]"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      maxlength="512"
+                      :readonly="!row.registered"
+                      class="h-8 min-w-0 flex-1 rounded-xs border border-transparent bg-transparent px-1.5 font-mono text-xs transition-shadow outline-none hover:border-input focus:border-input focus:bg-background focus:ring-1 focus:ring-ring sm:h-7"
+                    />
+                    <!-- A removed provider's id cannot be edited, since the server refuses a new value for it, but it can be cleared. -->
+                    <button
+                      v-if="!row.registered && form.externalProviderIds[row.key]"
+                      type="button"
+                      class="inline-flex size-6 shrink-0 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      :aria-label="t('book.detail.editMetadata.clearExternalProviderId', { provider: row.label })"
+                      :title="t('book.detail.editMetadata.clearExternalProviderId', { provider: row.label })"
+                      @click="clearExternalProviderId(row.key)"
+                    >
+                      <X class="size-3" aria-hidden="true" />
+                    </button>
+                    <span v-else class="size-6 shrink-0" aria-hidden="true" />
                   </div>
                 </div>
               </div>
@@ -1442,7 +1567,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
                 </h3>
                 <button
                   type="button"
-                  class="ml-auto flex size-6 cursor-pointer items-center justify-center rounded border transition-colors disabled:cursor-not-allowed"
+                  class="ml-auto flex size-6 cursor-pointer items-center justify-center rounded-xs border transition-colors disabled:cursor-not-allowed"
                   :class="
                     isLocked('description')
                       ? 'border-primary/30 bg-primary/15 text-primary hover:bg-primary/25'
@@ -1567,6 +1692,7 @@ function handleCoverChanged(source: 'extracted' | 'custom' | null) {
   </div>
 
   <MetadataSearchDrawer v-if="searchOpen" :book="props.book" :locked-fields="lockedFields" @close="handleCloseSearch" @apply="handleApply" />
+  <MetadataReminderSheet v-if="remindersOpen" v-model:open="remindersOpen" @closed="restoreReminderFocus" />
 </template>
 
 <style scoped>

@@ -6,11 +6,17 @@ import type {
   CoverSearchPreferences,
   DisplayPreferences,
   LocalePreferences,
-  PodcastPlaylistPreferences,
   ServerFontPreferences,
   ThemePreferences,
 } from '@bookorbit/types';
-import { MAX_SERVER_FONTS, SUPPORTED_LOCALES } from '@bookorbit/types';
+import {
+  ANNOTATION_COLOR_NAME_MAX_ENTRIES,
+  ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS,
+  MAX_SERVER_FONTS,
+  STYLE_IDS,
+  SUPPORTED_LOCALES,
+  SURFACE_PALETTE_IDS,
+} from '@bookorbit/types';
 
 import { UserPreferencesRepository } from './user-preferences.repository';
 import { UserPreferencesService } from './user-preferences.service';
@@ -21,25 +27,6 @@ const validThemePreferences: ThemePreferences = {
   radius: 'rounded',
   background: 'vinyl',
   brightness: 35,
-};
-
-const validPodcastPlaylistPreferences: PodcastPlaylistPreferences = {
-  playlists: [
-    {
-      id: 'playlist-1',
-      name: 'Morning commute',
-      libraryId: 4,
-      rules: {
-        filter: 'unplayed',
-        sort: 'shortest',
-        minDurationMinutes: null,
-        maxDurationMinutes: 30,
-        publishedWithinDays: 14,
-        podcastIds: [8, 9],
-        followedOnly: true,
-      },
-    },
-  ],
 };
 
 const addedAccentIds: readonly Accent[] = [
@@ -88,6 +75,7 @@ const validDisplayPreferences: DisplayPreferences = {
   squareGridGap: 20,
   viewMode: 'grid',
   cardOverlays: ['progress-bar', 'format', 'rating'],
+  formatBadgeStyle: 'primary',
   showJumpRails: true,
   smartScopeFilterExpanded: true,
   authorCoverSize: 140,
@@ -106,6 +94,8 @@ const validDisplayPreferences: DisplayPreferences = {
   gridCardSecondaryLabel: 'hidden',
   cardInfoMode: 'hover-overlay',
   thumbnailClickAction: 'reader',
+  openHighlightsInPeek: false,
+  placeholderCoverStyle: 'bauhaus',
 };
 
 const validLocalePreferences: LocalePreferences = {
@@ -194,6 +184,34 @@ describe('UserPreferencesService', () => {
     await expect(service.upsertCoverSearchPreferences(11, { ...validCoverSearchPreferences, unexpected: true })).rejects.toBeInstanceOf(
       BadRequestException,
     );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('getReadAloudPreferences returns no language when nothing was saved', async () => {
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'read-aloud');
+  });
+
+  it('getReadAloudPreferences returns the saved language, and none when the stored row is malformed', async () => {
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'fr' } } as never);
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: 'fr' });
+
+    repo.findByCategory.mockResolvedValueOnce({ data: { defaultLanguage: 'English' } } as never);
+    await expect(service.getReadAloudPreferences(7)).resolves.toEqual({ defaultLanguage: null });
+  });
+
+  it('upsertReadAloudPreferences saves and clears the default language', async () => {
+    await expect(service.upsertReadAloudPreferences(11, { defaultLanguage: 'de' })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'read-aloud', { defaultLanguage: 'de' });
+
+    await expect(service.upsertReadAloudPreferences(11, { defaultLanguage: null })).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenLastCalledWith(11, 'read-aloud', { defaultLanguage: null });
+  });
+
+  it('upsertReadAloudPreferences rejects a language name, a full tag and unknown fields', async () => {
+    for (const settings of [{ defaultLanguage: 'English' }, { defaultLanguage: 'en-US' }, { defaultLanguage: 'en', unexpected: true }]) {
+      await expect(service.upsertReadAloudPreferences(11, settings)).rejects.toBeInstanceOf(BadRequestException);
+    }
     expect(repo.upsert).not.toHaveBeenCalled();
   });
 
@@ -328,6 +346,46 @@ describe('UserPreferencesService', () => {
     expect(repo.upsert).not.toHaveBeenCalled();
   });
 
+  it.each(STYLE_IDS)('upsertThemePreferences accepts the %s style', async (style) => {
+    const preferences = { ...validThemePreferences, style };
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each(SURFACE_PALETTE_IDS)('upsertThemePreferences accepts the %s surface palette', async (surfacePalette) => {
+    const preferences = { ...validThemePreferences, style: 'nostalgia', surfacePalette } as const;
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each([0, 100, 200])('upsertThemePreferences accepts glowReach %i', async (glowReach) => {
+    const preferences = { ...validThemePreferences, glowReach };
+
+    await expect(service.upsertThemePreferences(11, preferences)).resolves.toBeUndefined();
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'theme', preferences);
+  });
+
+  it.each([-10, 201, 50.5, 'off'])('upsertThemePreferences rejects glowReach %s', async (glowReach) => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, glowReach } as never)).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertThemePreferences rejects an unknown style', async () => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, style: 'retro' } as never)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertThemePreferences rejects an unknown surface palette', async () => {
+    await expect(service.upsertThemePreferences(11, { ...validThemePreferences, surfacePalette: 'teal' } as never)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
   it('upsertThemePreferences rejects invalid theme ids', async () => {
     await expect(service.upsertThemePreferences(11, { ...validThemePreferences, theme: 'sepia' } as never)).rejects.toBeInstanceOf(
       BadRequestException,
@@ -408,13 +466,62 @@ describe('UserPreferencesService', () => {
     }
   });
 
-  it('upsertDisplayPreferences defaults thumbnailClickAction to reader when omitted', async () => {
+  it('upsertDisplayPreferences defaults thumbnailClickAction to details when omitted', async () => {
     const { thumbnailClickAction, ...withoutAction } = validDisplayPreferences;
     void thumbnailClickAction;
 
     await expect(service.upsertDisplayPreferences(11, withoutAction as unknown as Record<string, unknown>)).resolves.toBeUndefined();
 
-    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ thumbnailClickAction: 'reader' }));
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ thumbnailClickAction: 'details' }));
+  });
+
+  it('upsertDisplayPreferences defaults formatBadgeStyle to underline when omitted', async () => {
+    const { formatBadgeStyle, ...withoutStyle } = validDisplayPreferences;
+    void formatBadgeStyle;
+    await service.upsertDisplayPreferences(11, withoutStyle as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'underline' }));
+  });
+
+  it('upsertDisplayPreferences keeps the primary format badge style when it is chosen', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'primary' } as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'primary' }));
+  });
+
+  it('upsertDisplayPreferences keeps a chosen formatBadgeStyle', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'seal' } as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ formatBadgeStyle: 'seal' }));
+  });
+
+  it('upsertDisplayPreferences rejects unknown formatBadgeStyle values', async () => {
+    await expect(
+      service.upsertDisplayPreferences(11, { ...validDisplayPreferences, formatBadgeStyle: 'stack' } as unknown as Record<string, unknown>),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('upsertDisplayPreferences defaults placeholderCoverStyle to bauhaus when omitted', async () => {
+    const { placeholderCoverStyle, ...withoutStyle } = validDisplayPreferences;
+    void placeholderCoverStyle;
+    await service.upsertDisplayPreferences(11, withoutStyle as unknown as Record<string, unknown>);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ placeholderCoverStyle: 'bauhaus' }));
+  });
+
+  it('upsertDisplayPreferences keeps a chosen placeholderCoverStyle', async () => {
+    await service.upsertDisplayPreferences(11, { ...validDisplayPreferences, placeholderCoverStyle: 'marbled' } as unknown as Record<
+      string,
+      unknown
+    >);
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ placeholderCoverStyle: 'marbled' }));
+  });
+
+  it('upsertDisplayPreferences rejects unknown placeholderCoverStyle values', async () => {
+    await expect(
+      service.upsertDisplayPreferences(11, { ...validDisplayPreferences, placeholderCoverStyle: 'lattice' } as unknown as Record<string, unknown>),
+    ).rejects.toThrow(BadRequestException);
   });
 
   it('upsertDisplayPreferences rejects invalid thumbnailClickAction values', async () => {
@@ -462,6 +569,31 @@ describe('UserPreferencesService', () => {
   it('upsertDisplayPreferences rejects non-boolean showSpineOnComics', async () => {
     await expect(
       service.upsertDisplayPreferences(11, { ...validDisplayPreferences, showSpineOnComics: 'yes' } as unknown as Record<string, unknown>),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upsertDisplayPreferences accepts both openHighlightsInPeek values', async () => {
+    for (const value of [true, false]) {
+      await expect(
+        service.upsertDisplayPreferences(11, { ...validDisplayPreferences, openHighlightsInPeek: value } as unknown as Record<string, unknown>),
+      ).resolves.toBeUndefined();
+      expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ openHighlightsInPeek: value }));
+    }
+  });
+
+  it('upsertDisplayPreferences defaults openHighlightsInPeek to false when omitted', async () => {
+    const { openHighlightsInPeek, ...withoutFlag } = validDisplayPreferences;
+    void openHighlightsInPeek;
+
+    await expect(service.upsertDisplayPreferences(11, withoutFlag as unknown as Record<string, unknown>)).resolves.toBeUndefined();
+
+    expect(repo.upsert).toHaveBeenCalledWith(11, 'display', expect.objectContaining({ openHighlightsInPeek: false }));
+  });
+
+  it('upsertDisplayPreferences rejects non-boolean openHighlightsInPeek', async () => {
+    await expect(
+      service.upsertDisplayPreferences(11, { ...validDisplayPreferences, openHighlightsInPeek: 'yes' } as unknown as Record<string, unknown>),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(repo.upsert).not.toHaveBeenCalled();
   });
@@ -761,38 +893,67 @@ describe('UserPreferencesService', () => {
     });
   });
 
-  it('getPodcastPlaylistPreferences returns an empty list when nothing is stored', async () => {
-    await expect(service.getPodcastPlaylistPreferences(7)).resolves.toEqual({ playlists: [] });
-    expect(repo.findByCategory).toHaveBeenCalledWith(7, 'podcast-playlists');
-  });
+  describe('annotation colour name preferences', () => {
+    const hexKey = (i: number) => `#${i.toString(16).padStart(6, '0').toUpperCase()}`;
 
-  it('getPodcastPlaylistPreferences falls back to an empty list when the stored payload no longer validates', async () => {
-    repo.findByCategory.mockResolvedValueOnce({ data: { playlists: [{ id: 'a', name: 'Legacy' }] } } as never);
+    it('defaults to no names when the reader has never set any', async () => {
+      repo.findByCategory.mockResolvedValue(undefined);
 
-    await expect(service.getPodcastPlaylistPreferences(7)).resolves.toEqual({ playlists: [] });
-  });
+      const result = await service.getAnnotationColorNamePreferences(11);
 
-  it('upsertPodcastPlaylistPreferences persists validated playlists', async () => {
-    await expect(service.upsertPodcastPlaylistPreferences(11, validPodcastPlaylistPreferences)).resolves.toBeUndefined();
-    expect(repo.upsert).toHaveBeenCalledWith(11, 'podcast-playlists', validPodcastPlaylistPreferences);
-  });
+      expect(result).toEqual({ names: {} });
+      expect(repo.findByCategory).toHaveBeenCalledWith(11, 'annotation-colors');
+      result.names['#FFFFFF'] = 'mutated';
+      expect(ANNOTATION_COLOR_NAME_PREFERENCES_DEFAULTS).toEqual({ names: {} });
+    });
 
-  it('upsertPodcastPlaylistPreferences rejects duplicate playlist ids', async () => {
-    const [playlist] = validPodcastPlaylistPreferences.playlists;
+    it('returns the stored names', async () => {
+      repo.findByCategory.mockResolvedValue({ data: { names: { '#FACC15': 'Ideas', '#4ADE80': 'Quotes' } } } as never);
 
-    await expect(service.upsertPodcastPlaylistPreferences(11, { playlists: [playlist, playlist] })).rejects.toBeInstanceOf(BadRequestException);
-    expect(repo.upsert).not.toHaveBeenCalled();
-  });
+      await expect(service.getAnnotationColorNamePreferences(11)).resolves.toEqual({ names: { '#FACC15': 'Ideas', '#4ADE80': 'Quotes' } });
+    });
 
-  it('upsertPodcastPlaylistPreferences rejects an unknown sort and out-of-range durations', async () => {
-    const [playlist] = validPodcastPlaylistPreferences.playlists;
+    it('falls back to the defaults when the stored payload no longer validates', async () => {
+      repo.findByCategory.mockResolvedValue({ data: { names: { yellow: 'Ideas' } } as never });
 
-    await expect(
-      service.upsertPodcastPlaylistPreferences(11, { playlists: [{ ...playlist, rules: { ...playlist!.rules, sort: 'random' } }] }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    await expect(
-      service.upsertPodcastPlaylistPreferences(11, { playlists: [{ ...playlist, rules: { ...playlist!.rules, maxDurationMinutes: 2000 } }] }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(repo.upsert).not.toHaveBeenCalled();
+      await expect(service.getAnnotationColorNamePreferences(11)).resolves.toEqual({ names: {} });
+    });
+
+    it('normalises keys to uppercase, trims labels and drops blank ones', async () => {
+      await service.upsertAnnotationColorNamePreferences(11, { names: { '#facc15': '  Ideas  ', '#4ade80': '   ', '#38BDF8': 'Quotes' } });
+
+      expect(repo.upsert).toHaveBeenCalledWith(11, 'annotation-colors', { names: { '#FACC15': 'Ideas', '#38BDF8': 'Quotes' } });
+    });
+
+    it('stores an empty map, which clears every name', async () => {
+      await service.upsertAnnotationColorNamePreferences(11, { names: {} });
+
+      expect(repo.upsert).toHaveBeenCalledWith(11, 'annotation-colors', { names: {} });
+    });
+
+    it.each([
+      ['a named colour that is not #RRGGBB', { names: { yellow: 'Ideas' } }],
+      ['a three-digit hex colour', { names: { '#FC1': 'Ideas' } }],
+      ['a label longer than the cap', { names: { '#FACC15': 'x'.repeat(41) } }],
+      ['a non-string label', { names: { '#FACC15': 7 } }],
+      ['two keys naming the same colour', { names: { '#facc15': 'One', '#FACC15': 'Two' } }],
+      ['a missing names map', {}],
+      ['an unknown key', { names: {}, extra: true }],
+    ])('rejects %s with 400', async (_label, settings) => {
+      await expect(service.upsertAnnotationColorNamePreferences(11, settings as Record<string, unknown>)).rejects.toBeInstanceOf(BadRequestException);
+      expect(repo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('accepts a label exactly at the length cap', async () => {
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: { '#FACC15': 'x'.repeat(40) } })).resolves.toBeUndefined();
+    });
+
+    it('caps the number of named colours, counting only labels that are kept', async () => {
+      const atCap = Object.fromEntries(Array.from({ length: ANNOTATION_COLOR_NAME_MAX_ENTRIES }, (_, i) => [hexKey(i), `Name ${i}`]));
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: { ...atCap, '#ABCDEF': ' ' } })).resolves.toBeUndefined();
+
+      const overCap = { ...atCap, '#ABCDEF': 'One too many' };
+      await expect(service.upsertAnnotationColorNamePreferences(11, { names: overCap })).rejects.toBeInstanceOf(BadRequestException);
+    });
   });
 });

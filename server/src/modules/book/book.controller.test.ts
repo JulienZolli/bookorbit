@@ -1,15 +1,20 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
 import type { MockedFunction } from 'vitest';
 import { ZipArchive } from 'archiver';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
-import { Permission } from '@bookorbit/types';
+import { AuditAction, AuditResource, BULK_RUN_MAX_UNFINISHED, Permission } from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { AUDITABLE_KEY } from '../../common/decorators/auditable.decorator';
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
 import { PERMISSION_KEY } from '../../common/decorators/require-permission.decorator';
+import { BulkRunHandlerRegistry } from '../bulk-runs/bulk-run-handler.registry';
+import { BulkRunStreams } from '../bulk-runs/bulk-run-streams.service';
+import { BulkRunsService } from '../bulk-runs/bulk-runs.service';
+import { BookEmbedAudioCoverBulkHandler, BookReExtractCoverBulkHandler, BookRefreshMetadataBulkHandler } from './book-bulk-run-handlers';
 import { BookController } from './book.controller';
+import { FASTIFY_ROUTE_CONFIG_METADATA } from '@nestjs/platform-fastify/constants.js';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('archiver', () => ({
@@ -132,9 +137,10 @@ function makeController() {
     deleteBooks: vi.fn(),
     searchAcrossLibraries: vi.fn(),
     globalQuery: vi.fn(),
-    bulkRefreshMetadata: vi.fn(),
-    bulkReExtractCover: vi.fn(),
+    embedAudioCover: vi.fn(),
+    reExtractCover: vi.fn(),
     bulkSetMetadata: vi.fn(),
+    bulkSetStatus: vi.fn(),
     bulkEditMetadata: vi.fn(),
     bulkUpdateTags: vi.fn(),
     getExportFiles: vi.fn(),
@@ -156,6 +162,7 @@ function makeController() {
     updateMetadataLocks: vi.fn(),
     refreshMetadata: vi.fn(),
     getMetadataFromFile: vi.fn(),
+    getIsbnCandidates: vi.fn(),
     writeAndRename: vi.fn(),
     verifyBookAccess: vi.fn(),
     getKoboState: vi.fn(),
@@ -166,11 +173,15 @@ function makeController() {
   const fileWriteService = {
     findWriteLog: vi.fn(),
   };
+  const bulkRuns = {
+    startAndStream: vi.fn().mockResolvedValue(undefined),
+  };
 
   return {
-    controller: new BookController(bookService as never, fileWriteService as never),
+    controller: new BookController(bookService as never, fileWriteService as never, bulkRuns as never),
     bookService,
     fileWriteService,
+    bulkRuns,
   };
 }
 
@@ -223,13 +234,24 @@ describe('BookController', () => {
     expect(mockCreateReadStream).not.toHaveBeenCalled();
   });
 
+  it('passes a requested display size on to the service', async () => {
+    const { controller, bookService } = makeController();
+    const { reply } = makeReply();
+    bookService.getCoverPath.mockResolvedValue('/tmp/display.jpg');
+    mockStat.mockResolvedValue({ mtimeMs: 1234 } as never);
+
+    await controller.getCover(7, makeUser(), reply, { t: '1', size: 'display' }, '"1234"');
+
+    expect(bookService.getCoverPath).toHaveBeenCalledWith(7, expect.anything(), { medium: undefined, strict: undefined, size: 'display' });
+  });
+
   it('returns 304 with immutable cache when cover etag matches and ?t= present', async () => {
     const { controller, bookService } = makeController();
     const { reply, headers } = makeReply();
     bookService.getCoverPath.mockResolvedValue('/tmp/cover.jpg');
     mockStat.mockResolvedValue({ mtimeMs: 1234 } as never);
 
-    await controller.getCover(7, makeUser(), reply, '1234567890', '"1234"');
+    await controller.getCover(7, makeUser(), reply, { t: '1234567890' }, '"1234"');
 
     expect(reply.status).toHaveBeenCalledWith(304);
     expect(headers['Cache-Control']).toBe('public, max-age=31536000, immutable');
@@ -256,7 +278,7 @@ describe('BookController', () => {
     bookService.getCoverPath.mockResolvedValue('/tmp/cover.jpg');
     mockStat.mockResolvedValue({ mtimeMs: 4321 } as never);
 
-    await controller.getCover(7, makeUser(), reply, '1234567890', undefined);
+    await controller.getCover(7, makeUser(), reply, { t: '1234567890' }, undefined);
 
     expect(headers['Cache-Control']).toBe('public, max-age=31536000, immutable');
     expect(reply.type).toHaveBeenCalledWith('image/jpeg');
@@ -335,72 +357,271 @@ describe('BookController', () => {
     expect(mockCreateReadStream).not.toHaveBeenCalled();
   });
 
-  it('streams server-sent events for bulk metadata refresh progress', async () => {
-    const { controller, bookService } = makeController();
-    const { reply, raw } = makeReply();
-    bookService.bulkRefreshMetadata.mockImplementation(
-      (
-        _bookIds: number[],
-        _user: RequestUser,
-        onProgress: (event: { bookId: number; success: boolean; detail?: unknown; error?: string }) => void,
-        options?: { isCancelled?: () => boolean },
-      ) => {
-        expect(options?.isCancelled?.()).toBe(false);
-        onProgress({ bookId: 9, success: true });
-        return Promise.resolve({ processed: 1, failed: 0 });
-      },
-    );
+  describe('file byte routes', () => {
+    const MTIME_MS = Date.UTC(2026, 0, 2, 3, 4, 5);
 
-    await controller.bulkRefreshMetadata({ bookIds: [9] }, makeUser(), reply);
+    function mockFile(bookService: ReturnType<typeof makeController>['bookService'], format = 'pdf') {
+      bookService.getFileInfo.mockResolvedValue({
+        path: `/tmp/book.${format}`,
+        size: 500,
+        mtimeMs: MTIME_MS,
+        format,
+        bookId: 5,
+        originalFilename: `book.${format}`,
+        mediaOverlayAvailable: false,
+      });
+      bookService.resolveDownloadFilename.mockResolvedValue(`book.${format}`);
+    }
 
-    expect(raw.writeHead).toHaveBeenCalledWith(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+    it('sends validators and a revalidate-every-time cache policy with the whole file', async () => {
+      const { controller, bookService } = makeController();
+      const { reply, headers } = makeReply();
+      mockFile(bookService);
+
+      await controller.serveFile(1, makeUser(), undefined, reply);
+
+      expect(headers['ETag']).toMatch(/^"[0-9a-f]{64}"$/);
+      expect(headers['Last-Modified']).toBe('Fri, 02 Jan 2026 03:04:05 GMT');
+      expect(headers['Cache-Control']).toBe('private, no-cache');
+      expect(headers['Accept-Ranges']).toBe('bytes');
+      expect(headers['Content-Length']).toBe(500);
+      expect(reply.status).not.toHaveBeenCalled();
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/tmp/book.pdf');
     });
-    expect(raw.write).toHaveBeenNthCalledWith(1, `data: ${JSON.stringify({ bookId: 9, success: true })}\n\n`);
-    expect(raw.write).toHaveBeenNthCalledWith(2, `data: ${JSON.stringify({ done: true, processed: 1, failed: 0 })}\n\n`);
-    expect(raw.end).toHaveBeenCalled();
+
+    it('resumes from If-Range when it carries the current ETag', async () => {
+      const { controller, bookService } = makeController();
+      const first = makeReply();
+      mockFile(bookService);
+      await controller.serveFile(1, makeUser(), undefined, first.reply);
+      const etag = first.headers['ETag'] as string;
+      mockCreateReadStream.mockClear();
+
+      const { reply, headers } = makeReply();
+      await controller.serveFile(1, makeUser(), 'bytes=200-', reply, etag);
+
+      expect(reply.status).toHaveBeenCalledWith(206);
+      expect(headers['Content-Range']).toBe('bytes 200-499/500');
+      expect(headers['Content-Length']).toBe(300);
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/tmp/book.pdf', { start: 200, end: 499 });
+    });
+
+    it('restarts with the whole file when If-Range names a file that has since changed', async () => {
+      const { controller, bookService } = makeController();
+      const { reply, headers } = makeReply();
+      mockFile(bookService);
+
+      await controller.serveFile(1, makeUser(), 'bytes=200-', reply, '"stale"');
+
+      expect(reply.status).not.toHaveBeenCalled();
+      expect(headers['Content-Range']).toBeUndefined();
+      expect(headers['Content-Length']).toBe(500);
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/tmp/book.pdf');
+    });
+
+    it('serves suffix ranges and clamps an end past the file', async () => {
+      const { controller, bookService } = makeController();
+      mockFile(bookService);
+
+      const suffix = makeReply();
+      await controller.serveFile(1, makeUser(), 'bytes=-100', suffix.reply);
+      expect(suffix.headers['Content-Range']).toBe('bytes 400-499/500');
+
+      const clamped = makeReply();
+      await controller.serveFile(1, makeUser(), 'bytes=450-9999', clamped.reply);
+      expect(clamped.reply.status).toHaveBeenCalledWith(206);
+      expect(clamped.headers['Content-Range']).toBe('bytes 450-499/500');
+      expect(clamped.headers['Content-Length']).toBe(50);
+    });
+
+    it('answers 304 when If-None-Match matches on a plain GET', async () => {
+      const { controller, bookService } = makeController();
+      const first = makeReply();
+      mockFile(bookService);
+      await controller.serveFile(1, makeUser(), undefined, first.reply);
+      mockCreateReadStream.mockClear();
+
+      const { reply } = makeReply();
+      await controller.serveFile(1, makeUser(), undefined, reply, undefined, first.headers['ETag'] as string);
+
+      expect(reply.status).toHaveBeenCalledWith(304);
+      expect(mockCreateReadStream).not.toHaveBeenCalled();
+    });
+
+    it('honours Range on the download route with the same validators as serve', async () => {
+      const { controller, bookService } = makeController();
+      mockFile(bookService, 'epub');
+      const served = makeReply();
+      await controller.serveFile(1, makeUser(), undefined, served.reply);
+      mockCreateReadStream.mockClear();
+
+      const { reply, headers } = makeReply();
+      await controller.downloadFile(1, makeUser(), reply, 'bytes=100-199', served.headers['ETag'] as string);
+
+      expect(headers['ETag']).toBe(served.headers['ETag']);
+      expect(headers['Content-Disposition']).toContain('attachment');
+      expect(reply.status).toHaveBeenCalledWith(206);
+      expect(headers['Content-Range']).toBe('bytes 100-199/500');
+      expect(mockCreateReadStream).toHaveBeenCalledWith('/tmp/book.epub', { start: 100, end: 199 });
+    });
+
+    it('opts every raw file route out of response compression', () => {
+      for (const handler of ['serveFile', 'downloadFile', 'downloadAudiolessEpub', 'getCover', 'getThumbnail'] as const) {
+        expect(Reflect.getMetadata(FASTIFY_ROUTE_CONFIG_METADATA, BookController.prototype[handler])).toEqual({ compress: false });
+      }
+    });
   });
 
-  it('stops sending SSE done event when client disconnects', async () => {
-    const { controller, bookService } = makeController();
-    const { reply, raw, emitRawEvent } = makeReply();
-    bookService.bulkRefreshMetadata.mockImplementation(
-      (
-        _bookIds: number[],
-        _user: RequestUser,
-        onProgress: (event: { bookId: number; success: boolean; detail?: unknown; error?: string }) => void,
-      ) => {
-        onProgress({ bookId: 9, success: true });
-        emitRawEvent('close');
-        return Promise.resolve({ processed: 1, failed: 0 });
-      },
+  it.each([
+    {
+      method: 'bulkRefreshMetadata' as const,
+      kind: 'book-refresh-metadata',
+      action: AuditAction.BookBulkMetadataRefresh,
+      one: 'Bulk refreshed metadata for 1 book',
+      many: 'Bulk refreshed metadata for 3 books',
+    },
+    {
+      method: 'bulkReExtractCover' as const,
+      kind: 'book-re-extract-cover',
+      action: AuditAction.BookBulkCoverReextract,
+      one: 'Bulk re-extracted covers for 1 book',
+      many: 'Bulk re-extracted covers for 3 books',
+    },
+    {
+      method: 'bulkEmbedAudioCover' as const,
+      kind: 'book-embed-audio-cover',
+      action: AuditAction.BookBulkEmbedAudioCover,
+      one: 'Bulk embedded audiobook covers for 1 book',
+      many: 'Bulk embedded audiobook covers for 3 books',
+    },
+  ])('starts a $kind bulk run on the resolved selection and audits the resolved count', async ({ method, kind, action, one, many }) => {
+    const { controller, bookService, bulkRuns } = makeController();
+    const { reply } = makeReply();
+    const user = makeUser();
+    const dto = { query: { libraryId: 3 } };
+    bookService.resolveSelectionToIds.mockResolvedValue([4, 5, 6]);
+
+    await controller[method](dto as never, user, reply);
+
+    expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(dto, user, 'editor');
+    expect(bulkRuns.startAndStream).toHaveBeenCalledWith(
+      reply,
+      expect.objectContaining({ kind, subjectIds: [4, 5, 6], actor: user, audit: expect.objectContaining({ action, resource: AuditResource.Book }) }),
     );
-
-    await controller.bulkRefreshMetadata({ bookIds: [9] }, makeUser(), reply);
-
-    expect(raw.write).toHaveBeenCalledTimes(1);
-    expect(raw.write).toHaveBeenCalledWith(`data: ${JSON.stringify({ bookId: 9, success: true })}\n\n`);
-    expect(raw.end).not.toHaveBeenCalled();
+    const { audit } = bulkRuns.startAndStream.mock.calls[0]![1] as { audit: { description: (count: number) => string } };
+    expect(audit.description(1)).toBe(one);
+    expect(audit.description(3)).toBe(many);
   });
 
-  it('streams server-sent events for bulk cover re-extraction progress', async () => {
+  it('passes ignoreCache to a bulk metadata refresh run only when asked', async () => {
+    const { controller, bulkRuns } = makeController();
+    const user = makeUser();
+
+    await controller.bulkRefreshMetadata({ bookIds: [9], ignoreCache: true }, user, makeReply().reply);
+    await controller.bulkRefreshMetadata({ bookIds: [9] }, user, makeReply().reply);
+
+    expect(bulkRuns.startAndStream.mock.calls[0]![1]).toEqual(expect.objectContaining({ options: { ignoreCache: true } }));
+    expect(bulkRuns.startAndStream.mock.calls[1]![1]).toEqual(expect.objectContaining({ options: {} }));
+  });
+
+  it('forwards explicit reading dates through the bulk status route', async () => {
     const { controller, bookService } = makeController();
-    const { reply, raw } = makeReply();
-    bookService.bulkReExtractCover.mockImplementation(
-      (_bookIds: number[], _user: RequestUser, onProgress: (bookId: number) => void, options?: { isCancelled?: () => boolean }) => {
-        expect(options?.isCancelled?.()).toBe(false);
-        onProgress(12);
-        return Promise.resolve({ processed: 1, updated: 1 });
+    const user = makeUser();
+    const dto = { bookIds: [7, 9], status: 'read' as const, startedAt: '2026-01-01', finishedAt: null };
+    bookService.resolveSelectionToIds.mockResolvedValue([7, 9]);
+
+    await controller.bulkSetStatus(dto, user);
+
+    expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(dto, user);
+    expect(bookService.bulkSetStatus).toHaveBeenCalledWith([7, 9], dto, user);
+  });
+
+  it.each(['bulkRefreshMetadata', 'bulkReExtractCover', 'bulkEmbedAudioCover'] as const)(
+    'rejects an unauthorized %s selection before starting SSE',
+    async (method) => {
+      const { controller, bookService, bulkRuns } = makeController();
+      const { reply, raw } = makeReply();
+      const user = makeUser();
+      const error = new ForbiddenException('Editor access required');
+      bookService.resolveSelectionToIds.mockRejectedValue(error);
+
+      await expect(controller[method]({ bookIds: [9] }, user, reply)).rejects.toBe(error);
+
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith({ bookIds: [9] }, user, 'editor');
+      expect(bulkRuns.startAndStream).not.toHaveBeenCalled();
+      expect(raw.writeHead).not.toHaveBeenCalled();
+      expect(raw.write).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('bulk run streams', () => {
+    function makeStreamingController(unfinished = 0) {
+      const { controller, bookService } = makeController();
+      const registry = new BulkRunHandlerRegistry();
+      for (const Handler of [BookRefreshMetadataBulkHandler, BookReExtractCoverBulkHandler, BookEmbedAudioCoverBulkHandler]) {
+        new Handler(registry, bookService as never).onModuleInit();
+      }
+      // Mirrors the repository's atomic check: no row once the account holds `max` unfinished runs.
+      const repo = {
+        insertWithinLimit: vi.fn((_values: unknown, max: number) => Promise.resolve(unfinished >= max ? null : { id: 'run-1' })),
+        findById: vi.fn(),
+      };
+      const service = new BulkRunsService(
+        repo as never,
+        registry,
+        new BulkRunStreams(),
+        { wake: vi.fn() } as never,
+        { notify: vi.fn() } as never,
+        { emit: vi.fn() } as never,
+      );
+      (controller as unknown as { bulkRuns: BulkRunsService }).bulkRuns = service;
+      return { controller, bookService, repo };
+    }
+
+    it.each([
+      { method: 'bulkRefreshMetadata' as const, done: { done: true, processed: 0, failed: 0 } },
+      { method: 'bulkReExtractCover' as const, done: { done: true, processed: 0, updated: 0 } },
+      { method: 'bulkEmbedAudioCover' as const, done: { done: true, processed: 0, succeeded: 0, failed: 0, skipped: 0, cancelled: false } },
+    ])('answers an empty $method selection with the empty done event and creates no run', async ({ method, done }) => {
+      const { controller, bookService, repo } = makeStreamingController();
+      const { reply, raw } = makeReply();
+      bookService.resolveSelectionToIds.mockResolvedValue([]);
+
+      await controller[method]({ query: {} } as never, makeUser(), reply);
+
+      expect(raw.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({ 'Content-Type': 'text/event-stream' }));
+      expect(raw.write).toHaveBeenCalledOnce();
+      expect(raw.write).toHaveBeenCalledWith(`data: ${JSON.stringify(done)}\n\n`);
+      expect(raw.end).toHaveBeenCalled();
+      expect(repo.insertWithinLimit).not.toHaveBeenCalled();
+    });
+
+    it.each(['bulkRefreshMetadata', 'bulkReExtractCover', 'bulkEmbedAudioCover'] as const)(
+      'answers %s with 429 before the stream when ten runs are unfinished',
+      async (method) => {
+        const { controller, repo } = makeStreamingController(BULK_RUN_MAX_UNFINISHED);
+        const { reply, raw } = makeReply();
+
+        const result = controller[method]({ bookIds: [9] }, makeUser(), reply);
+
+        await expect(result).rejects.toBeInstanceOf(HttpException);
+        await expect(result).rejects.toMatchObject({ status: HttpStatus.TOO_MANY_REQUESTS });
+        expect(repo.insertWithinLimit).toHaveBeenCalledOnce();
+        await expect(repo.insertWithinLimit.mock.results[0]!.value).resolves.toBeNull();
+        expect(raw.writeHead).not.toHaveBeenCalled();
+        expect(raw.write).not.toHaveBeenCalled();
       },
     );
+  });
 
-    await controller.bulkReExtractCover({ bookIds: [12] }, makeUser(), reply);
+  it('embeds the audiobook cover of one book for the calling user', async () => {
+    const { controller, bookService } = makeController();
+    const user = makeUser();
+    bookService.embedAudioCover.mockResolvedValue({ status: 'success', fieldsWritten: ['audioCoverBytes'], durationMs: 4 });
 
-    expect(raw.write).toHaveBeenNthCalledWith(1, `data: ${JSON.stringify({ bookId: 12 })}\n\n`);
-    expect(raw.write).toHaveBeenNthCalledWith(2, `data: ${JSON.stringify({ done: true, processed: 1, updated: 1 })}\n\n`);
-    expect(raw.end).toHaveBeenCalled();
+    await expect(controller.embedAudioCover(42, user)).resolves.toEqual({ status: 'success', fieldsWritten: ['audioCoverBytes'], durationMs: 4 });
+
+    expect(bookService.embedAudioCover).toHaveBeenCalledWith(42, user);
   });
 
   it('archives exported files into a zip stream', async () => {
@@ -732,7 +953,7 @@ describe('BookController', () => {
     bookService.getThumbnailPath.mockResolvedValue('/tmp/thumb.jpg');
     mockStat.mockResolvedValue({ mtimeMs: 1000 } as never);
 
-    await controller.getThumbnail(7, makeUser(), reply, '1234567890', undefined);
+    await controller.getThumbnail(7, makeUser(), reply, { t: '1234567890' }, undefined);
     expect(headers['Cache-Control']).toBe('public, max-age=31536000, immutable');
   });
 
@@ -744,14 +965,24 @@ describe('BookController', () => {
     await expect(controller.getThumbnail(7, makeUser(), reply, undefined, undefined)).rejects.toThrow(NotFoundException);
   });
 
-  it('delegates re-extract-cover endpoint to bulk cover flow', async () => {
+  it('delegates re-extract-cover endpoint to the single-book cover flow', async () => {
     const { controller, bookService } = makeController();
-    bookService.bulkReExtractCover.mockResolvedValue({ processed: 1, updated: 1 });
+    bookService.reExtractCover.mockResolvedValue({ processed: 1, updated: 1 });
     const user = makeUser();
 
-    await controller.reExtractCover(42, user);
+    await expect(controller.reExtractCover(42, user)).resolves.toEqual({ processed: 1, updated: 1 });
 
-    expect(bookService.bulkReExtractCover).toHaveBeenCalledWith([42], user);
+    expect(bookService.reExtractCover).toHaveBeenCalledWith(42, user, undefined);
+  });
+
+  it('passes an explicit medium through re-extract-cover', async () => {
+    const { controller, bookService } = makeController();
+    const user = makeUser();
+    bookService.reExtractCover.mockResolvedValue({ processed: 1, updated: 1 });
+
+    await controller.reExtractCover(42, user, { medium: 'audio' });
+
+    expect(bookService.reExtractCover).toHaveBeenCalledWith(42, user, 'audio');
   });
 
   it('logs and rethrows download failures', async () => {
@@ -809,6 +1040,7 @@ describe('BookController', () => {
     bookService.updateMetadataLocks.mockResolvedValue({ id: 7, lockedFields: ['title'] });
     bookService.refreshMetadata.mockResolvedValue({ id: 7 });
     bookService.getMetadataFromFile.mockResolvedValue({ title: 'File Title' });
+    bookService.getIsbnCandidates.mockResolvedValue({ readable: true, candidates: [] });
     bookService.getKoboState.mockResolvedValue({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] });
     bookService.getDetail.mockResolvedValue({ id: 7, title: 'Detail' });
 
@@ -819,6 +1051,7 @@ describe('BookController', () => {
     await controller.updateMetadataLocks(7, { lockedFields: ['title'] } as never, user);
     await controller.refreshMetadata(7, 'true', user);
     await controller.getMetadataFromFile(7, user);
+    await controller.getIsbnCandidates(7, user);
     await controller.getKoboState(7, user);
     await controller.setReadStatus(7, { status: 'reading' } as never, user);
     await controller.getDetail(7, user);
@@ -832,6 +1065,7 @@ describe('BookController', () => {
     expect(bookService.updateMetadataLocks).toHaveBeenCalledWith(7, ['title'], user);
     expect(bookService.refreshMetadata).toHaveBeenCalledWith(7, true, user);
     expect(bookService.getMetadataFromFile).toHaveBeenCalledWith(7, user);
+    expect(bookService.getIsbnCandidates).toHaveBeenCalledWith(7, user);
     expect(bookService.getKoboState).toHaveBeenCalledWith(7, user);
     expect(bookService.setReadStatus).toHaveBeenCalledWith(7, { status: 'reading' }, user);
     expect(bookService.getDetail).toHaveBeenCalledWith(7, user);
@@ -884,16 +1118,6 @@ describe('BookController', () => {
     );
   });
 
-  it('throws when writing to a closed sse stream', () => {
-    const { controller } = makeController();
-    const { reply } = makeReply();
-    const stream = (controller as any).createSseStream(reply);
-
-    stream.close();
-
-    expect(() => stream.send({ ping: true })).toThrow('SSE stream closed');
-  });
-
   it('invokes auditable descriptions for bulk and metadata actions', () => {
     const deleteAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.deleteBooks) as {
       getResourceId: (
@@ -903,11 +1127,9 @@ describe('BookController', () => {
       getMeta: (req: unknown, response: { total: number; books: { id: number; title: string | null }[]; omitted: number }) => Record<string, unknown>;
       description: (req: unknown, response: { total: number; books: { id: number; title: string | null }[]; omitted: number }) => string;
     };
-    const bulkRefreshAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.bulkRefreshMetadata) as {
-      description: (req: { body: { bookIds?: number[] } }) => string;
-    };
-    const bulkCoverAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.bulkReExtractCover) as {
-      description: (req: { body: { bookIds?: number[] } }) => string;
+    const embedAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.embedAudioCover) as {
+      getResourceId: (req: { params: Record<string, string> }) => number;
+      description: (req: { params: Record<string, string> }) => string;
     };
     const bulkSetMetadataAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.bulkSetMetadata) as {
       description: (req: { body: { bookIds?: number[]; field?: string } }) => string;
@@ -931,6 +1153,7 @@ describe('BookController', () => {
     const refreshAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.refreshMetadata) as {
       getResourceId: (req: { params: Record<string, string> }) => number;
       description: (req: { params: Record<string, string> }) => string;
+      when: (req: { query?: Record<string, string> }) => boolean;
     };
 
     const singleDeletion = { total: 1, books: [{ id: 1, title: 'Dune' }], omitted: 0 };
@@ -940,8 +1163,12 @@ describe('BookController', () => {
     expect(deleteAudit.getResourceId({}, singleDeletion)).toBe(1);
     expect(deleteAudit.getResourceId({}, bulkDeletion)).toBeUndefined();
     expect(deleteAudit.getMeta({}, bulkDeletion)).toEqual(bulkDeletion);
-    expect(bulkRefreshAudit.description({ body: { bookIds: [1] } })).toBe('Bulk refreshed metadata for 1 book');
-    expect(bulkCoverAudit.description({ body: { bookIds: [1, 2, 3] } })).toBe('Bulk re-extracted covers for 3 books');
+    // The bulk run routes audit once the selection is resolved, so a query selection logs its real count.
+    for (const method of ['bulkRefreshMetadata', 'bulkReExtractCover', 'bulkEmbedAudioCover'] as const) {
+      expect(Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype[method])).toBeUndefined();
+    }
+    expect(embedAudit.getResourceId({ params: { id: '42' } })).toBe(42);
+    expect(embedAudit.description({ params: { id: '42' } })).toBe('Embedded audiobook cover in read-along EPUB of book #42');
     expect(bulkSetMetadataAudit.description({ body: { bookIds: [1, 2], field: 'language' } })).toBe('Bulk set language for 2 books');
     expect(updateMetadataAudit.getResourceId({ params: { id: '44' } })).toBe(44);
     expect(updateMetadataAudit.description({ params: { id: '44' } })).toBe('Updated metadata for book #44');
@@ -954,6 +1181,9 @@ describe('BookController', () => {
     expect(updateLocksAudit.description({ params: { id: '44' } })).toBe('Updated metadata locks for book #44');
     expect(refreshAudit.getResourceId({ params: { id: '44' } })).toBe(44);
     expect(refreshAudit.description({ params: { id: '44' } })).toBe('Refreshed metadata for book #44');
+    expect(refreshAudit.when({ query: {} })).toBe(true);
+    expect(refreshAudit.when({ query: { preview: 'false' } })).toBe(true);
+    expect(refreshAudit.when({ query: { preview: 'true' } })).toBe(false);
   });
 
   it('marks bulk-edit endpoints as demo-restricted', () => {
@@ -961,6 +1191,7 @@ describe('BookController', () => {
     const bulkMethods = [
       BookController.prototype.bulkRefreshMetadata,
       BookController.prototype.bulkReExtractCover,
+      BookController.prototype.bulkEmbedAudioCover,
       BookController.prototype.bulkSetStatus,
       BookController.prototype.bulkSetRating,
       BookController.prototype.bulkSetMetadata,

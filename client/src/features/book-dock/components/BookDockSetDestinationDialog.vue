@@ -3,20 +3,14 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { X, Loader2, FolderPlus } from '@lucide/vue'
 import { api } from '@/lib/api'
-import { useLibraries } from '@/features/library/composables/useLibraries'
+import { useBookDestination } from '@/features/library/composables/useBookDestination'
+import BookDestinationFields from '@/features/library/components/BookDestinationFields.vue'
+import type { BookDockSelectionPayload } from '../composables/useBookDockFiles'
 
 const { t } = useI18n()
 
 const props = defineProps<{
-  selectionPayload: {
-    fileIds?: number[]
-    selectAll?: boolean
-    excludedIds?: number[]
-    status?: string
-    needsReview?: boolean
-    readyToFile?: boolean
-    search?: string
-  }
+  selectionPayload: BookDockSelectionPayload
   selectionCount: number
 }>()
 
@@ -25,43 +19,17 @@ const emit = defineEmits<{
   updated: []
 }>()
 
-const { libraries, fetchLibraries } = useLibraries()
+const destination = useBookDestination({ defaultToFirstLibrary: true })
+const { libraryId: targetLibraryId, folderId: targetFolderId, hasDestination, fetchLibraries } = destination
 const loading = ref(false)
 const error = ref<string | null>(null)
 const result = ref<{ total: number; updated: number; failed: number } | null>(null)
 
-const targetLibraryId = ref<number | null>(null)
-const targetFolderId = ref<number | null>(null)
+const canApply = computed(() => hasDestination.value && !loading.value)
 
-const selectedLibrary = computed(() => libraries.value.find((l) => l.id === targetLibraryId.value))
-const folders = computed(() => selectedLibrary.value?.folders ?? [])
-const canApply = computed(() => targetLibraryId.value !== null && targetFolderId.value !== null && !loading.value)
-
-onMounted(async () => {
-  await fetchLibraries()
-  const first = libraries.value[0]
-  if (!first) return
-  targetLibraryId.value = first.id
-  targetFolderId.value = first.folders?.[0]?.id ?? null
+onMounted(() => {
+  void fetchLibraries()
 })
-
-function onLibraryChange(event: Event) {
-  const raw = Number((event.target as HTMLSelectElement).value)
-  const id = Number.isFinite(raw) && raw > 0 ? raw : null
-  if (id === null) {
-    targetLibraryId.value = null
-    targetFolderId.value = null
-    return
-  }
-  targetLibraryId.value = id
-  const lib = libraries.value.find((l) => l.id === id)
-  targetFolderId.value = lib?.folders?.[0]?.id ?? null
-}
-
-function onFolderChange(event: Event) {
-  const raw = Number((event.target as HTMLSelectElement).value)
-  targetFolderId.value = Number.isFinite(raw) && raw > 0 ? raw : null
-}
 
 async function applyDestination() {
   if (!canApply.value) return
@@ -99,7 +67,7 @@ function handleClose() {
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="handleClose" />
+      <div class="absolute inset-0 bg-scrim" @click="handleClose" />
       <div class="relative z-10 w-full max-w-xl mx-4 bg-card border border-border rounded-lg shadow-2xl overflow-hidden">
         <div class="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 class="text-base font-semibold text-foreground">
@@ -114,27 +82,11 @@ function handleClose() {
         </div>
 
         <div v-if="!result" class="px-5 py-4 space-y-4">
-          <label class="block">
-            <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.destinationLibrary') }}</span>
-            <select
-              class="mt-1 w-full h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-              :value="targetLibraryId ?? ''"
-              @change="onLibraryChange"
-            >
-              <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
-            </select>
-          </label>
-
-          <label class="block">
-            <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.destinationFolder') }}</span>
-            <select
-              class="mt-1 w-full h-9 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-              :value="targetFolderId ?? ''"
-              @change="onFolderChange"
-            >
-              <option v-for="folder in folders" :key="folder.id" :value="folder.id">{{ folder.path }}</option>
-            </select>
-          </label>
+          <BookDestinationFields
+            :destination="destination"
+            :library-label="t('bookDock.destinationLibrary')"
+            :folder-label="t('bookDock.destinationFolder')"
+          />
 
           <p v-if="error" class="text-xs text-red-500 bg-red-500/10 rounded-lg p-2">{{ error }}</p>
 

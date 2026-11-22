@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, defineComponent, nextTick, reactive, ref, type PropType } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
-import type { BookCard, SeriesBooksPage, SeriesDetail } from '@bookorbit/types'
+import type { BookCard, SeriesDetail } from '@bookorbit/types'
 import SeriesDetailView from './SeriesDetailView.vue'
+import SeriesCompletionBar from '../components/SeriesCompletionBar.vue'
 
 const GROUP_BY_MEDIA_STORAGE_KEY = 'bookorbit:series-detail:group-by-media'
 
 class MockIntersectionObserver {
+  static instances: MockIntersectionObserver[] = []
+  constructor() {
+    MockIntersectionObserver.instances.push(this)
+  }
   observe = vi.fn<(target: Element) => void>()
   unobserve = vi.fn<(target: Element) => void>()
   disconnect = vi.fn<() => void>()
@@ -31,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   libraryId: null as unknown as { value: number | null },
   fetchSeriesBooks: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   api: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  readOnlyLibraryIds: new Set<number>(),
 }))
 
 vi.mock('vue-router', async (importOriginal) => {
@@ -44,6 +50,14 @@ vi.mock('vue-router', async (importOriginal) => {
 
 vi.mock('@/features/auth/composables/usePermissions', () => ({
   usePermissions: () => ({ hasPermission: () => true }),
+}))
+
+vi.mock('@/features/library/composables/useLibraryPermissions', () => ({
+  useLibraryPermissions: () => ({
+    hasLibraryPermission: (_permission: string, libraryId: number | null | undefined) =>
+      libraryId == null || !mocks.readOnlyLibraryIds.has(libraryId),
+    hasPermissionInAnyLibrary: () => true,
+  }),
 }))
 
 vi.mock('@/features/book/composables/useBookNavigation', () => ({
@@ -124,6 +138,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -158,6 +173,10 @@ const VirtualBookGridStub = defineComponent({
       type: Array as PropType<BookCard[]>,
       required: true,
     },
+    mediaKind: {
+      type: String,
+      default: null,
+    },
   },
   emits: ['action', 'update:book'],
   setup(props) {
@@ -165,7 +184,7 @@ const VirtualBookGridStub = defineComponent({
     return { bookIds }
   },
   template: `
-    <div data-testid="virtual-book-grid" :data-book-ids="bookIds">
+    <div data-testid="virtual-book-grid" :data-book-ids="bookIds" :data-media-kind="mediaKind || ''">
       <button v-for="book in books" :key="'add-' + book.id" :data-testid="'grid-add-action-' + book.id" @click="$emit('action', book, 'add-to-collection')">
         add
       </button>
@@ -273,6 +292,7 @@ describe('SeriesDetailView', () => {
     mocks.order = ref('asc')
     mocks.libraryId = ref<number | null>(null)
 
+    mocks.readOnlyLibraryIds.clear()
     mocks.routerPush.mockReset()
     mocks.routerPush.mockResolvedValue(undefined)
     mocks.fetchLibraries.mockReset()
@@ -291,6 +311,7 @@ describe('SeriesDetailView', () => {
     mocks.api.mockReset()
     mocks.api.mockResolvedValue({ ok: false })
 
+    MockIntersectionObserver.instances = []
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
   })
 
@@ -308,7 +329,7 @@ describe('SeriesDetailView', () => {
     expect(wrapper.find('[data-testid="series-media-group-books"]').exists()).toBe(true)
   })
 
-  it('shows the ownership bar only once a provider has supplied a series total', async () => {
+  it('falls back to book counts when a server does not return volume counts', async () => {
     mocks.seriesInfo = ref(makeSeriesInfo({ bookCount: 4, expectedBookCount: 7 }))
 
     const wrapper = mountView()
@@ -317,7 +338,35 @@ describe('SeriesDetailView', () => {
     const bar = wrapper.get('[role="progressbar"]')
     expect(bar.attributes('aria-valuenow')).toBe('4')
     expect(bar.attributes('aria-valuemax')).toBe('7')
+    expect(wrapper.text()).toContain('4 volumes')
+    const completion = wrapper.getComponent(SeriesCompletionBar)
+    expect(completion.props('readCount')).toBe(0)
+    expect(completion.props('totalCount')).toBe(4)
     expect(wrapper.text()).toContain('4 of 7')
+  })
+
+  it('uses logical volume counts for the header, reading progress, and ownership', async () => {
+    mocks.seriesInfo = ref(
+      makeSeriesInfo({
+        bookCount: 4,
+        readCount: 2,
+        ownedVolumeCount: 2,
+        readVolumeCount: 1,
+        expectedBookCount: 7,
+      }),
+    )
+
+    const wrapper = mountView()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('2 volumes')
+    const completion = wrapper.getComponent(SeriesCompletionBar)
+    expect(completion.props('readCount')).toBe(1)
+    expect(completion.props('totalCount')).toBe(2)
+    const ownership = wrapper.get('[role="progressbar"]')
+    expect(ownership.attributes('aria-valuenow')).toBe('2')
+    expect(ownership.attributes('aria-valuemax')).toBe('7')
+    expect(wrapper.text()).toContain('2 of 7')
   })
 
   it('hides the ownership bar when no provider total is known', async () => {
@@ -356,6 +405,29 @@ describe('SeriesDetailView', () => {
     expect(comicsGroup.text()).toContain('Comics')
     expect(comicsGroup.text()).toContain('1')
     expect(comicsGroup.get('[data-testid="virtual-book-grid"]').attributes('data-book-ids')).toBe('10')
+  })
+
+  it('shows a mixed ebook and audiobook in both media sections', async () => {
+    mocks.items = ref([
+      makeBook({
+        id: 7,
+        files: [
+          { id: 1, format: 'epub', role: 'primary', sizeBytes: null },
+          { id: 2, format: 'm4b', role: 'content', sizeBytes: null },
+        ],
+      }),
+    ])
+
+    const wrapper = mountView()
+    await nextTick()
+
+    const booksGrid = wrapper.get('[data-testid="series-media-group-books"] [data-testid="virtual-book-grid"]')
+    const audiobooksGrid = wrapper.get('[data-testid="series-media-group-audiobooks"] [data-testid="virtual-book-grid"]')
+    expect(booksGrid.attributes('data-book-ids')).toBe('7')
+    expect(booksGrid.attributes('data-media-kind')).toBe('ebook')
+    expect(audiobooksGrid.attributes('data-book-ids')).toBe('7')
+    expect(audiobooksGrid.attributes('data-media-kind')).toBe('audiobook')
+    expect(wrapper.find('[data-testid="series-media-group-comics"]').exists()).toBe(false)
   })
 
   it('switches between grouped and plain grid rendering', async () => {
@@ -482,32 +554,41 @@ describe('SeriesDetailView', () => {
     expect(secondStyle).toBe(style)
   })
 
-  it('ignores stale lead preview responses after route id becomes invalid', async () => {
-    let resolveLeadPreview!: (value: SeriesBooksPage) => void
-    mocks.fetchSeriesBooks.mockImplementationOnce(
-      () =>
-        new Promise<SeriesBooksPage>((resolve) => {
-          resolveLeadPreview = resolve
-        }),
-    )
+  it('keeps its loaded books when the route moves on and back while the view is kept alive', async () => {
+    mountView()
+    await flushPromises()
+    mocks.loadBooks.mockClear()
+    mocks.fetchSeriesBooks.mockClear()
 
-    const wrapper = mountView()
-    await nextTick()
-
-    mocks.route.params.seriesId = 'invalid'
-    await nextTick()
-
-    resolveLeadPreview({
-      items: [makeBook({ id: 7, seriesIndex: '1', hasCover: true })],
-      total: 1,
-      page: 0,
-      size: 8,
-      seriesInfo: makeSeriesInfo(),
-    })
+    mocks.route.params.seriesId = ''
+    await flushPromises()
+    mocks.route.params.seriesId = '99'
+    await flushPromises()
+    mocks.route.params.seriesId = '42'
     await flushPromises()
 
-    expect(mocks.api).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-testid="lead-cover-artwork"]').exists()).toBe(false)
+    expect(mocks.loadBooks).not.toHaveBeenCalled()
+    expect(mocks.fetchSeriesBooks).not.toHaveBeenCalled()
+  })
+
+  it('observes the replacement sentinel when the books section remounts', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const observer = MockIntersectionObserver.instances[0]!
+    const firstSentinel = wrapper.get('[data-testid="series-books-sentinel"]').element
+    expect(observer.observe).toHaveBeenLastCalledWith(firstSentinel)
+
+    mocks.seriesInfo.value = null
+    await flushPromises()
+    expect(observer.unobserve).toHaveBeenCalledWith(firstSentinel)
+
+    mocks.seriesInfo.value = makeSeriesInfo()
+    await flushPromises()
+
+    const nextSentinel = wrapper.get('[data-testid="series-books-sentinel"]').element
+    expect(nextSentinel).not.toBe(firstSentinel)
+    expect(observer.observe).toHaveBeenLastCalledWith(nextSentinel)
   })
 
   it('loads all books and navigates to edit metadata, preserving the setBookContext when navigating away', async () => {
@@ -556,5 +637,23 @@ describe('SeriesDetailView', () => {
 
     expect(mocks.loadBooks).not.toHaveBeenCalled()
     expect(mocks.setBookContext).not.toHaveBeenCalled()
+  })
+
+  it('opens the series editor on the books the user can edit, skipping read-only libraries', async () => {
+    mocks.readOnlyLibraryIds.add(1)
+    mocks.items.value = [makeBook({ id: 101, libraryId: 1 }), makeBook({ id: 102, libraryId: 2 })]
+    mocks.total.value = 2
+    mocks.hasMore.value = false
+
+    const wrapper = mountView()
+    await nextTick()
+    mocks.setBookContext.mockClear()
+
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('Edit Metadata'))
+    await editBtn!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setBookContext).toHaveBeenCalledWith([102], 1)
+    expect(mocks.routerPush).toHaveBeenCalledWith({ name: 'book-detail', params: { bookId: 102 }, query: { tab: 'edit' } })
   })
 })

@@ -28,10 +28,13 @@ function makeService(db: any = {}) {
     scanBookFolderAsync: vi.fn(),
     scanBookDirectoryAsync: vi.fn(),
     isScanRunning: vi.fn().mockReturnValue(false),
+    ownsPath: vi.fn().mockResolvedValue(true),
     bufferWatcherNotification: vi.fn(),
     bufferBookMissingEvent: vi.fn(),
     bufferBooksUnavailableNotification: vi.fn(),
     bufferBooksRestoredNotification: vi.fn(),
+    reconcileCoverSlotsAsync: vi.fn(),
+    refreshRegexMetadataAfterMoveAsync: vi.fn(),
   } as unknown as ScannerService;
 
   const selfWriteRegistry = new SelfWriteRegistry();
@@ -65,6 +68,21 @@ describe('onApplicationBootstrap()', () => {
 // ── process() routing ─────────────────────────────────────────────────────────
 
 describe('process()', () => {
+  it('leaves an event under a folder another library owns to that library', async () => {
+    const { service, processor, scannerService } = makeService();
+    (scannerService as any).ownsPath = vi.fn().mockResolvedValue(false);
+    processor.handleCreate = vi.fn();
+    processor.handleUnlink = vi.fn();
+
+    await (service as any).process('create', '/books/comics/Saga/saga.cbz', 1);
+    await (service as any).process('delete', '/books/comics/Saga/saga.cbz', 1);
+
+    expect((scannerService as any).ownsPath).toHaveBeenCalledWith(1, '/books/comics/Saga/saga.cbz');
+    expect(processor.handleCreate).not.toHaveBeenCalled();
+    expect(processor.handleUnlink).not.toHaveBeenCalled();
+    expect(scannerService.scanBookFolderAsync).not.toHaveBeenCalled();
+  });
+
   it('buffers book-missing when handleUnlink returns book-missing', async () => {
     const { service, processor, gateway, scannerService } = makeService();
     const missing = { type: 'book-missing', libraryId: 1, bookIds: [10, 11] };
@@ -102,6 +120,7 @@ describe('process()', () => {
     expect(processor.handleCreate).toHaveBeenCalledWith('/books/Author/book.epub', 1);
     expect((gateway as any).emitBookRestored).toHaveBeenCalledWith({ libraryId: 1, bookIds: [7] });
     expect((scannerService as any).bufferBooksRestoredNotification).toHaveBeenCalledWith(1, [7]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([7]);
     expect(gateway.emitBookMissing).not.toHaveBeenCalled();
   });
 
@@ -162,6 +181,7 @@ describe('process()', () => {
 
     expect((gateway as any).emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [5] });
     expect(scheduleFolderScanSpy).toHaveBeenCalledWith('/books/moved.epub', 1);
+    expect(scannerService.refreshRegexMetadataAfterMoveAsync).toHaveBeenCalledWith([5]);
     expect(scannerService.startScanAsync).not.toHaveBeenCalled();
   });
 
@@ -383,6 +403,9 @@ describe('reconcile()', () => {
     expect((scannerService as any).bufferBooksUnavailableNotification).toHaveBeenCalledWith(1, [20]);
     expect(gateway.emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [30] });
     expect((gateway as any).emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [40] });
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([30]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).toHaveBeenCalledWith([40]);
+    expect((scannerService as any).reconcileCoverSlotsAsync).not.toHaveBeenCalledWith([20]);
   });
 
   it('emits book-transferred from cross-library reconcile results', async () => {

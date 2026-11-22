@@ -5,6 +5,8 @@ function request(overrides: Partial<ScoringRequest> = {}): ScoringRequest {
   return {
     title: 'Dune',
     authors: ['Frank Herbert'],
+    seriesName: null,
+    seriesIndex: null,
     isbn13: null,
     isbn10: null,
     isbns: [],
@@ -42,9 +44,41 @@ describe('rejectRelease', () => {
     expect(rejectRelease(release({ format: 'epub' }), request({ mediaKind: 'audiobook' }))).toContain('not a audiobook format');
   });
 
-  it('accepts pdf for both ebooks and comics', () => {
+  it('accepts pdf as an ebook format', () => {
     expect(rejectRelease(release({ format: 'pdf' }), request({ mediaKind: 'ebook' }))).toBeNull();
-    expect(rejectRelease(release({ format: 'pdf' }), request({ mediaKind: 'comic' }))).toBeNull();
+  });
+
+  it.each(['cbz', 'cbr', 'cb7', 'cbx'])('accepts %s for non-audio requests but rejects it for audiobooks', (format) => {
+    const candidate = release({ format, title: `Saga [${format.toUpperCase()}]` });
+    expect(rejectRelease(candidate, request())).toBeNull();
+    expect(rejectRelease(candidate, request({ mediaKind: 'audiobook' }))).toContain('not a audiobook format');
+  });
+
+  it('recognizes comic archives from scene names when the provider omits the format', () => {
+    const candidate = release({ title: 'Saga - Brian K Vaughan [CBZ]', format: undefined });
+    const criteria = request({ title: 'Saga', authors: ['Brian K Vaughan'], preferredFormats: ['cbz'] });
+    expect(rejectRelease(candidate, criteria)).toBeNull();
+    expect(toReleaseItem(scoreRelease(candidate, criteria), 'example', criteria)).toMatchObject({ format: 'cbz', formats: ['cbz'] });
+  });
+
+  it('accepts mixed book and comic formats while keeping audio-only releases out', () => {
+    expect(rejectRelease(release({ format: 'CBR PDF' }), request())).toBeNull();
+    expect(rejectRelease(release({ format: 'CBZ EPUB' }), request())).toBeNull();
+    expect(rejectRelease(release({ format: 'm4b mp3', title: 'Saga' }), request())).toContain('not a ebook format');
+  });
+
+  it('matches a comic format preference and release profile for a non-audio request', () => {
+    const criteria = request({
+      title: 'Saga',
+      authors: ['Brian K Vaughan'],
+      preferredFormats: ['cbz'],
+      tiers: [{ id: 'comic', name: 'Comic archives', conditions: { formats: ['cbz', 'cbr'] } }],
+    });
+    const candidate = release({ format: 'cbz', title: 'Saga - Brian K Vaughan [CBZ]' });
+    expect(rejectRelease(candidate, criteria)).toBeNull();
+    const scored = scoreRelease(candidate, criteria);
+    expect(pointsFor(scored, 'preferredFormat')).toBeGreaterThan(0);
+    expect(toReleaseItem(scored, 'example', criteria)).toMatchObject({ tier: 0, formats: ['cbz'] });
   });
 
   it('compares only the language subtag, so eng and en agree', () => {
@@ -183,6 +217,27 @@ describe('scoreRelease', () => {
     const scored = scoreRelease(
       release({ title: 'George Orwell - 1984 (Retail EPUB)', seeders: null }),
       request({ title: '1984', authors: ['George Orwell'] }),
+    );
+
+    expect(pointsFor(scored, 'authorMatch')).toBe(61);
+  });
+
+  it('removes the match points from a different volume of the requested series', () => {
+    const asked = request({ title: 'Example Title', authors: ['Author Name'], seriesName: 'Example Title', seriesIndex: 1 });
+    const wrongVolume = scoreRelease(release({ title: 'Example Title 3 - Author Name [M4B]', format: 'm4b' }), asked);
+    const requestedVolume = scoreRelease(release({ title: 'Example Title 1 - Author Name [M4B]', format: 'm4b' }), asked);
+    const unnumbered = scoreRelease(release({ title: 'Example Title - Author Name [M4B]', format: 'm4b' }), asked);
+
+    expect(pointsFor(wrongVolume, 'titleMatch')).toBe(0);
+    expect(wrongVolume.score).toBeLessThan(50);
+    expect(pointsFor(requestedVolume, 'authorMatch')).toBe(61);
+    expect(pointsFor(unnumbered, 'authorMatch')).toBe(61);
+  });
+
+  it('does not mistake a publication year after the series name for a volume', () => {
+    const scored = scoreRelease(
+      release({ title: 'Example Title 2020 - Author Name [EPUB]' }),
+      request({ title: 'Example Title', authors: ['Author Name'], seriesName: 'Example Title', seriesIndex: 1 }),
     );
 
     expect(pointsFor(scored, 'authorMatch')).toBe(61);

@@ -1,12 +1,13 @@
 import { execFile as execFileCallback, spawn } from 'child_process';
+import { extname } from 'path';
 import { promisify } from 'util';
 import { parseSeriesIndex as parseSeriesIndexLabel, type AudiobookChapter } from '@bookorbit/types';
 import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../common/utils/published-date.utils';
 
 const execFile = promisify(execFileCallback);
 
-const FFPROBE_PATH = process.env.FFPROBE_PATH || 'ffprobe';
-const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFPROBE_PATH = process.env.FFPROBE_PATH?.trim() || 'ffprobe';
+const FFMPEG_PATH = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 // A chapter-rich audiobook prints far more than execFile's 1 MB default, and an overflow there
 // would surface as a failed read of a perfectly good file.
 const FFPROBE_OUTPUT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -37,6 +38,11 @@ export interface AudioChapterProbe {
   durationMs: number | null;
 }
 
+export interface AudioFileProbe extends AudioChapterProbe {
+  /** Whole seconds, the precision every stored per-file length uses. */
+  durationSeconds: number | null;
+}
+
 interface FfprobeStream {
   codec_type: string;
   codec_name: string;
@@ -59,17 +65,17 @@ interface FfprobeOutput {
 
 // Null means the file could not be read, which is not the same as a file that carries no tags:
 // callers persist what they get, so a failed read must never be mistaken for empty metadata.
-export async function extractAudioMetadata(absolutePath: string): Promise<AudioExtractResult | null> {
+export async function extractAudioMetadata(absolutePath: string, options: { cover?: boolean } = {}): Promise<AudioExtractResult | null> {
   try {
     const { stdout } = await execFile(
       FFPROBE_PATH,
       ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', '-show_streams', absolutePath],
-      { maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES },
+      { timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES },
     );
 
     const data: FfprobeOutput = JSON.parse(stdout);
-    const tags = normalizeTags(data.format?.tags ?? {});
     const streams = data.streams ?? [];
+    const tags = resolveTags(data.format?.tags, streams);
     const chapters = data.chapters ?? [];
 
     const rawAlbumArtist = tagValue(tags, 'albumartist') ?? tagValue(tags, 'album_artist');
@@ -114,7 +120,7 @@ export async function extractAudioMetadata(absolutePath: string): Promise<AudioE
 
     const mappedChapters = mapChapters(chapters);
 
-    const coverBytes = await extractCoverBytes(absolutePath, streams);
+    const coverBytes = options.cover === false ? null : await extractCoverBytes(absolutePath, streams);
 
     return {
       title,
@@ -140,30 +146,106 @@ export async function extractAudioMetadata(absolutePath: string): Promise<AudioE
   }
 }
 
-export async function parseAudioDuration(absolutePath: string): Promise<number | null> {
+type MusicMetadata = typeof import('music-metadata');
+let musicMetadata: Promise<MusicMetadata> | null = null;
+// music-metadata ships only as ESM; a dynamic import loads it from this CommonJS build.
+const loadMusicMetadata = (): Promise<MusicMetadata> => (musicMetadata ??= import('music-metadata'));
+
+/** What reads a file's length and chapters: the in-process parser, or ffprobe for every file. */
+export type AudioProbeReader = 'builtin' | 'ffprobe';
+
+// Ogg keeps its length only in the last page, so these need the parser's end-of-file read, which
+// seeks there rather than scanning. Every other format states its length in the headers.
+const AUDIO_FORMATS_READ_TO_END = new Set(['.ogg', '.oga', '.opus']);
+// The same allowance ffprobe gets before it is killed. The parser cannot be stopped, but the scan
+// moves on to ffprobe instead of waiting on it.
+const IN_PROCESS_READ_TIMEOUT_MS = 30_000;
+// The parser drops chapters past its cap with only a warning, where ffprobe returns every one.
+const IN_PROCESS_MAX_CHAPTERS = 1000;
+// No audiobook file runs a week; a longer answer is a misread.
+const MAX_PLAUSIBLE_LENGTH_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * Length and chapters for one file, without tags or cover art. A scan needs both from every file of
+ * a multi-file audiobook, so this is its one probe per file. The built-in reader parses the file
+ * in-process and hands over to ffprobe for any file it cannot read, or reads implausibly. Null
+ * when neither could read it.
+ */
+export async function probeAudioFile(absolutePath: string, reader: AudioProbeReader = 'ffprobe'): Promise<AudioFileProbe | null> {
+  if (reader === 'builtin') {
+    const probe = await probeAudioFileInProcess(absolutePath);
+    if (probe) return probe;
+  }
+  return probeAudioFileWithFfprobe(absolutePath);
+}
+
+async function probeAudioFileInProcess(absolutePath: string): Promise<AudioFileProbe | null> {
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const { stdout } = await execFile(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_format', absolutePath], {
+    const { parseFile } = await loadMusicMetadata();
+    const timedOut = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), IN_PROCESS_READ_TIMEOUT_MS);
+    });
+    const parsed = await Promise.race([
+      parseFile(absolutePath, {
+        duration: AUDIO_FORMATS_READ_TO_END.has(extname(absolutePath).toLowerCase()),
+        includeChapters: true,
+        maxChapterCount: IN_PROCESS_MAX_CHAPTERS,
+        skipCovers: true,
+      }),
+      timedOut,
+    ]);
+    if (!parsed) return null;
+    const { format } = parsed;
+
+    // The container's length is what ffprobe reports; an MP4 audio track can run a few
+    // milliseconds past it with encoder priming.
+    const seconds = [format.containerDuration, format.duration].find((value) => value !== undefined && Number.isFinite(value) && value > 0);
+    if (seconds === undefined || seconds > MAX_PLAUSIBLE_LENGTH_SECONDS) return null;
+
+    const chapters = format.chapters ?? [];
+    if (chapters.length >= IN_PROCESS_MAX_CHAPTERS) return null;
+    const mapped: AudiobookChapter[] = [];
+    for (const chapter of chapters) {
+      // ID3v2 chapters give seconds and no time scale; MP4 chapters count in their track's units.
+      const startMs = Math.round((chapter.start / (chapter.timeScale ?? 1)) * 1000);
+      // Out of order or past the end means the chapter table was misread. ffprobe gets the file.
+      if (!Number.isFinite(startMs) || startMs < (mapped.at(-1)?.startMs ?? 0) || startMs > seconds * 1000 + 1000) return null;
+      // ffprobe names an untitled ID3v2 chapter after its element ID, and chapter writes are
+      // verified against that reading, so the name has to match it.
+      const title = chapter.timeScale === undefined ? chapter.title || chapter.id || '' : (chapter.title ?? '');
+      mapped.push({ title, startMs });
+    }
+
+    return { chapters: mapped, durationMs: Math.round(seconds * 1000), durationSeconds: Math.round(seconds) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeAudioFileWithFfprobe(absolutePath: string): Promise<AudioFileProbe | null> {
+  try {
+    const { stdout } = await execFile(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', absolutePath], {
+      timeout: 30_000,
+      killSignal: 'SIGKILL',
       maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
     });
     const data: FfprobeOutput = JSON.parse(stdout);
-    return parseDurationSeconds(data.format?.duration);
+    return {
+      chapters: mapChapters(data.chapters ?? []),
+      durationMs: parseDurationMs(data.format?.duration),
+      durationSeconds: parseDurationSeconds(data.format?.duration),
+    };
   } catch {
     return null;
   }
 }
 
-// Chapters and length only: the merge pass for multi-file audiobooks needs both from every file,
-// and a full extract would also pull tags and cover art it has no use for.
-export async function probeAudioChapters(absolutePath: string): Promise<AudioChapterProbe> {
-  try {
-    const { stdout } = await execFile(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_chapters', absolutePath], {
-      maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
-    });
-    const data: FfprobeOutput = JSON.parse(stdout);
-    return { chapters: mapChapters(data.chapters ?? []), durationMs: parseDurationMs(data.format?.duration) };
-  } catch {
-    return { chapters: [], durationMs: null };
-  }
+export async function probeAudioChapters(absolutePath: string, reader: AudioProbeReader = 'ffprobe'): Promise<AudioChapterProbe> {
+  const probe = await probeAudioFile(absolutePath, reader);
+  return probe ? { chapters: probe.chapters, durationMs: probe.durationMs } : { chapters: [], durationMs: null };
 }
 
 function mapChapters(chapters: FfprobeChapter[]): AudiobookChapter[] {
@@ -172,6 +254,21 @@ function mapChapters(chapters: FfprobeChapter[]): AudiobookChapter[] {
     if (startMs === null) return [];
     return [{ title: ch.tags?.title ?? '', startMs }];
   });
+}
+
+/** Reads only the embedded picture, for callers that need a cover without the rest of the tags. */
+export async function extractAudioCover(absolutePath: string): Promise<Buffer | null> {
+  try {
+    const { stdout } = await execFile(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_streams', absolutePath], {
+      timeout: 30_000,
+      killSignal: 'SIGKILL',
+      maxBuffer: FFPROBE_OUTPUT_MAX_BUFFER_BYTES,
+    });
+    const data: FfprobeOutput = JSON.parse(stdout);
+    return await extractCoverBytes(absolutePath, data.streams ?? []);
+  } catch {
+    return null;
+  }
 }
 
 async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[]): Promise<Buffer | null> {
@@ -214,6 +311,20 @@ async function extractCoverBytes(absolutePath: string, streams: FfprobeStream[])
 
 function normalizeTags(tags: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(tags).map(([k, v]) => [k.toLowerCase(), v]));
+}
+
+// Ogg files (Opus, Vorbis) carry their comments on the audio stream and leave the format's own tags
+// empty, so a file that reads as untagged here may simply keep its tags one level down. Only audio
+// streams count: an attached cover picture carries its own title and comment, which are not the book's.
+function resolveTags(formatTags: Record<string, string> | undefined, streams: FfprobeStream[]): Record<string, string> {
+  const tags = normalizeTags(formatTags ?? {});
+  for (const stream of streams) {
+    if (stream.codec_type !== 'audio') continue;
+    for (const [key, value] of Object.entries(normalizeTags(stream.tags ?? {}))) {
+      if (tagValue(tags, key) === null) tags[key] = value;
+    }
+  }
+  return tags;
 }
 
 function tagValue(tags: Record<string, string>, key: string): string | null {

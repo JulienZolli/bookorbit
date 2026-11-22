@@ -8,7 +8,7 @@ import {
   IN_FLIGHT_BOOK_REQUEST_DOWNLOAD_STATUSES,
   UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES,
 } from '@bookorbit/types';
-import type { BookRequestDownloadStatus, IndexerColor } from '@bookorbit/types';
+import type { BookRequestDownloadStatus, DownloadClientType, IndexerColor } from '@bookorbit/types';
 
 import { DB } from '../../../db';
 import * as schema from '../../../db/schema';
@@ -20,6 +20,7 @@ import {
   type BookRequestDownloadRow,
   type NewBookRequestDownloadRow,
 } from '../../../db/schema';
+import { publicReleaseGuid } from '../indexers/release-guid';
 
 /** Newest first, and bounded: an attempt list is something a person reads, not a full history. */
 const MAX_ATTEMPTS_PER_REQUEST = 20;
@@ -41,6 +42,7 @@ export interface BookRequestDownloadJoinedRow {
   download: BookRequestDownloadRow;
   downloadClientName: string | null;
   downloadClientColor: IndexerColor | null;
+  downloadClientAdapterType: DownloadClientType | null;
   /** Null once the indexer row is gone, or for a magnet somebody pasted by hand. */
   indexerName: string | null;
   indexerColor: IndexerColor | null;
@@ -116,7 +118,7 @@ export class BookRequestDownloadRepository {
   async failInFlightForRequest(requestId: number, reason: string): Promise<number> {
     const rows = await this.db
       .update(bookRequestDownloads)
-      .set({ status: 'failed', errorMessage: reason })
+      .set({ status: 'failed', errorMessage: reason, failureCode: 'removed' })
       .where(and(eq(bookRequestDownloads.requestId, requestId), inArray(bookRequestDownloads.status, [...IN_FLIGHT_BOOK_REQUEST_DOWNLOAD_STATUSES])))
       .returning({ id: bookRequestDownloads.id });
     return rows.length;
@@ -263,7 +265,7 @@ export class BookRequestDownloadRepository {
           .update(bookRequestDownloads)
           // A selection that was still pending when the attempt failed is over: the adopted item is
           // whatever the operator made of it, and a stale flag would have the next failure remove it.
-          .set({ ...data, downloadClientId: clientId, errorMessage: null, fileSelectionPendingSince: null })
+          .set({ ...data, downloadClientId: clientId, errorMessage: null, failureCode: null, fileSelectionPendingSince: null })
           .where(
             and(eq(bookRequestDownloads.id, downloadId), eq(bookRequestDownloads.clientKey, clientKey), eq(bookRequestDownloads.status, 'failed')),
           )
@@ -347,6 +349,10 @@ export class BookRequestDownloadRepository {
       // A hand-pasted magnet has neither, and there is nothing about it to match a release on.
       if (row.indexerId === null || row.releaseGuid === null) continue;
       keys.add(`${row.indexerId}:${row.releaseGuid}`);
+      // Torznab attempts made before its guids were digested stored the raw value, which a search
+      // now reports digested. Without the second key a retry would pick the release that just failed.
+      const digested = publicReleaseGuid(row.indexerId, row.releaseGuid);
+      if (digested !== row.releaseGuid) keys.add(`${row.indexerId}:${digested}`);
     }
     return keys;
   }
@@ -375,6 +381,7 @@ export class BookRequestDownloadRepository {
         download: bookRequestDownloads,
         downloadClientName: downloadClients.name,
         downloadClientColor: downloadClients.color,
+        downloadClientAdapterType: downloadClients.adapterType,
         indexerName: sql<string | null>`coalesce(${requestIndexers.managerMetadata}->>'displayName', ${requestIndexers.name})`,
         indexerColor: requestIndexers.color,
       })
@@ -398,6 +405,7 @@ export class BookRequestDownloadRepository {
         download: bookRequestDownloads,
         downloadClientName: downloadClients.name,
         downloadClientColor: downloadClients.color,
+        downloadClientAdapterType: downloadClients.adapterType,
         indexerName: sql<string | null>`coalesce(${requestIndexers.managerMetadata}->>'displayName', ${requestIndexers.name})`,
         indexerColor: requestIndexers.color,
       })

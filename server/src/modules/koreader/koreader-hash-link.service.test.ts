@@ -1,3 +1,6 @@
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
+import { Test } from '@nestjs/testing';
+import { BookService } from '../book/book.service';
 import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,10 +10,12 @@ import { KoreaderRepository } from './koreader.repository';
 const HASH_A = 'a'.repeat(32);
 const HASH_B = 'b'.repeat(32);
 
+let accessibleLibraryIds: ReturnType<typeof vi.fn>;
+const libraryScopeStub = () => ({ visibleIdsOrAll: accessibleLibraryIds, visibleIdsOrAllForUserId: accessibleLibraryIds });
+
 describe('KoreaderHashLinkService', () => {
   let service: KoreaderHashLinkService;
   let mockRepo: {
-    getAccessibleLibraryIds: ReturnType<typeof vi.fn>;
     resolveBookFileByHash: ReturnType<typeof vi.fn>;
     resolveBookFilesByHashes: ReturnType<typeof vi.fn>;
     listUnmatchedBooks: ReturnType<typeof vi.fn>;
@@ -19,11 +24,12 @@ describe('KoreaderHashLinkService', () => {
     listBookHashLinks: ReturnType<typeof vi.fn>;
     upsertBookHashLink: ReturnType<typeof vi.fn>;
     getBookHashLink: ReturnType<typeof vi.fn>;
-    deleteBookHashLink: ReturnType<typeof vi.fn>;
+    unlinkBookHashLink: ReturnType<typeof vi.fn>;
     upsertUnmatchedBooks: ReturnType<typeof vi.fn>;
     findBookFileIdByBookId: ReturnType<typeof vi.fn>;
     dismissUnmatchedBook: ReturnType<typeof vi.fn>;
     dismissAllUnmatchedBooks: ReturnType<typeof vi.fn>;
+    findBooksByTitleKeys: ReturnType<typeof vi.fn>;
   };
   let mockBookService: {
     verifyBookAccess: ReturnType<typeof vi.fn>;
@@ -48,12 +54,12 @@ describe('KoreaderHashLinkService', () => {
     };
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    accessibleLibraryIds = vi.fn().mockResolvedValue([1, 2]);
     vi.restoreAllMocks();
     vi.clearAllMocks();
 
     mockRepo = {
-      getAccessibleLibraryIds: vi.fn().mockResolvedValue([1, 2]),
       resolveBookFileByHash: vi.fn(),
       resolveBookFilesByHashes: vi.fn().mockResolvedValue(new Map()),
       listUnmatchedBooks: vi.fn().mockResolvedValue([]),
@@ -62,11 +68,12 @@ describe('KoreaderHashLinkService', () => {
       listBookHashLinks: vi.fn().mockResolvedValue([]),
       upsertBookHashLink: vi.fn().mockResolvedValue(undefined),
       getBookHashLink: vi.fn().mockResolvedValue(null),
-      deleteBookHashLink: vi.fn().mockResolvedValue(null),
+      unlinkBookHashLink: vi.fn().mockResolvedValue(null),
       upsertUnmatchedBooks: vi.fn().mockResolvedValue(undefined),
       findBookFileIdByBookId: vi.fn(),
       dismissUnmatchedBook: vi.fn().mockResolvedValue(null),
       dismissAllUnmatchedBooks: vi.fn().mockResolvedValue(0),
+      findBooksByTitleKeys: vi.fn().mockResolvedValue([]),
     };
 
     mockBookService = {
@@ -77,7 +84,15 @@ describe('KoreaderHashLinkService', () => {
     vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 
-    service = new KoreaderHashLinkService(mockRepo as unknown as KoreaderRepository, mockBookService as never);
+    const module = await Test.createTestingModule({
+      providers: [
+        KoreaderHashLinkService,
+        { provide: LibraryScopeService, useValue: libraryScopeStub() },
+        { provide: KoreaderRepository, useValue: mockRepo },
+        { provide: BookService, useValue: mockBookService },
+      ],
+    }).compile();
+    service = module.get(KoreaderHashLinkService);
   });
 
   describe('listUnmatchedBooks', () => {
@@ -86,7 +101,7 @@ describe('KoreaderHashLinkService', () => {
 
       await expect(service.listUnmatchedBooks(user)).resolves.toEqual([]);
 
-      expect(mockRepo.getAccessibleLibraryIds).not.toHaveBeenCalled();
+      expect(accessibleLibraryIds).not.toHaveBeenCalled();
       expect(mockRepo.resolveBookFilesByHashes).not.toHaveBeenCalled();
     });
 
@@ -131,6 +146,16 @@ describe('KoreaderHashLinkService', () => {
       expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A]);
     });
 
+    it('keeps a pending manual override visible even after intrinsic resolution succeeds', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ manualLinkRequested: true })]);
+      mockRepo.resolveBookFilesByHashes.mockResolvedValue(new Map([[HASH_A, { bookFileId: 44, bookId: 55, libraryId: 1 }]]));
+      const rows = await service.listUnmatchedBooks(user);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.hash).toBe(HASH_A);
+      expect(rows[0]).not.toHaveProperty('manualLinkRequested');
+      expect(mockRepo.resolveBookFilesByHashes).toHaveBeenCalledWith([], [1, 2], 7);
+    });
+
     it('does not call clearUnmatchedBooks when nothing resolves', async () => {
       mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow()]);
       mockRepo.resolveBookFilesByHashes.mockResolvedValue(new Map());
@@ -149,6 +174,149 @@ describe('KoreaderHashLinkService', () => {
     });
   });
 
+  describe('listUnmatchedBookSuggestions', () => {
+    function makeLibraryBook(overrides: Record<string, unknown> = {}) {
+      return {
+        bookId: 501,
+        titleKey: 'lab alpha',
+        title: 'Lab Alpha',
+        subtitle: null,
+        language: 'en',
+        publishedYear: 2026,
+        format: 'epub',
+        role: 'content',
+        libraryName: 'Novels',
+        authors: ['Ada Tester'],
+        ...overrides,
+      };
+    }
+
+    it('suggests the one library book with the same title and the same set of authors', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: '  Lab   ALPHA ', authors: 'Bo Sample\nAda Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([makeLibraryBook({ authors: ['Ada Tester', 'Bo Sample'] })]);
+
+      await expect(service.listUnmatchedBookSuggestions(user)).resolves.toEqual([
+        {
+          hash: HASH_A,
+          candidates: [
+            {
+              bookId: 501,
+              title: 'Lab Alpha',
+              subtitle: null,
+              authors: ['Ada Tester', 'Bo Sample'],
+              format: 'epub',
+              language: 'en',
+              publishedYear: 2026,
+              libraryName: 'Novels',
+            },
+          ],
+          moreCandidates: false,
+        },
+      ]);
+      expect(mockRepo.findBooksByTitleKeys).toHaveBeenCalledWith(['lab alpha'], [1, 2], null, 26);
+    });
+
+    it('lists every edition that shares the title and authors, so none is presented as the only match', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([
+        makeLibraryBook({ bookId: 501 }),
+        makeLibraryBook({ bookId: 502, subtitle: 'Second edition' }),
+      ]);
+
+      const [suggestion] = await service.listUnmatchedBookSuggestions(user);
+
+      expect(suggestion!.candidates.map((candidate) => candidate.bookId)).toEqual([501, 502]);
+      expect(suggestion!.moreCandidates).toBe(false);
+    });
+
+    it('suggests nothing when the author sets differ in any way', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([
+        makeUnmatchedRow({ hash: HASH_A, title: 'Lab Alpha', authors: 'Ada Tester' }),
+        makeUnmatchedRow({ hash: HASH_B, title: 'Lab Alpha', authors: 'Ada Tester\nBo Sample\nCy Third' }),
+      ]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([makeLibraryBook({ authors: ['Ada Tester', 'Bo Sample'] })]);
+
+      await expect(service.listUnmatchedBookSuggestions(user)).resolves.toEqual([]);
+    });
+
+    it('suggests nothing for a different title, even with the same author', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha!', authors: 'Ada Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([makeLibraryBook({ titleKey: 'lab alpha!', title: 'Lab Alpha' })]);
+
+      await expect(service.listUnmatchedBookSuggestions(user)).resolves.toEqual([]);
+    });
+
+    it('only considers rows a link would accept, with a title and authors', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([
+        makeUnmatchedRow({ hash: 'c'.repeat(32), source: 'statistics' }),
+        makeUnmatchedRow({ hash: 'd'.repeat(32), metadataAmbiguous: true }),
+        makeUnmatchedRow({ hash: 'e'.repeat(32), manualLinkRequested: true }),
+        makeUnmatchedRow({ hash: 'f'.repeat(32), title: null }),
+        makeUnmatchedRow({ hash: '1'.repeat(32), authors: '  ' }),
+      ]);
+
+      await expect(service.listUnmatchedBookSuggestions(user)).resolves.toEqual([]);
+      expect(mockRepo.findBooksByTitleKeys).not.toHaveBeenCalled();
+      expect(accessibleLibraryIds).not.toHaveBeenCalled();
+    });
+
+    it('never offers a book whose primary file is audio or not content, because the link targets that file', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([
+        makeLibraryBook({ bookId: 601, format: 'm4b' }),
+        makeLibraryBook({ bookId: 602, role: 'supplement' }),
+        makeLibraryBook({ bookId: 603, format: 'pdf' }),
+      ]);
+
+      const [suggestion] = await service.listUnmatchedBookSuggestions(user);
+
+      expect(suggestion!.candidates.map((candidate) => candidate.bookId)).toEqual([603]);
+    });
+
+    it('flags more candidates when the title was shared by more books than were checked', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+      const others = Array.from({ length: 25 }, (_, index) => makeLibraryBook({ bookId: 700 + index, authors: ['Someone Else'] }));
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([makeLibraryBook({ bookId: 699 }), ...others]);
+
+      const [suggestion] = await service.listUnmatchedBookSuggestions(user);
+
+      expect(suggestion!.candidates.map((candidate) => candidate.bookId)).toEqual([699]);
+      expect(suggestion!.moreCandidates).toBe(true);
+    });
+
+    it('caps the candidates and reports that more exist', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue(Array.from({ length: 7 }, (_, index) => makeLibraryBook({ bookId: 800 + index })));
+
+      const [suggestion] = await service.listUnmatchedBookSuggestions(user);
+
+      expect(suggestion!.candidates).toHaveLength(5);
+      expect(suggestion!.moreCandidates).toBe(true);
+    });
+
+    it('applies content filters for regular users and skips them for superusers', async () => {
+      const filters = { includeTagIds: [3], includeGenreIds: [], excludeTagIds: [], excludeGenreIds: [] };
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+
+      await service.listUnmatchedBookSuggestions({ id: 7, settings: {}, contentFilters: filters } as never);
+      await service.listUnmatchedBookSuggestions({ id: 7, settings: {}, contentFilters: filters, isSuperuser: true } as never);
+
+      expect(mockRepo.findBooksByTitleKeys).toHaveBeenNthCalledWith(1, ['lab alpha'], [1, 2], filters, 26);
+      expect(mockRepo.findBooksByTitleKeys).toHaveBeenNthCalledWith(2, ['lab alpha'], [1, 2], null, 26);
+    });
+
+    it('never writes', async () => {
+      mockRepo.listUnmatchedBooks.mockResolvedValue([makeUnmatchedRow({ title: 'Lab Alpha', authors: 'Ada Tester' })]);
+      mockRepo.findBooksByTitleKeys.mockResolvedValue([makeLibraryBook()]);
+
+      await service.listUnmatchedBookSuggestions(user);
+
+      expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
+      expect(mockRepo.clearUnmatchedBooks).not.toHaveBeenCalled();
+      expect(mockRepo.resolveBookFilesByHashes).not.toHaveBeenCalled();
+    });
+  });
+
   describe('linkUnmatchedBook', () => {
     it('links an unmatched hash to an accessible book file', async () => {
       mockRepo.getUnmatchedBook.mockResolvedValue(makeUnmatchedRow());
@@ -158,25 +326,25 @@ describe('KoreaderHashLinkService', () => {
       await expect(service.linkUnmatchedBook(user, HASH_A.toUpperCase(), 55)).resolves.toEqual({ hash: HASH_A, bookId: 55, bookFileId: 44 });
 
       expect(mockBookService.verifyBookAccess).toHaveBeenCalledWith(55, user);
-      expect(mockRepo.resolveBookFileByHash).toHaveBeenCalledWith(HASH_A, [1, 2]);
+      expect(mockRepo.resolveBookFileByHash).not.toHaveBeenCalled();
       expect(mockRepo.getBookHashLink).toHaveBeenCalledWith(7, HASH_A);
       expect(mockRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_A, 44, {
         title: 'Stats title',
         authors: 'Stats author',
         lastOpen: 100,
       });
-      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A]);
+      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A], true);
     });
 
-    it('does not create a manual link when the hash already resolves to the same file intrinsically', async () => {
+    it('preserves explicit intent even when the hash already resolves to the same file intrinsically', async () => {
       mockRepo.getUnmatchedBook.mockResolvedValue(makeUnmatchedRow());
       mockRepo.findBookFileIdByBookId.mockResolvedValue(44);
       mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 44, bookId: 55, libraryId: 1 });
 
       await service.linkUnmatchedBook(user, HASH_A, 55);
 
-      expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
-      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A]);
+      expect(mockRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_A, 44, expect.any(Object));
+      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A], true);
     });
 
     it('rejects linking historical or ambiguous unmatched rows', async () => {
@@ -205,15 +373,15 @@ describe('KoreaderHashLinkService', () => {
       expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
     });
 
-    it('rejects links when the hash already belongs to a different accessible book file', async () => {
+    it('allows an explicit override of an intrinsic match to another book', async () => {
       mockRepo.getUnmatchedBook.mockResolvedValue(makeUnmatchedRow());
       mockRepo.findBookFileIdByBookId.mockResolvedValue(44);
       mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 99, bookId: 88, libraryId: 1 });
 
-      await expect(service.linkUnmatchedBook(user, HASH_A, 55)).rejects.toThrow(ConflictException);
+      await expect(service.linkUnmatchedBook(user, HASH_A, 55)).resolves.toEqual({ hash: HASH_A, bookId: 55, bookFileId: 44 });
 
-      expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
-      expect(mockRepo.clearUnmatchedBooks).not.toHaveBeenCalled();
+      expect(mockRepo.upsertBookHashLink).toHaveBeenCalled();
+      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A], true);
     });
 
     it('rejects linking when the hash is already manually linked to a different file', async () => {
@@ -243,6 +411,7 @@ describe('KoreaderHashLinkService', () => {
           koreaderTitle: 'KOReader Title',
           koreaderAuthors: 'KOReader Author',
           koreaderLastOpen: 100,
+          positionCompatible: false,
           createdAt,
           updatedAt,
         },
@@ -258,6 +427,7 @@ describe('KoreaderHashLinkService', () => {
           koreaderTitle: 'KOReader Title',
           koreaderAuthors: 'KOReader Author',
           koreaderLastOpen: 100,
+          positionCompatible: false,
           createdAt: '2026-06-01T10:00:00.000Z',
           updatedAt: '2026-06-02T11:00:00.000Z',
         },
@@ -276,7 +446,7 @@ describe('KoreaderHashLinkService', () => {
 
       expect(mockBookService.verifyBookAccess).toHaveBeenCalledWith(77, user);
       expect(mockRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_A, 66);
-      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A]);
+      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A], true);
     });
 
     it('rejects relinking when no manual link exists', async () => {
@@ -298,21 +468,21 @@ describe('KoreaderHashLinkService', () => {
       expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
     });
 
-    it('rejects relinking when the hash already matches a different book intrinsically', async () => {
+    it('allows relinking despite an intrinsic match to a different book', async () => {
       mockRepo.getBookHashLink.mockResolvedValue({ bookFileId: 44 });
       mockRepo.findBookFileIdByBookId.mockResolvedValue(66);
       mockRepo.resolveBookFileByHash.mockResolvedValue({ id: 99, bookId: 88, libraryId: 1 });
 
-      await expect(service.relinkManualHashLink(user, HASH_A, 77)).rejects.toThrow(ConflictException);
+      await expect(service.relinkManualHashLink(user, HASH_A, 77)).resolves.toEqual({ hash: HASH_A, bookId: 77, bookFileId: 66 });
 
-      expect(mockRepo.upsertBookHashLink).not.toHaveBeenCalled();
-      expect(mockRepo.clearUnmatchedBooks).not.toHaveBeenCalled();
+      expect(mockRepo.upsertBookHashLink).toHaveBeenCalledWith(7, HASH_A, 66);
+      expect(mockRepo.clearUnmatchedBooks).toHaveBeenCalledWith(7, [HASH_A], true);
     });
   });
 
   describe('unlinkManualHashLink', () => {
     it('unlinks a manual hash link and restores it as unmatched when no intrinsic match exists', async () => {
-      mockRepo.deleteBookHashLink.mockResolvedValue({
+      mockRepo.unlinkBookHashLink.mockResolvedValue({
         hash: HASH_A,
         bookFileId: 44,
         koreaderTitle: 'KOReader Title',
@@ -323,14 +493,12 @@ describe('KoreaderHashLinkService', () => {
 
       await expect(service.unlinkManualHashLink(user, HASH_A)).resolves.toEqual({ hash: HASH_A });
 
-      expect(mockRepo.deleteBookHashLink).toHaveBeenCalledWith(7, HASH_A);
-      expect(mockRepo.upsertUnmatchedBooks).toHaveBeenCalledWith(7, [
-        { hash: HASH_A, title: 'KOReader Title', authors: 'KOReader Author', lastOpen: 100, source: 'file', metadataAmbiguous: false },
-      ]);
+      expect(mockRepo.unlinkBookHashLink).toHaveBeenCalledWith(7, HASH_A);
+      expect(mockRepo.unlinkBookHashLink).toHaveBeenCalledWith(7, HASH_A);
     });
 
-    it('does not restore the hash as unmatched when it still resolves intrinsically', async () => {
-      mockRepo.deleteBookHashLink.mockResolvedValue({
+    it('restores a manual-link request even when the hash resolves intrinsically', async () => {
+      mockRepo.unlinkBookHashLink.mockResolvedValue({
         hash: HASH_A,
         bookFileId: 44,
         koreaderTitle: 'KOReader Title',
@@ -341,11 +509,11 @@ describe('KoreaderHashLinkService', () => {
 
       await expect(service.unlinkManualHashLink(user, HASH_A)).resolves.toEqual({ hash: HASH_A });
 
-      expect(mockRepo.upsertUnmatchedBooks).not.toHaveBeenCalled();
+      expect(mockRepo.unlinkBookHashLink).toHaveBeenCalledWith(7, HASH_A);
     });
 
     it('rejects unlinking when no manual link exists', async () => {
-      mockRepo.deleteBookHashLink.mockResolvedValue(null);
+      mockRepo.unlinkBookHashLink.mockResolvedValue(null);
 
       await expect(service.unlinkManualHashLink(user, HASH_A)).rejects.toThrow(NotFoundException);
 

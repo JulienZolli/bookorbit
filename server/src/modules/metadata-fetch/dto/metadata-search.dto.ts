@@ -1,9 +1,13 @@
 import { Transform, Type } from 'class-transformer';
+
+import { IsMetadataProviderKey } from '../../../common/decorators/is-metadata-provider-key.decorator';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
-  IsEnum,
   IsIn,
   IsInt,
+  Max,
   Min,
   IsOptional,
   IsString,
@@ -15,8 +19,8 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 
-import { CONCRETE_BOOK_MEDIA_KINDS, MetadataProviderKey } from '@bookorbit/types';
-import type { ConcreteBookMediaKind } from '@bookorbit/types';
+import { CONCRETE_BOOK_MEDIA_KINDS, METADATA_CACHE_REQUEST_POLICIES, METADATA_SEARCH_MAX_RESULTS_PER_PROVIDER } from '@bookorbit/types';
+import type { ConcreteBookMediaKind, MetadataCacheRequestPolicy, MetadataProviderKey } from '@bookorbit/types';
 
 @ValidatorConstraint({ name: 'atLeastOneSearchTerm', async: false })
 class AtLeastOneSearchTermConstraint implements ValidatorConstraintInterface {
@@ -86,6 +90,21 @@ export class MetadataSearchDto {
   @IsIn(CONCRETE_BOOK_MEDIA_KINDS)
   mediaKind?: ConcreteBookMediaKind;
 
+  /**
+   * Several media at once, for a search that asks for an ebook and an audiobook of the same work.
+   * The providers are the union of the ones serving each medium; results are ranked as for the
+   * first medium named, with audiobook-only providers still asked.
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => {
+    const items = typeof value === 'string' ? value.split(',') : Array.isArray(value) ? value : undefined;
+    return items?.map((item) => (typeof item === 'string' ? item.trim() : item)).filter((item) => item !== '');
+  })
+  @IsArray()
+  @ArrayMaxSize(CONCRETE_BOOK_MEDIA_KINDS.length)
+  @IsIn(CONCRETE_BOOK_MEDIA_KINDS, { each: true })
+  mediaKinds?: ConcreteBookMediaKind[];
+
   @IsOptional()
   @Transform(({ value }: { value: unknown }) => {
     if (typeof value === 'string') {
@@ -104,6 +123,26 @@ export class MetadataSearchDto {
 
     return undefined;
   })
-  @IsEnum(MetadataProviderKey, { each: true })
+  @IsMetadataProviderKey({ each: true })
   providers?: MetadataProviderKey[];
+
+  /**
+   * `refresh` asks every provider live instead of answering from the metadata cache. Clients must
+   * only send it to servers advertising the `metadata-search-cache` feature.
+   */
+  @IsOptional()
+  @IsIn(METADATA_CACHE_REQUEST_POLICIES)
+  cache?: MetadataCacheRequestPolicy;
+
+  /**
+   * How many ranked candidates each provider may contribute, for a search that browses rather than
+   * matches one book. Absent keeps the matching default. Clients must only send it to servers
+   * advertising the `metadata-search-results-per-provider` feature.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(METADATA_SEARCH_MAX_RESULTS_PER_PROVIDER)
+  resultsPerProvider?: number;
 }

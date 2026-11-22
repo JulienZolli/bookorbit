@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick, ref, type Ref } from 'vue'
-import { WIDGET_TYPES, type Library, type WidgetConfig } from '@bookorbit/types'
+import { Permission, WIDGET_TYPES, type Library, type WidgetConfig } from '@bookorbit/types'
 
 import { setI18nLocale } from '@/i18n'
 import en from '@/locales/en.json'
 import pt from '@/locales/pt.json'
+import type { api } from '@/lib/api'
 
 // Production falls back to English for any key a target catalog has not translated,
 // so these are the labels Portuguese actually renders. Reading pt directly would
@@ -13,12 +14,8 @@ import pt from '@/locales/pt.json'
 // behind a new dashboard key.
 const PT_WIDGET_NAMES = { ...en.dashboard.settings.widgetNames, ...pt.dashboard.settings.widgetNames }
 const PT_SHELF_NAMES = { ...en.dashboard.settings.shelfNames, ...pt.dashboard.settings.shelfNames }
-const ENABLED_EN_SHELF_NAMES = Object.entries(en.dashboard.settings.shelfNames)
-  .filter(([key]) => key !== 'continuePodcasts')
-  .map(([, label]) => label)
-const ENABLED_PT_SHELF_NAMES = Object.entries(PT_SHELF_NAMES)
-  .filter(([key]) => key !== 'continuePodcasts')
-  .map(([, label]) => label)
+const EN_SHELF_NAMES = Object.values(en.dashboard.settings.shelfNames)
+const PT_SHELF_LABELS = Object.values(PT_SHELF_NAMES)
 
 type UseSmartScopesMock = () => {
   smartScopes: Ref<unknown[]>
@@ -38,6 +35,11 @@ const libraryIdsRef = ref<number[] | null>(null)
 const librariesRef = ref<Library[]>([])
 const saveWidgetsMock = vi.fn<(widgets: WidgetConfig[], libraryIds?: readonly number[] | null) => Promise<void>>()
 const saveLibraryScopeMock = vi.fn<(libraryIds: readonly number[] | null) => Promise<void>>()
+const shelfUser = ref({ id: 1, settings: {}, permissions: [] as Permission[], isSuperuser: false })
+const saveShelfApi = vi.fn<typeof api>()
+
+vi.mock('@/features/auth/composables/useAuth', () => ({ useAuth: () => ({ user: shelfUser }) }))
+vi.mock('@/lib/api', () => ({ api: (...args: Parameters<typeof api>) => saveShelfApi(...args) }))
 
 vi.mock('@/components/ui/sheet', () => {
   const passthrough = { template: '<div><slot /></div>' }
@@ -120,6 +122,8 @@ function shelfOptionLabels(wrapper: VueWrapper): string[] {
 beforeEach(async () => {
   vi.clearAllMocks()
   localStorage.clear()
+  shelfUser.value = { id: 1, settings: {}, permissions: [], isSuperuser: false }
+  saveShelfApi.mockResolvedValue(new Response(null, { status: 200 }))
   // useDashboardConfig keeps module-level state, so a shelf edit in one test
   // would otherwise seed the next test's draft.
   useDashboardConfig().reset()
@@ -136,6 +140,105 @@ afterEach(async () => {
 })
 
 describe('DashboardSettingsSheet', () => {
+  it.each([false, true])('hides shelf sync for demo-restricted accounts with isSuperuser=%s and keeps shelf edits local', async (isSuperuser) => {
+    shelfUser.value = {
+      id: 1,
+      permissions: [Permission.DemoRestricted],
+      isSuperuser,
+      settings: { dashboardShelfConfig: { syncAcrossSessions: true, shelfLayout: 'two-columns' } },
+    }
+    const wrapper = await openSheet()
+    await wrapper.get('[aria-controls="dashboard-library-scope"]').trigger('click')
+
+    expect(wrapper.find('input[aria-describedby="dashboard-shelf-sync-description"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain(en.dashboard.settings.shelfSync.label)
+    expect(wrapper.text()).toContain(en.dashboard.settings.libraryScope.allLibraries)
+    await rowButtons(wrapper)[1]?.trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.common.save)
+      ?.trigger('click')
+    await flushPromises()
+
+    expect(saveShelfApi).not.toHaveBeenCalled()
+    expect(storedRows()[0]).toBe(2)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('offers shelf sync off by default and persists opt-in only on save', async () => {
+    const wrapper = await openSheet()
+    const disclosure = wrapper.get('[aria-controls="dashboard-library-scope"]')
+    expect(disclosure.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.get('#dashboard-library-scope').attributes('style')).toContain('display: none')
+    await disclosure.trigger('click')
+    expect(disclosure.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('#dashboard-library-scope').attributes('style') ?? '').not.toContain('display: none')
+    const checkbox = wrapper.get('input[aria-describedby="dashboard-shelf-sync-description"]')
+    expect(wrapper.get('#dashboard-library-scope').element.contains(checkbox.element)).toBe(true)
+    expect((checkbox.element as HTMLInputElement).checked).toBe(false)
+    await checkbox.setValue(true)
+    expect(saveShelfApi).not.toHaveBeenCalled()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.common.save)
+      ?.trigger('click')
+    await flushPromises()
+
+    expect(JSON.parse(String(saveShelfApi.mock.calls[0]![1]?.body)).settings.dashboardShelfConfig.syncAcrossSessions).toBe(true)
+    expect(wrapper.emitted('saved')).toHaveLength(1)
+  })
+
+  it('saves the shared sync switch from the widgets tab without saving shelf drafts', async () => {
+    const wrapper = await openSheet()
+    await rowButtons(wrapper)[2]?.trigger('click')
+    await wrapper.get('input[aria-describedby="dashboard-shelf-sync-description"]').setValue(true)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.dashboard.settings.tabs.widgets)
+      ?.trigger('click')
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.common.save)
+      ?.trigger('click')
+    await flushPromises()
+
+    expect(saveWidgetsMock).toHaveBeenCalled()
+    const config = JSON.parse(String(saveShelfApi.mock.calls[0]![1]?.body)).settings.dashboardShelfConfig
+    expect(config.syncAcrossSessions).toBe(true)
+    expect(config.scrollers[0].rows).toBe(1)
+  })
+
+  it('discards a sync change when cancelled and reopened', async () => {
+    const wrapper = await openSheet()
+    await wrapper.get('input[aria-describedby="dashboard-shelf-sync-description"]').setValue(true)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.common.cancel)
+      ?.trigger('click')
+    await wrapper.setProps({ open: false })
+    await wrapper.setProps({ open: true })
+
+    expect((wrapper.get('input[aria-describedby="dashboard-shelf-sync-description"]').element as HTMLInputElement).checked).toBe(false)
+    expect(saveShelfApi).not.toHaveBeenCalled()
+  })
+
+  it('keeps the sheet open and reports a failed shelf sync save', async () => {
+    const wrapper = await openSheet()
+    await wrapper.get('input[aria-describedby="dashboard-shelf-sync-description"]').setValue(true)
+    saveShelfApi.mockResolvedValue(new Response(null, { status: 500 }))
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === en.common.save)
+      ?.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe(en.dashboard.settings.saveFailed)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.emitted('update:open')).toBeUndefined()
+  })
   it('defaults to all accessible libraries', async () => {
     const wrapper = await openSheet()
 
@@ -209,7 +312,7 @@ describe('DashboardSettingsSheet', () => {
     const wrapper = await openSheet()
     await openShelvesTab(wrapper)
 
-    expect(shelfOptionLabels(wrapper).sort()).toEqual(ENABLED_EN_SHELF_NAMES.sort())
+    expect(shelfOptionLabels(wrapper).sort()).toEqual(EN_SHELF_NAMES.sort())
   })
 
   it('offers wide-row and two-column shelf layouts', async () => {
@@ -235,7 +338,7 @@ describe('DashboardSettingsSheet', () => {
     await setI18nLocale('pt')
     await nextTick()
 
-    expect(shelfOptionLabels(wrapper).sort()).toEqual(ENABLED_PT_SHELF_NAMES.sort())
+    expect(shelfOptionLabels(wrapper).sort()).toEqual(PT_SHELF_LABELS.sort())
   })
 
   it('opens on the shelves tab and lists it before widgets', async () => {

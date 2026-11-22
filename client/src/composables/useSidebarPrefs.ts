@@ -3,10 +3,14 @@ import {
   SIDEBAR_CAPPED_SECTION_IDS,
   SIDEBAR_CAP_OPTIONS,
   SIDEBAR_DEFAULT_CAP,
+  SIDEBAR_ICON_GROUP_IDS,
+  SIDEBAR_PRIMARY_STYLES,
   SIDEBAR_SECTION_IDS,
   type SidebarCap,
   type SidebarCappedSectionId,
   type SidebarConfig,
+  type SidebarLayout,
+  type SidebarPrimaryStyle,
   type SidebarSectionId,
   type SidebarSectionState,
 } from '@bookorbit/types'
@@ -32,13 +36,11 @@ function isCappedSection(id: SidebarSectionId): id is SidebarCappedSectionId {
 
 function defaultSections(): Record<SidebarSectionId, SidebarSectionState> {
   return {
+    reading: { open: true },
     browse: { open: true },
     libraries: { open: true, cap: SIDEBAR_DEFAULT_CAP },
-    podcasts: { open: true, cap: SIDEBAR_DEFAULT_CAP },
     smartScopes: { open: true, cap: SIDEBAR_DEFAULT_CAP },
     collections: { open: true, cap: SIDEBAR_DEFAULT_CAP },
-    podcastScopes: { open: true, cap: SIDEBAR_DEFAULT_CAP },
-    podcastCollections: { open: true, cap: SIDEBAR_DEFAULT_CAP },
   }
 }
 
@@ -63,11 +65,52 @@ export function parseSidebarConfig(raw: unknown): Record<SidebarSectionId, Sideb
   return sections
 }
 
+/** Generous bounds: a real layout holds a few dozen ids, so anything past these is not ours. */
+const LAYOUT_MAX_IDS = 200
+const LAYOUT_MAX_ID_LENGTH = 64
+
+function parseIdList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const ids = raw.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= LAYOUT_MAX_ID_LENGTH)
+  return [...new Set(ids)].slice(0, LAYOUT_MAX_IDS)
+}
+
+export function defaultSidebarLayout(): SidebarLayout {
+  return { hidden: [], groupOrder: [], rowOrder: {}, primaryStyle: 'list', groupStyles: {} }
+}
+
+function isSidebarStyle(value: unknown): value is SidebarPrimaryStyle {
+  return (SIDEBAR_PRIMARY_STYLES as readonly unknown[]).includes(value)
+}
+
+/** Shape-checks the stored layout only; which ids still exist is decided where it is applied. */
+export function parseSidebarLayout(raw: unknown): SidebarLayout {
+  const layout = defaultSidebarLayout()
+  if (typeof raw !== 'object' || raw === null) return layout
+  const stored = raw as { hidden?: unknown; groupOrder?: unknown; rowOrder?: unknown; primaryStyle?: unknown; groupStyles?: unknown }
+  layout.hidden = parseIdList(stored.hidden)
+  layout.groupOrder = parseIdList(stored.groupOrder)
+  if (typeof stored.rowOrder === 'object' && stored.rowOrder !== null && !Array.isArray(stored.rowOrder)) {
+    for (const [groupId, ids] of Object.entries(stored.rowOrder).slice(0, LAYOUT_MAX_IDS)) {
+      if (groupId.length > 0 && groupId.length <= LAYOUT_MAX_ID_LENGTH) layout.rowOrder[groupId] = parseIdList(ids)
+    }
+  }
+  if (isSidebarStyle(stored.primaryStyle)) layout.primaryStyle = stored.primaryStyle
+  if (typeof stored.groupStyles === 'object' && stored.groupStyles !== null) {
+    for (const groupId of SIDEBAR_ICON_GROUP_IDS) {
+      const style = (stored.groupStyles as Record<string, unknown>)[groupId]
+      if (isSidebarStyle(style)) layout.groupStyles[groupId] = style
+    }
+  }
+  return layout
+}
+
 export function userScopedKey(userId: number | null | undefined, suffix: string): string {
   return userId ? `bookorbit:u${userId}:sidebar:${suffix}` : `bookorbit:sidebar:${suffix}`
 }
 
 const sections = reactive(defaultSections())
+const layout = reactive(defaultSidebarLayout())
 
 let hydratedForUserId: number | null = null
 let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -75,6 +118,16 @@ let suppressPersist = false
 
 function currentConfig(): SidebarConfig {
   return { sections: { ...sections } }
+}
+
+function currentLayout(): SidebarLayout {
+  return {
+    hidden: [...layout.hidden],
+    groupOrder: [...layout.groupOrder],
+    rowOrder: Object.fromEntries(Object.entries(layout.rowOrder).map(([id, ids]) => [id, [...ids]])),
+    primaryStyle: layout.primaryStyle,
+    groupStyles: { ...layout.groupStyles },
+  }
 }
 
 async function persistNow(): Promise<void> {
@@ -86,7 +139,7 @@ async function persistNow(): Promise<void> {
     const res = await api('/api/v1/users/me/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { sidebarConfig: config } }),
+      body: JSON.stringify({ settings: { sidebarConfig: config, sidebarLayout: currentLayout() } }),
     })
     if (!res.ok) return
     await me()
@@ -135,6 +188,7 @@ function hydrate(): void {
   hydratedForUserId = userId
   suppressPersist = true
   Object.assign(sections, parseSidebarConfig(user.value?.settings?.sidebarConfig))
+  Object.assign(layout, parseSidebarLayout(user.value?.settings?.sidebarLayout))
   const migrated = migrateLegacySectionKeys(userId)
   suppressPersist = false
 
@@ -150,7 +204,7 @@ export function useSidebarPrefs() {
     watcherStarted = true
     watch(() => user.value?.id ?? null, hydrate, { immediate: true })
     watch(
-      sections,
+      [sections, layout],
       () => {
         if (suppressPersist) return
         schedulePersist()
@@ -181,7 +235,7 @@ export function useSidebarPrefs() {
     storage.set(userScopedKey(user.value?.id ?? null, suffix), value)
   }
 
-  return { sections, setSectionOpen, toggleSection, setSectionCap, readDeviceValue, writeDeviceValue }
+  return { sections, layout, setSectionOpen, toggleSection, setSectionCap, readDeviceValue, writeDeviceValue }
 }
 
 /** Test seam: clears the module-level hydration state between specs. */
@@ -192,4 +246,5 @@ export function resetSidebarPrefs(): void {
   watcherStarted = false
   suppressPersist = false
   Object.assign(sections, defaultSections())
+  Object.assign(layout, defaultSidebarLayout())
 }

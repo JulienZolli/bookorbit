@@ -1,5 +1,10 @@
 import type { BooksPage } from "./book";
+import type { MetadataCandidateCacheInfo } from "./metadata-cache";
 import type { MergeStrategy } from "./metadata-preferences";
+
+export const AUTHOR_GENDERS = ["female", "male", "non_binary"] as const;
+
+export type AuthorGender = (typeof AUTHOR_GENDERS)[number];
 
 export type AuthorSummary = {
   id: number;
@@ -25,6 +30,7 @@ export type AuthorLetterCount = {
 
 export type AuthorDetail = AuthorSummary & {
   description: string | null;
+  gender: AuthorGender | null;
   birthDate: string | null;
   birthYear: number | null;
   deathDate: string | null;
@@ -34,6 +40,8 @@ export type AuthorDetail = AuthorSummary & {
   influences: string[];
   metadataProvider: AuthorMetadataProviderKey | null;
   metadataProviderId: string | null;
+  /** True when a user chose the provider match; refreshes then look that id up instead of searching by name. */
+  metadataProviderPinned: boolean;
 };
 
 export type AuthorsPage = {
@@ -81,6 +89,9 @@ export type AuthorMetadataCandidate = {
   genres?: string[];
   influences?: string[];
 };
+
+/** An author candidate as a search response or stream sends it; `cache` only when the cache answered. */
+export type AuthorMetadataSearchCandidateEvent = AuthorMetadataCandidate & { cache?: MetadataCandidateCacheInfo };
 
 export type AuthorMetadataProviderInfo = {
   key: AuthorMetadataProviderKey;

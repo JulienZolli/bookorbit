@@ -1,9 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, ref } from 'vue'
-import { ScrollStrategy } from '@embedpdf/plugin-scroll'
-import { SpreadMode } from '@embedpdf/plugin-spread'
-import { ZoomMode } from '@embedpdf/plugin-zoom'
+import { onUnmounted, ref } from 'vue'
 import type { PdfReaderSettings } from '@bookorbit/types'
 
 const mockRouterBack = vi.fn<() => void>()
@@ -54,58 +51,43 @@ vi.mock('../../shared/composables/useReaderProgress', () => ({
 }))
 
 const mockOnActivity = vi.fn<() => void>()
+type SessionSnapshot = { percentage: number; pageNumber?: number | null }
+const sessionEndSnapshots: SessionSnapshot[] = []
+// Like the real composable, the session ends from an unmounted hook registered before the view's own.
 vi.mock('../../shared/composables/useReadingSession', () => ({
-  useReadingSession: () => ({
-    onActivity: mockOnActivity,
-    elapsedMinutes: ref(0),
-  }),
+  useReadingSession: (_fileId: number, getProgress: () => SessionSnapshot) => {
+    onUnmounted(() => sessionEndSnapshots.push(getProgress()))
+    return {
+      onActivity: mockOnActivity,
+      elapsedMinutes: ref(0),
+    }
+  },
 }))
 
-const mockUsePdfiumEngine = vi.fn<() => unknown>(() => ({
-  engine: ref({ id: 'engine' }),
-  isLoading: ref(false),
-  error: ref(null),
-}))
-vi.mock('@embedpdf/engines/vue', () => ({
-  usePdfiumEngine: mockUsePdfiumEngine,
+const mockCreatePdfEngine = vi.hoisted(() => vi.fn<() => unknown>())
+vi.mock('../pdf-engine', () => ({ createPdfEngine: mockCreatePdfEngine }))
+
+const mockStagePlugin = vi.hoisted(() => vi.fn<(options: Record<string, unknown>) => unknown>((options) => ({ id: 'stage', options })))
+vi.mock('@embedpdf/vue/stage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@embedpdf/vue/stage')>()),
+  stagePlugin: mockStagePlugin,
 }))
 
-const mockCreatePluginRegistration = vi.fn<(pluginPackage: unknown, config?: unknown) => { pluginPackage: unknown; config?: unknown }>(
-  (pluginPackage, config) => ({ pluginPackage, config }),
-)
-const mockOpenDocumentBuffer = vi.hoisted(() => vi.fn<(options: unknown) => unknown>())
-const mockCloseDocument = vi.hoisted(() => vi.fn<(documentId: string) => unknown>())
-const mockGetDocumentState = vi.hoisted(() => vi.fn<(documentId: string) => unknown>())
-const mockDocumentManager = {
-  openDocumentBuffer: mockOpenDocumentBuffer,
-  closeDocument: mockCloseDocument,
-  getDocumentState: mockGetDocumentState,
-}
-const mockRegistry = {
-  pluginsReady: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-  isDestroyed: vi.fn<() => boolean>().mockReturnValue(false),
-  getPlugin: vi.fn<() => { provides: () => typeof mockDocumentManager }>(() => ({ provides: () => mockDocumentManager })),
-}
-vi.mock('@embedpdf/core', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@embedpdf/core')>()
-  return { ...original, createPluginRegistration: mockCreatePluginRegistration }
+const viewer = vi.hoisted(() => ({ mounts: 0, startError: null as Error | null }))
+vi.mock('@embedpdf/vue/runtime', async (importOriginal) => {
+  const { defineComponent: define, h: create } = await import('vue')
+  return {
+    ...(await importOriginal<typeof import('@embedpdf/vue/runtime')>()),
+    Viewer: define({
+      name: 'Viewer',
+      props: ['engine', 'plugins', 'initialDocuments'],
+      setup(_, { slots }) {
+        viewer.mounts += 1
+        return () => create('div', { class: 'mock-viewer' }, viewer.startError ? slots.error?.({ error: viewer.startError }) : slots.default?.())
+      },
+    }),
+  }
 })
-
-vi.mock('@embedpdf/core/vue', () => ({
-  EmbedPDF: defineComponent({
-    name: 'EmbedPDF',
-    props: ['engine', 'plugins', 'config', 'onInitialized'],
-    setup(props, { slots }) {
-      void props.onInitialized?.(mockRegistry)
-      return () =>
-        h(
-          'div',
-          { class: 'mock-embed-pdf' },
-          slots.default?.({ pluginsReady: true, activeDocumentId: 'document-1', activeDocument: { status: 'loaded' } }),
-        )
-    },
-  }),
-}))
 
 const { default: PdfV4ReaderView } = await import('../PdfV4ReaderView.vue')
 
@@ -115,20 +97,10 @@ describe('PdfV4ReaderView', () => {
     mockSettingsLoad.mockResolvedValue(undefined)
     mockApi.mockReset()
     mockApi.mockImplementation(async () => new Response(new Uint8Array([37, 80, 68, 70]), { status: 200 }))
-    mockOpenDocumentBuffer.mockReset()
-    mockOpenDocumentBuffer.mockImplementation(() => ({
-      toPromise: async () => ({
-        documentId: 'document-1',
-        task: { toPromise: async () => ({ pageCount: 12 }) },
-      }),
-    }))
-    mockCloseDocument.mockReset()
-    mockCloseDocument.mockImplementation(() => ({ toPromise: async () => undefined }))
-    mockGetDocumentState.mockReset()
-    mockRegistry.pluginsReady.mockResolvedValue(undefined)
-    mockRegistry.isDestroyed.mockReturnValue(false)
-    mockRegistry.getPlugin.mockReturnValue({ provides: () => mockDocumentManager })
+    viewer.mounts = 0
+    viewer.startError = null
     mockRoute.query = {}
+    sessionEndSnapshots.length = 0
     mockProgressPageNumber.value = 5
     mockProgressPercentage.value = 25
     mockEffective.value = {
@@ -147,7 +119,7 @@ describe('PdfV4ReaderView', () => {
         stubs: {
           PdfReaderContent: {
             name: 'PdfReaderContent',
-            props: ['documentId', 'initialPage', 'settings', 'peekMode'],
+            props: ['bookId', 'fileId', 'initialPage', 'initialPercentage', 'settings', 'peekMode'],
             emits: ['back', 'pageChange', 'retry', 'settingsChange', 'startReading'],
             template: '<div class="mock-reader-content" />',
           },
@@ -166,47 +138,13 @@ describe('PdfV4ReaderView', () => {
     expect(wrapper.find('.mock-reader-content').exists()).toBe(true)
   })
 
-  it('opens the verified document buffer after every plugin is initialized', async () => {
-    await mountReader()
+  it('hands the fetched file to a viewer that owns its engine', async () => {
+    const wrapper = await mountReader()
 
-    const documentConfig = mockCreatePluginRegistration.mock.calls[0]?.[1] as {
-      maxDocuments: number
-    }
-    expect(documentConfig.maxDocuments).toBe(1)
-    expect(documentConfig).not.toHaveProperty('initialDocuments')
-    expect(mockRegistry.pluginsReady).toHaveBeenCalledOnce()
-    expect(mockOpenDocumentBuffer).toHaveBeenCalledWith({
-      name: 'PDF',
-      buffer: expect.any(ArrayBuffer),
-      rotation: 0,
-    })
+    const viewerProps = wrapper.getComponent({ name: 'Viewer' }).props()
+    expect(viewerProps.engine).toBe(mockCreatePdfEngine)
+    expect(viewerProps.initialDocuments).toEqual([{ source: { kind: 'bytes', bytes: new Uint8Array([37, 80, 68, 70]) }, name: 'PDF' }])
     expect(mockApi).toHaveBeenCalledWith('/api/v1/books/files/101/serve', { signal: expect.any(AbortSignal) })
-  })
-
-  it('allows the in-app annotation overlay while preserving other PDF permissions', async () => {
-    const wrapper = await mountReader()
-
-    expect(wrapper.getComponent({ name: 'EmbedPDF' }).props('config')).toEqual({
-      permissions: {
-        enforceDocumentPermissions: true,
-        overrides: { modifyAnnotations: true },
-      },
-    })
-  })
-
-  it('retries a zero-page engine result once before showing an error', async () => {
-    mockOpenDocumentBuffer.mockImplementation(() => ({
-      toPromise: async () => ({
-        documentId: 'document-zero',
-        task: { toPromise: async () => ({ pageCount: 0 }) },
-      }),
-    }))
-
-    const wrapper = await mountReader()
-
-    expect(mockOpenDocumentBuffer).toHaveBeenCalledTimes(2)
-    expect(mockCloseDocument).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('The PDF engine opened this document without any pages.')
   })
 
   it('shows a recoverable error when the PDF response is unsuccessful', async () => {
@@ -224,10 +162,10 @@ describe('PdfV4ReaderView', () => {
     const wrapper = await mountReader()
 
     expect(wrapper.text()).toContain('The PDF request returned an empty document.')
-    expect(wrapper.find('.mock-embed-pdf').exists()).toBe(false)
+    expect(wrapper.find('.mock-viewer').exists()).toBe(false)
   })
 
-  it('refetches the PDF when document content requests recovery', async () => {
+  it('refetches the PDF into a new viewer when document content requests recovery', async () => {
     const wrapper = await mountReader()
     mockApi.mockClear()
 
@@ -235,16 +173,26 @@ describe('PdfV4ReaderView', () => {
     await flushPromises()
 
     expect(mockApi).toHaveBeenCalledOnce()
+    expect(viewer.mounts).toBe(2)
     expect(wrapper.find('.mock-reader-content').exists()).toBe(true)
   })
 
-  it('runs PDFium in a worker with an absolute WASM URL', async () => {
-    await mountReader()
+  it('offers a retry when the viewer cannot start its engine', async () => {
+    viewer.startError = new Error('WebAssembly unavailable')
+    const wrapper = await mountReader()
 
-    expect(mockUsePdfiumEngine).toHaveBeenCalledWith({
-      wasmUrl: expect.stringMatching(/^https?:\/\//),
-      worker: true,
-    })
+    expect(wrapper.text()).toContain('WebAssembly unavailable')
+    mockApi.mockClear()
+    viewer.startError = null
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Retry')!
+      .trigger('click')
+    await flushPromises()
+
+    expect(mockApi).toHaveBeenCalledOnce()
+    expect(wrapper.find('.mock-reader-content').exists()).toBe(true)
   })
 
   it('shows a recoverable error when reader state fails to load', async () => {
@@ -255,22 +203,46 @@ describe('PdfV4ReaderView', () => {
     expect(wrapper.text()).toContain('Unable to open this PDF')
     expect(wrapper.text()).toContain('Settings unavailable')
     expect(wrapper.text()).toContain('Retry')
-    expect(wrapper.find('.mock-embed-pdf').exists()).toBe(false)
+    expect(wrapper.find('.mock-viewer').exists()).toBe(false)
   })
 
-  it('maps persisted layout settings into headless plugin configuration', async () => {
+  it('maps persisted layout settings into the Stage configuration', async () => {
     mockEffective.value = {
       scrollMode: 'horizontal',
       spread: 'odd',
       zoomMode: 'fit-width',
       customScale: 1.5,
+      rotation: 90,
+    }
+    await mountReader()
+
+    expect(mockStagePlugin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        flow: 'continuous',
+        layout: 'horizontal',
+        spread: 'odd',
+        zoom: { mode: 'fit-width' },
+        viewRotation: 90,
+        viewUnitsPerPoint: 1,
+      }),
+    )
+  })
+
+  it('opens at a saved custom zoom and lets a responsive rule drive the automatic spread', async () => {
+    mockEffective.value = {
+      scrollMode: 'page',
+      spread: 'auto',
+      zoomMode: 'custom',
+      customScale: 1.5,
       rotation: 0,
     }
     await mountReader()
 
-    expect(mockCreatePluginRegistration.mock.calls[2]?.[1]).toMatchObject({ defaultStrategy: ScrollStrategy.Horizontal })
-    expect(mockCreatePluginRegistration.mock.calls[4]?.[1]).toMatchObject({ defaultZoomLevel: ZoomMode.FitWidth })
-    expect(mockCreatePluginRegistration.mock.calls[6]?.[1]).toMatchObject({ defaultSpreadMode: SpreadMode.Odd })
+    const options = mockStagePlugin.mock.calls[0]?.[0] as { flow: string; spread: string; zoom: unknown; responsive: { name?: string }[] }
+    expect(options.flow).toBe('paged')
+    expect(options.spread).toBe('none')
+    expect(options.zoom).toEqual({ level: 1.5 })
+    expect(options.responsive.map((rule) => rule.name)).toEqual(['compact', 'auto-spread'])
   })
 
   it('uses a deep-linked page before saved progress', async () => {
@@ -278,6 +250,57 @@ describe('PdfV4ReaderView', () => {
     const wrapper = await mountReader()
 
     expect(wrapper.getComponent({ name: 'PdfReaderContent' }).props('initialPage')).toBe(12)
+  })
+
+  it('opens at a saved page number before its percentage', async () => {
+    const wrapper = await mountReader()
+
+    expect(wrapper.getComponent({ name: 'PdfReaderContent' }).props('initialPage')).toBe(5)
+  })
+
+  it('passes a percentage-only position through for the page estimate', async () => {
+    mockProgressPageNumber.value = null
+    mockProgressPercentage.value = 37.5
+    const wrapper = await mountReader()
+
+    const content = wrapper.getComponent({ name: 'PdfReaderContent' })
+    expect(content.props('initialPage')).toBeNull()
+    expect(content.props('initialPercentage')).toBe(37.5)
+  })
+
+  it('treats a zero page number as no page so the percentage still places the reader', async () => {
+    mockProgressPageNumber.value = 0
+    mockProgressPercentage.value = 60
+    const wrapper = await mountReader()
+
+    expect(wrapper.getComponent({ name: 'PdfReaderContent' }).props('initialPage')).toBeNull()
+  })
+
+  it('does not write progress for the page the reader opened on', async () => {
+    vi.useFakeTimers()
+    mockProgressPageNumber.value = null
+    mockProgressPercentage.value = 37.5
+    const wrapper = await mountReader()
+    wrapper.getComponent({ name: 'PdfReaderContent' }).vm.$emit('pageChange', 4, 10, true)
+    await vi.advanceTimersByTimeAsync(2000)
+    wrapper.unmount()
+
+    expect(mockProgressSave).not.toHaveBeenCalled()
+    expect(mockProgressPageNumber.value).toBe(4)
+    expect(mockProgressPercentage.value).toBe(40)
+    vi.useRealTimers()
+  })
+
+  it('flushes a debounced page turn before the reading session ends', async () => {
+    vi.useFakeTimers()
+    const wrapper = await mountReader()
+    wrapper.getComponent({ name: 'PdfReaderContent' }).vm.$emit('pageChange', 8, 20)
+    await vi.advanceTimersByTimeAsync(500)
+    wrapper.unmount()
+
+    expect(sessionEndSnapshots).toEqual([{ percentage: 40, pageNumber: 8 }])
+    expect(mockProgressSave).toHaveBeenCalledOnce()
+    vi.useRealTimers()
   })
 
   it('debounces page progress saves', async () => {

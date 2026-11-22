@@ -28,8 +28,11 @@ import {
 } from '@lucide/vue'
 import type { AudiobookManifest, AudiobookManifestAsset, AudiobookManifestChapter, BookDetail } from '@bookorbit/types'
 import { api } from '@/lib/api'
+import CoverFill from '@/features/book/components/CoverFill.vue'
 import BookCoverPlaceholder from '@/features/book/components/BookCoverPlaceholder.vue'
+import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import { bookCoverPalette } from '@/features/book/lib/book-cover'
+import { createCoverFillArtworkUrl } from '@/features/book/lib/cover-fill-artwork'
 import { useAudioProgress } from './composables/useAudioProgress'
 import { useAudioQueue } from './composables/useAudioQueue'
 import { useAudioSettings } from './composables/useAudioSettings'
@@ -42,6 +45,7 @@ const { t } = useI18n()
 const props = defineProps<{ bookId: number; fileId: number; peekMode?: boolean }>()
 const route = useRoute()
 const router = useRouter()
+const { coverUrl } = useCoverVersions()
 const trackingEnabled = computed(() => !props.peekMode)
 
 const detail = ref<BookDetail | null>(null)
@@ -73,12 +77,29 @@ const audioFiles = computed<AudiobookManifestAsset[]>(() => manifest.value?.asse
 // ── Progress ──────────────────────────────────────────────────────────────────
 
 const manifestRevision = computed(() => manifest.value?.revision ?? '')
-const progress = useAudioProgress(props.bookId, { trackingEnabled, manifestRevision })
+const progress = useAudioProgress(props.bookId, { trackingEnabled, manifestRevision, assets: audioFiles, onManifestStale: reloadStaleManifest })
+
+async function reloadStaleManifest() {
+  try {
+    const res = await api(`/api/v1/audiobooks/${props.bookId}/manifest`)
+    if (!res.ok || !mounted) return
+    const next = (await res.json()) as AudiobookManifest
+    const current = audioFiles.value
+    // The queue was built from the old track list, so only a manifest with the same tracks can replace it in place.
+    const sameTracks = next.assets.length === current.length && next.assets.every((asset, index) => asset.assetId === current[index]?.assetId)
+    if (!sameTracks) return
+    manifest.value = next
+    progress.flush()
+  } catch {
+    // Progress stays on hold until the manifest can be reloaded.
+  }
+}
 
 // ── Queue (created lazily after files load) ───────────────────────────────────
 
 let queue: ReturnType<typeof useAudioQueue> | null = null
 let stopQueuePlayingWatch: WatchStopHandle | null = null
+let stopQueueErrorWatch: WatchStopHandle | null = null
 const isPlaying = ref(false)
 const currentPosition = ref(0)
 const currentFileIndex = ref(0)
@@ -120,6 +141,14 @@ function initQueue(startAssetId: string, startPosition: number) {
     },
     { immediate: true },
   )
+  stopQueueErrorWatch?.()
+  stopQueueErrorWatch = watch(
+    queue.loadError,
+    (message) => {
+      if (message && !error.value) error.value = message
+    },
+    { immediate: true },
+  )
   syncRefs()
   currentPosition.value = startPosition
   currentFileIndex.value = queue.currentIndex.value
@@ -148,7 +177,7 @@ const audioBookmarks = useAudioBookmarks(props.bookId)
 
 // ── Reading session ───────────────────────────────────────────────────────────
 
-const session = useReadingSession(props.fileId, () => ({ percentage: progressPct.value }), { trackingEnabled })
+const session = useReadingSession(props.fileId, () => ({ percentage: progressPct.value }), { trackingEnabled, sessionType: 'listen' })
 
 // ── Ticker (updates position every 500ms while playing) ──────────────────────
 
@@ -212,11 +241,23 @@ watch(isPlaying, (val) => {
 })
 
 let mounted = true
+let mediaSessionArtworkUrl: string | null = null
+let mediaSessionArtworkRevision = 0
+
+function releaseMediaSessionArtwork() {
+  mediaSessionArtworkRevision++
+  if (!mediaSessionArtworkUrl) return
+  URL.revokeObjectURL(mediaSessionArtworkUrl)
+  mediaSessionArtworkUrl = null
+}
 
 onUnmounted(() => {
   mounted = false
+  releaseMediaSessionArtwork()
   stopQueuePlayingWatch?.()
   stopQueuePlayingWatch = null
+  stopQueueErrorWatch?.()
+  stopQueueErrorWatch = null
   queue?.destroy()
   stopTicker()
   progress.flush()
@@ -241,6 +282,7 @@ const displayTitle = computed(() => {
 
 const coverSeed = computed(() => detail.value?.title ?? detail.value?.folderPath.split('/').pop() ?? String(props.bookId))
 const coverPalette = computed(() => bookCoverPalette(coverSeed.value))
+const coverSrc = computed(() => (detail.value?.coverSource ? coverUrl(props.bookId, 'cover', detail.value.coverVersion, 'audio') : null))
 
 // ── Media Session ─────────────────────────────────────────────────────────────
 
@@ -254,6 +296,32 @@ function updateMediaPlaybackState() {
   if ('mediaSession' in navigator) {
     navigator.mediaSession.playbackState = isPlaying.value ? 'playing' : 'paused'
   }
+}
+
+function updateMediaSessionMetadata(book: BookDetail) {
+  if (!('mediaSession' in navigator)) return
+  releaseMediaSessionArtwork()
+  const revision = mediaSessionArtworkRevision
+  const src = book.coverSource ? coverUrl(props.bookId, 'cover', book.coverVersion, 'audio') : null
+  const metadata = (artwork: MediaImage[] = []) =>
+    new MediaMetadata({
+      title: displayTitle.value,
+      artist: book.authors.map((author) => author.name).join(', '),
+      artwork,
+    })
+
+  navigator.mediaSession.metadata = metadata()
+  if (!src) return
+
+  void createCoverFillArtworkUrl(src).then((artworkUrl) => {
+    if (!artworkUrl) return
+    if (!mounted || revision !== mediaSessionArtworkRevision) {
+      URL.revokeObjectURL(artworkUrl)
+      return
+    }
+    mediaSessionArtworkUrl = artworkUrl
+    navigator.mediaSession.metadata = metadata([{ src: artworkUrl, sizes: '512x512', type: 'image/jpeg' }])
+  })
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────────
@@ -332,6 +400,20 @@ function nextTrack() {
   }
   syncRefs()
   session.onActivity()
+}
+
+/**
+ * `?at=<ms>` opens the book at a point on its whole timeline, such as a chapter picked on the book
+ * page. It is consumed once, so a reload resumes from wherever listening got to instead.
+ */
+function requestedStart(): { fileIndex: number; posInFile: number } | null {
+  const raw = route.query.at
+  const ms = typeof raw === 'string' && /^\d{1,10}$/.test(raw) ? Number(raw) : null
+  if (ms === null) return null
+  const query = { ...route.query }
+  delete query.at
+  void router.replace({ name: 'reader', params: route.params, query })
+  return fileAndOffsetForSeconds(ms / 1000)
 }
 
 function fileAndOffsetForSeconds(targetSecs: number): { fileIndex: number; posInFile: number } | null {
@@ -711,11 +793,7 @@ onMounted(async () => {
     manifest.value = manifestRes
 
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: displayTitle.value,
-        artist: detailRes.authors.map((a: { name: string }) => a.name).join(', '),
-        artwork: detailRes.coverSource ? [{ src: `/api/v1/books/${props.bookId}/cover`, sizes: '512x512', type: 'image/jpeg' }] : [],
-      })
+      updateMediaSessionMetadata(detailRes)
       navigator.mediaSession.setActionHandler('play', togglePlay)
       navigator.mediaSession.setActionHandler('pause', togglePlay)
       navigator.mediaSession.setActionHandler('seekbackward', skipBack)
@@ -740,8 +818,12 @@ onMounted(async () => {
 
   let startAssetId = audioFiles.value[0]!.assetId
   let startPosition = 0
+  const requested = requestedStart()
 
-  if (progress.loaded.value && progress.resumeAssetId.value !== null) {
+  if (requested) {
+    startAssetId = audioFiles.value[requested.fileIndex]!.assetId
+    startPosition = requested.posInFile
+  } else if (progress.loaded.value && progress.resumeAssetId.value !== null) {
     startAssetId = progress.resumeAssetId.value
     startPosition = progress.resumePosition.value
   } else {
@@ -761,9 +843,9 @@ onMounted(async () => {
     <!-- Blurred cover backdrop -->
     <div class="absolute inset-0">
       <div
-        v-if="detail?.coverSource"
+        v-if="coverSrc"
         class="absolute inset-0 scale-110"
-        :style="{ backgroundImage: `url(/api/v1/books/${props.bookId}/cover)`, backgroundSize: 'cover', backgroundPosition: 'center' }"
+        :style="{ backgroundImage: `url(${coverSrc})`, backgroundSize: 'cover', backgroundPosition: 'center' }"
       />
       <div v-else class="absolute inset-0" :style="{ background: coverPalette.gradient }" />
       <div class="absolute inset-0 backdrop-blur-3xl bg-black/60" />
@@ -838,14 +920,14 @@ onMounted(async () => {
               class="absolute -inset-4 rounded-2xl blur-3xl pointer-events-none transition-opacity duration-700"
               :class="isPlaying ? 'opacity-50' : 'opacity-15'"
               :style="
-                detail.coverSource
-                  ? { backgroundImage: `url(/api/v1/books/${props.bookId}/cover)`, backgroundSize: 'cover', backgroundPosition: 'center' }
+                coverSrc
+                  ? { backgroundImage: `url(${coverSrc})`, backgroundSize: 'cover', backgroundPosition: 'center' }
                   : { background: coverPalette.gradient }
               "
             />
             <!-- Cover -->
             <div class="absolute inset-0 rounded-2xl overflow-hidden ring-1 ring-white/10 shadow-2xl">
-              <img v-if="detail.coverSource" :src="`/api/v1/books/${props.bookId}/cover`" class="w-full h-full object-cover" :alt="displayTitle" />
+              <CoverFill v-if="coverSrc" :src="coverSrc" :alt="displayTitle" loading="eager" />
               <BookCoverPlaceholder
                 v-else
                 :title="detail.title"
@@ -883,7 +965,7 @@ onMounted(async () => {
                 class="absolute -top-8 pointer-events-none flex flex-col items-center"
                 :style="{ left: (scrubberHoverSeconds / (totalBookDuration || 1)) * 100 + '%', transform: 'translateX(-50%)' }"
               >
-                <span class="text-xs font-semibold text-white bg-black/70 rounded px-1.5 py-0.5 whitespace-nowrap">
+                <span class="text-xs font-semibold text-white bg-black/70 rounded-xs px-1.5 py-0.5 whitespace-nowrap">
                   {{ formatTime(scrubberHoverSeconds) }}
                 </span>
                 <span v-if="scrubberHoverChapter" class="text-[10px] text-white/60 truncate max-w-[10rem] text-center">
@@ -1126,7 +1208,7 @@ onMounted(async () => {
 
       <!-- Chapter sheet backdrop -->
       <Transition name="fade">
-        <div v-if="showChapters" class="absolute inset-0 z-20 bg-black/40" @click="showChapters = false" />
+        <div v-if="showChapters" class="absolute inset-0 z-20 bg-scrim" @click="showChapters = false" />
       </Transition>
 
       <!-- Chapter / Bookmarks sheet (slide up) -->
@@ -1208,7 +1290,7 @@ onMounted(async () => {
 
       <!-- Settings sheet backdrop -->
       <Transition name="fade">
-        <div v-if="showSettings" class="absolute inset-0 z-20 bg-black/40" @click="showSettings = false" />
+        <div v-if="showSettings" class="absolute inset-0 z-20 bg-scrim" @click="showSettings = false" />
       </Transition>
 
       <!-- Settings sheet (slide up) -->

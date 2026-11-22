@@ -9,7 +9,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -21,7 +22,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -33,7 +35,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -45,7 +48,34 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/authors/authors.controller.ts",
+    "className": "AuthorsController",
+    "methodName": "pinMetadataMatch",
+    "httpMethod": "PUT",
+    "path": "/authors/:id/metadata-match",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/authors/authors.controller.ts",
+    "className": "AuthorsController",
+    "methodName": "unpinMetadataMatch",
+    "httpMethod": "DELETE",
+    "path": "/authors/:id/metadata-match",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -57,7 +87,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -69,7 +100,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/authors/authors.controller.ts",
@@ -81,7 +113,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -93,7 +126,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -105,7 +139,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -117,7 +152,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -129,7 +165,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -141,7 +178,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -153,7 +191,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "bulkEmbedAudioCover",
+    "httpMethod": "POST",
+    "path": "/books/bulk-embed-audio-cover",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -165,7 +217,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "embedAudioCover",
+    "httpMethod": "POST",
+    "path": "/books/:id/embed-audio-cover",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -177,7 +243,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -189,7 +256,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -201,7 +269,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -213,7 +282,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -225,7 +295,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -237,7 +308,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -249,7 +321,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -261,7 +334,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -273,7 +347,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -285,7 +360,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -297,7 +373,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -309,7 +386,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -321,7 +399,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -333,7 +412,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -345,7 +425,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -357,7 +438,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -369,7 +451,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -381,7 +464,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/audiobook/audiobook.controller.ts",
@@ -393,7 +477,216 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "getState",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "save",
+    "httpMethod": "PUT",
+    "path": "/books/:bookId/chapters",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "revert",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/revert",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "writeToFiles",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/write",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "readEmbedded",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/embedded",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "startWrite",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/jobs/write",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "startRead",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/jobs/read",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "startRevert",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/jobs/revert",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "latestJob",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/jobs",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "jobStatus",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/jobs/:jobId",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "lookup",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/lookup",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "readEbook",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/ebook",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "analyze",
+    "httpMethod": "POST",
+    "path": "/books/:bookId/chapters/analyze",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "waveform",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/waveform",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "listVersions",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/versions",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/chapter-editor/chapter-editor.controller.ts",
+    "className": "ChapterEditorController",
+    "methodName": "getVersion",
+    "httpMethod": "GET",
+    "path": "/books/:bookId/chapters/versions/:versionId",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -405,7 +698,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -417,7 +711,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -429,7 +724,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/book/book.controller.ts",
+    "className": "BookController",
+    "methodName": "getIsbnCandidates",
+    "httpMethod": "GET",
+    "path": "/books/:id/isbn-candidates",
+    "permissions": ["Permission.LibraryEditMetadata"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -441,7 +750,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -453,7 +763,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -465,7 +776,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -477,7 +789,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book/book.controller.ts",
@@ -489,7 +802,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -501,7 +815,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
+    "className": "BookMetadataFetchController",
+    "methodName": "listLibraryConfigs",
+    "httpMethod": "GET",
+    "path": "/book-metadata-fetch/config/libraries",
+    "permissions": ["Permission.ManageMetadataConfig"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -513,7 +841,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -525,7 +854,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -537,7 +867,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -549,7 +880,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -561,7 +893,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -573,7 +906,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -585,7 +919,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -597,7 +932,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -609,7 +945,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -621,7 +958,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -633,7 +971,34 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
+    "className": "BookMetadataFetchController",
+    "methodName": "previewBreakdown",
+    "httpMethod": "POST",
+    "path": "/book-metadata-fetch/preview-breakdown",
+    "permissions": ["Permission.ManageMetadataConfig"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
+    "className": "BookMetadataFetchController",
+    "methodName": "previewBooks",
+    "httpMethod": "POST",
+    "path": "/book-metadata-fetch/preview-books",
+    "permissions": ["Permission.ManageMetadataConfig"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts",
@@ -645,7 +1010,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/bookmark/bookmark.controller.ts",
@@ -657,7 +1023,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/bookmark/bookmark.controller.ts",
@@ -669,7 +1036,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/bookmark/bookmark.controller.ts",
+    "className": "BookmarkController",
+    "methodName": "updateBookmark",
+    "httpMethod": "PATCH",
+    "path": "/books/:bookId/bookmarks/:bookmarkId",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/bookmark/bookmark.controller.ts",
@@ -681,7 +1062,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/catalog/catalog.controller.ts",
@@ -693,7 +1075,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/catalog/catalog.controller.ts",
@@ -705,7 +1088,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/catalog/catalog.controller.ts",
@@ -717,7 +1101,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/catalog/catalog.controller.ts",
@@ -729,7 +1114,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/catalog/catalog.controller.ts",
@@ -741,6 +1127,7 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   }
 ]

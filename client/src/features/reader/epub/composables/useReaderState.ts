@@ -17,6 +17,8 @@ import {
 import { themes } from '../constants/themes'
 import type { Theme, ThemeMode } from '../constants/themes'
 import { MEDIA_OVERLAY_HIGHLIGHT_CSS_VARIABLE } from '../../media-overlay/lib/media-overlay-highlight'
+import { readerFontScaleDeclarations } from '../lib/publisher-font-sizes'
+import { readerTextAlignRule } from '../lib/book-alignment'
 import type { FoliateRenderer } from './useFoliate'
 
 export interface ReaderState {
@@ -201,7 +203,6 @@ export function useReaderState() {
 
     return `
       ${fontFaceBlock}
-      @namespace epub "http://www.idpf.org/2007/ops";
       @media print {
           html {
               column-width: auto !important;
@@ -214,6 +215,7 @@ export function useReaderState() {
               color-scheme: ${dark ? 'dark' : 'light'};
               color: ${mode.fg};
               font-size: ${fs}px;
+              ${readerFontScaleDeclarations(fs).join('\n              ')}
           }${bodyFontRule}
           a:any-link {
               color: ${mode.link};
@@ -224,9 +226,6 @@ export function useReaderState() {
           }
           a:any-link:hover {
               text-decoration-color: unset;
-          }
-          aside[epub|type~="footnote"] {
-              display: none;
           }
       }
       html {
@@ -275,9 +274,9 @@ export function useReaderState() {
       }
       p, li, blockquote, dd {
           line-height: ${lh} !important;
-          text-align: ${j ? 'justify' : 'start'} !important;
           hyphens: ${h ? 'auto' : 'none'};
       }
+      ${readerTextAlignRule(j)}
       ${paragraphSpacingRule}
       ${inlineSpacingRule}
       ${textIndentRule}

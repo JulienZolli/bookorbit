@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
 import { Ellipsis, RotateCcw } from '@lucide/vue'
-import { Permission, type BookDetail, type UserBookStatus } from '@bookorbit/types'
+import { formatOfKey, Permission, type BookDetail, type UserBookStatus } from '@bookorbit/types'
+import { bookFormatEntries } from '@/features/book/lib/book-formats'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useDeferredLoading } from '@/composables/useDeferredLoading'
 import { useBookReadingLog, type AddReadingSessionPayload } from '@/features/book/composables/useBookReadingLog'
 import { useReadingAttempts, type ReadingAttemptDraft } from '@/features/book/composables/useReadingAttempts'
 import { useResetReadingState } from '@/features/book/composables/useResetReadingState'
+import { useKoreaderBookProgress } from '@/features/koreader/composables/useKoreaderBookProgress'
+import KoreaderResetHoldNotice from '@/features/koreader/components/KoreaderResetHoldNotice.vue'
 import ResetReadingStateDialog from '@/features/book/components/ResetReadingStateDialog.vue'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import ReadingLogVitals from '../reading-log/ReadingLogVitals.vue'
@@ -26,6 +30,7 @@ const props = defineProps<{ book: BookDetail }>()
 
 const emit = defineEmits<{
   saved: [book: BookDetail]
+  refetch: []
 }>()
 
 const { t } = useI18n()
@@ -59,6 +64,7 @@ const {
   save: saveAttempt,
   startReread,
   remove: removeAttempt,
+  rate: rateAttempt,
 } = useReadingAttempts(bookIdRef)
 
 // The tab is kept alive, so returning to it shows the rows it already had rather than replaying
@@ -72,6 +78,7 @@ onActivated(() => {
   }
   void reload({ silent: true })
   void reloadAttempts({ silent: true })
+  loadResetHolds()
 })
 
 const { hasPermission } = usePermissions()
@@ -85,14 +92,62 @@ const {
   resetReadingState,
 } = useResetReadingState(bookIdRef)
 
+// Reset is reachable from this tab, and a KOReader device that declines it keeps reading behind a
+// hold: its sessions keep arriving while the book stays at the start. Without the notice here the
+// tab shows that progress beside an unread status and nothing to explain or resolve it.
+const canViewKoreader = computed(() => hasPermission(Permission.KoreaderSync))
+const vitalsRef = ref<InstanceType<typeof ReadingLogVitals> | null>(null)
+const {
+  bookProgress: koreaderBookProgress,
+  fetchBookProgress: fetchKoreaderBookProgress,
+  releaseResetHold: releaseKoreaderResetHold,
+  clearBookProgress,
+} = useKoreaderBookProgress()
+
+const resetHeldDevices = computed(() => {
+  const progress = koreaderBookProgress.value
+  if (!canViewKoreader.value || progress?.bookId !== props.book.id) return []
+  return progress.heldByReset ?? []
+})
+
+function loadResetHolds() {
+  if (!canViewKoreader.value) return
+  void fetchKoreaderBookProgress(props.book.id)
+}
+
+let holdContext = 0
+watch(
+  [bookIdRef, canViewKoreader],
+  () => {
+    holdContext += 1
+    clearBookProgress()
+    loadResetHolds()
+  },
+  { immediate: true },
+)
+
+// Accepting the device position moves the book's progress and status, and can open an attempt.
+async function releaseResetHold(deviceId: string): Promise<boolean> {
+  if (!canViewKoreader.value) return false
+  const context = holdContext
+  const released = await releaseKoreaderResetHold(props.book.id, deviceId)
+  if (released && context === holdContext) {
+    void vitalsRef.value?.reloadProgress()
+    void reload({ silent: true })
+    void reloadAttempts({ silent: true })
+    emit('refetch')
+  }
+  return released
+}
+
 type QuickFilter = 'all' | 'last30' | 'last90' | 'thisYear'
 const activeQuick = ref<QuickFilter>('all')
 const selectedFormat = ref<string | undefined>(undefined)
 
-const uniqueFormats = computed(() => {
-  const formats = props.book.files.map((file) => file.format).filter((format): format is string => format != null && format.length > 0)
-  return [...new Set(formats)]
-})
+// Sessions record the file format, so a read-along and a plain EPUB share the `epub` filter.
+const uniqueFormats = computed(() => [
+  ...new Set(bookFormatEntries(props.book.files, props.book.formatPriority).map((entry) => formatOfKey(entry.key))),
+])
 
 const hasMultipleFormats = computed(() => uniqueFormats.value.length >= 2)
 
@@ -171,6 +226,7 @@ async function handleResetReadingState() {
   if (!result) return
   await reload()
   await reloadAttempts()
+  loadResetHolds()
   emit('saved', { ...props.book, readStatus: result.readStatus })
 }
 
@@ -183,7 +239,14 @@ async function handleStartReread(resetProgress: boolean) {
   const readStatus = await startReread(resetProgress)
   if (!readStatus) return
   await reload()
+  loadResetHolds()
   emit('saved', { ...props.book, readStatus })
+}
+
+async function handleRateAttempt(attemptId: number, rating: number | null) {
+  const bookRatingChanged = await rateAttempt(attemptId, rating)
+  if (bookRatingChanged === null) toast.error(t('readingHistory.rating.failed'))
+  else if (bookRatingChanged) emit('refetch')
 }
 
 async function handleRemoveAttempt(attemptId: number) {
@@ -252,6 +315,7 @@ const quickFilters = computed<{ label: string; value: QuickFilter }[]>(() => [
       "
     >
       <ReadingLogVitals
+        ref="vitalsRef"
         class="xl:col-start-1 xl:row-start-1"
         :class="{ 'xl:row-span-2': !resolved }"
         :book="book"
@@ -260,7 +324,11 @@ const quickFilters = computed<{ label: string; value: QuickFilter }[]>(() => [
         :hide-add-session="blank || !resolved"
         @saved="handleVitalsSaved"
         @add-session="handleOpenAddSession"
-      />
+      >
+        <template v-if="resetHeldDevices.length > 0" #notice>
+          <KoreaderResetHoldNotice :key="book.id" :held="resetHeldDevices" :release="releaseResetHold" />
+        </template>
+      </ReadingLogVitals>
 
       <div
         v-if="!resolved"
@@ -268,7 +336,7 @@ const quickFilters = computed<{ label: string; value: QuickFilter }[]>(() => [
         aria-busy="true"
       >
         <div v-if="showFirstLoadSkeleton" class="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
-          <div v-for="row in 6" :key="row" class="h-4 rounded bg-muted animate-shimmer" />
+          <div v-for="row in 6" :key="row" class="h-4 rounded-xs bg-muted animate-shimmer" />
         </div>
       </div>
 
@@ -357,7 +425,9 @@ const quickFilters = computed<{ label: string; value: QuickFilter }[]>(() => [
             :saving="attemptsSaving"
             :error="attemptsError"
             :can-manage="canManageReadingState"
+            :book-id="book.id"
             @save="handleSaveAttempt"
+            @rate="handleRateAttempt"
             @start-reread="handleStartReread"
             @remove="handleRemoveAttempt"
           />

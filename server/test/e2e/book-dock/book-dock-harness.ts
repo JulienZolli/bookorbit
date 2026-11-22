@@ -15,6 +15,7 @@ import { AppModule } from '../../../src/app.module';
 import { DB } from '../../../src/db';
 import * as schema from '../../../src/db/schema';
 import { BookDockWatcherService } from '../../../src/modules/book-dock/book-dock-watcher.service';
+import { LibraryDockRegistry } from '../../../src/modules/book-dock/library-dock-registry.service';
 import { seedLibrary, waitForCondition, type Db } from '../app-harness';
 import { buildFb2Fixture, createBookDockFixtureRoot, writeFixtureFile, type BookDockFixtureRoot } from './book-dock-fixture-builder';
 
@@ -27,6 +28,7 @@ const ADMIN_SETUP_DTO = {
 
 interface EnvSnapshot {
   appDataPath: string | undefined;
+  fileWriteDebounceMs: string | undefined;
 }
 
 export interface BookDockE2EContext {
@@ -49,6 +51,8 @@ export interface UploadBookDockFileInput {
   fileName: string;
   content: string | Buffer;
   contentType?: string;
+  /** Uploads into this library's dock instead of Unsorted. */
+  libraryId?: number;
 }
 
 export interface CreateBookDockRowInput {
@@ -81,9 +85,13 @@ export async function createBookDockE2EContext(): Promise<BookDockE2EContext> {
   const fixture = await createBookDockFixtureRoot();
   const envSnapshot: EnvSnapshot = {
     appDataPath: process.env.APP_DATA_PATH,
+    fileWriteDebounceMs: process.env.FILE_WRITE_DEBOUNCE_MS,
   };
 
   process.env.APP_DATA_PATH = fixture.booksPath;
+  // Read at config-factory time and cached in the FileWriteService constructor, so it has to be set
+  // before the module compiles.
+  process.env.FILE_WRITE_DEBOUNCE_MS = '25';
 
   const moduleFixture = await Test.createTestingModule({
     imports: [AppModule],
@@ -127,6 +135,9 @@ export async function closeBookDockE2EContext(ctx: BookDockE2EContext): Promise<
 
 export async function resetBookDockState(ctx: BookDockE2EContext): Promise<void> {
   await ctx.db.delete(schema.bookDockFiles);
+  await ctx.db.delete(schema.bookDockKeptFiles);
+  await ctx.db.delete(schema.libraryDocks);
+  await ctx.app.get(LibraryDockRegistry).refresh();
   await rm(ctx.fixture.bookDockPath, { recursive: true, force: true });
   await mkdir(ctx.fixture.bookDockPath, { recursive: true });
 }
@@ -137,6 +148,8 @@ export async function createLibraryWithFolder(
     mode?: 'book_per_file' | 'book_per_folder';
     allowedFormats?: string[];
     name?: string;
+    fileWriteEnabled?: boolean;
+    fileWriteFb2Enabled?: boolean;
   } = {},
 ): Promise<CreatedLibrary> {
   const folderPath = join(ctx.fixture.booksPath, `library-${randomUUID()}`);
@@ -149,6 +162,17 @@ export async function createLibraryWithFolder(
     watch: false,
     name: options.name,
   });
+
+  // FB2 writes have their own toggle which is off by default, so `fileWriteEnabled` alone still skips them.
+  if (options.fileWriteEnabled !== undefined || options.fileWriteFb2Enabled !== undefined) {
+    await ctx.db
+      .update(schema.libraries)
+      .set({
+        ...(options.fileWriteEnabled !== undefined ? { fileWriteEnabled: options.fileWriteEnabled } : {}),
+        ...(options.fileWriteFb2Enabled !== undefined ? { fileWriteFb2Enabled: options.fileWriteFb2Enabled } : {}),
+      })
+      .where(eq(schema.libraries.id, libraryId));
+  }
 
   return {
     libraryId,
@@ -235,7 +259,7 @@ export async function uploadBookDockFile(ctx: BookDockE2EContext, input: UploadB
 
   return ctx.app.inject({
     method: 'POST',
-    url: '/api/v1/book-dock/upload',
+    url: input.libraryId === undefined ? '/api/v1/book-dock/upload' : `/api/v1/book-dock/upload?libraryId=${input.libraryId}`,
     headers: {
       ...authHeader(input.token),
       'content-type': `multipart/form-data; boundary=${boundary}`,
@@ -312,7 +336,7 @@ export async function fileExists(path: string): Promise<boolean> {
     .catch(() => false);
 }
 
-function buildMultipartBody(fileName: string, content: Buffer, contentType: string): { body: Buffer; boundary: string } {
+export function buildMultipartBody(fileName: string, content: Buffer, contentType: string): { body: Buffer; boundary: string } {
   const boundary = `----bookorbit-book-dock-${randomUUID()}`;
   const preamble = Buffer.from(
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`,
@@ -391,4 +415,6 @@ async function setSetting(db: Db, key: string, value: string): Promise<void> {
 function restoreEnv(snapshot: EnvSnapshot): void {
   if (snapshot.appDataPath === undefined) delete process.env.APP_DATA_PATH;
   else process.env.APP_DATA_PATH = snapshot.appDataPath;
+  if (snapshot.fileWriteDebounceMs === undefined) delete process.env.FILE_WRITE_DEBOUNCE_MS;
+  else process.env.FILE_WRITE_DEBOUNCE_MS = snapshot.fileWriteDebounceMs;
 }

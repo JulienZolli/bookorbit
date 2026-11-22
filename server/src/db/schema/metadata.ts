@@ -16,7 +16,10 @@ import {
   unique,
   uniqueIndex,
   varchar,
+  uuid,
 } from 'drizzle-orm/pg-core';
+
+import { normalizeMetadataTextKeySql } from '../../common/utils/metadata-text-normalize.utils';
 
 const embedding256 = customType<{ data: number[]; driverData: string }>({
   dataType: () => 'vector(256)',
@@ -30,6 +33,9 @@ const embedding256 = customType<{ data: number[]; driverData: string }>({
   },
 });
 
+import type { AudiobookChapter, AudiobookChapterSource, AuthorGender, ChapterLookupQueueStatus, ChapterLookupReviewSummary } from '@bookorbit/types';
+
+import { users } from './auth';
 import { books } from './books';
 import { bookSeries } from './series';
 
@@ -75,6 +81,18 @@ export const bookMetadata = pgTable(
     lubimyczytacId: text('lubimyczytac_id'),
     aladinId: varchar('aladin_id', { length: 20 }),
     chapters: jsonb('chapters'),
+    chapterCount: integer('chapter_count').generatedAlwaysAs(
+      sql`CASE WHEN jsonb_typeof(chapters) = 'array' THEN jsonb_array_length(chapters) ELSE 0 END`,
+    ),
+    numberedChapterCount: integer('numbered_chapter_count').generatedAlwaysAs(
+      sql`CASE WHEN jsonb_typeof(chapters) = 'array' THEN jsonb_array_length(jsonb_path_query_array(chapters, '$[*] ? (@.title like_regex "^[[:space:]]*((track|disc|cd|part)[[:space:]]*)?[#._-]*[[:space:]]*[0-9]+([[:space:]]*(of|/)[[:space:]]*[0-9]+)?[[:space:]]*$" flag "i")')) ELSE 0 END`,
+    ),
+    manifestLegacyRecorded: boolean('manifest_legacy_recorded').notNull().default(false),
+    // Where `chapters` came from. An automated pass may clear or re-derive only a list that was
+    // itself read from the files; anything a provider, a migration or a person supplied stays.
+    chaptersSource: varchar('chapters_source', { length: 20 }).$type<AudiobookChapterSource>(),
+    chaptersUpdatedAt: timestamp('chapters_updated_at', { withTimezone: true }),
+    chaptersUpdatedBy: integer('chapters_updated_by').references(() => users.id, { onDelete: 'set null' }),
     lockedFields: text('locked_fields')
       .array()
       .notNull()
@@ -88,13 +106,21 @@ export const bookMetadata = pgTable(
       .$onUpdateFn(() => new Date()),
   },
   (t) => [
+    index('bm_chapter_count_idx').on(t.chapterCount, t.bookId),
+    index('bm_numbered_chapters_idx')
+      .on(t.bookId)
+      .where(sql`numbered_chapter_count >= chapter_count * 0.8 AND chapter_count >= 2`),
     index('bm_title_trgm_idx').using('gin', t.title.op('gin_trgm_ops')),
     index('bm_title_unaccent_trgm_idx').using('gin', sql`public.bookorbit_unaccent(${t.title}) gin_trgm_ops`),
     index('bm_title_lower_idx').on(sql`lower(${t.title})`),
     index('bm_title_book_id_idx').on(t.title, t.bookId),
+    index('bm_subtitle_unaccent_trgm_idx').using('gin', sql`public.bookorbit_unaccent(${t.subtitle}) gin_trgm_ops`),
     index('bm_series_trgm_idx').using('gin', t.seriesName.op('gin_trgm_ops')),
     index('bm_series_unaccent_trgm_idx').using('gin', sql`public.bookorbit_unaccent(${t.seriesName}) gin_trgm_ops`),
     index('bm_series_id_idx').on(t.seriesId),
+    index('bm_chapters_updated_by_idx')
+      .on(t.chaptersUpdatedBy)
+      .where(sql`${t.chaptersUpdatedBy} is not null`),
     index('bm_series_id_index_book_id_idx').on(
       t.seriesId,
       sql`(CASE WHEN ${t.seriesIndex} IS NULL THEN NULL ELSE ARRAY[split_part(${t.seriesIndex}, '.', 1)::numeric, CASE WHEN strpos(${t.seriesIndex}, '.') = 0 THEN -1::numeric ELSE split_part(${t.seriesIndex}, '.', 2)::numeric END] END)`,
@@ -114,6 +140,7 @@ export const bookMetadata = pgTable(
     index('bm_language_unaccent_trgm_idx').using('gin', sql`public.bookorbit_unaccent(${t.language}) gin_trgm_ops`),
     index('bm_published_date_idx').on(t.publishedDate),
     index('bm_published_year_idx').on(t.publishedYear),
+    index('bm_page_count_idx').on(t.pageCount),
     index('bm_published_date_sort_idx').on(sql`coalesce(${t.publishedDate}, make_date(${t.publishedYear}, 1, 1))`),
     index('bm_series_name_index_idx').on(
       t.seriesName,
@@ -122,6 +149,25 @@ export const bookMetadata = pgTable(
     ),
     index('bm_isbn10_idx').on(t.isbn10),
     index('bm_isbn13_idx').on(t.isbn13),
+    index('bm_hardcover_id_idx')
+      .on(t.hardcoverId)
+      .where(sql`${t.hardcoverId} is not null`),
+    index('bm_open_library_id_idx')
+      .on(t.openLibraryId)
+      .where(sql`${t.openLibraryId} is not null`),
+    // Edition ids, matched exactly when a docked file is checked against the books a library holds.
+    index('bm_amazon_id_idx')
+      .on(t.amazonId)
+      .where(sql`${t.amazonId} is not null`),
+    index('bm_audible_id_idx')
+      .on(t.audibleId)
+      .where(sql`${t.audibleId} is not null`),
+    index('bm_google_books_id_idx')
+      .on(t.googleBooksId)
+      .where(sql`${t.googleBooksId} is not null`),
+    index('bm_goodreads_id_idx')
+      .on(t.goodreadsId)
+      .where(sql`${t.goodreadsId} is not null`),
     index('bm_embedding_hnsw_cosine_idx').using('hnsw', sql`${t.embedding} vector_cosine_ops`),
     check('book_metadata_rating_range_chk', sql`${t.rating} is null or (${t.rating} >= 1 and ${t.rating} <= 10)`),
     check(
@@ -162,6 +208,29 @@ export const bookCommunityRatings = pgTable(
   ],
 );
 
+/**
+ * Ids from external metadata providers, one row per book and provider. Built-in providers keep
+ * their own columns on `book_metadata`; any provider registered at runtime lands here, so a new one
+ * needs no column. Rows outlive their provider's registration, so re-adding it restores them.
+ */
+export const bookProviderIds = pgTable(
+  'book_provider_ids',
+  {
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    externalId: varchar('external_id', { length: 512 }).notNull(),
+    /** The record page the id was applied from, for a link on the book page. */
+    sourceUrl: varchar('source_url', { length: 2048 }),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .defaultNow()
+      .notNull()
+      .$onUpdateFn(() => new Date()),
+  },
+  (t) => [primaryKey({ columns: [t.bookId, t.provider] }), index('book_provider_ids_provider_external_id_idx').on(t.provider, t.externalId)],
+);
+
 export const authors = pgTable(
   'authors',
   {
@@ -169,6 +238,7 @@ export const authors = pgTable(
     name: varchar('name', { length: 500 }).notNull(),
     sortName: varchar('sort_name', { length: 500 }),
     description: text('description'),
+    gender: varchar('gender', { length: 32 }).$type<AuthorGender>(),
     hasPhoto: boolean('has_photo').notNull().default(false),
     birthDate: date('birth_date', { mode: 'string' }),
     birthYear: integer('birth_year'),
@@ -179,12 +249,16 @@ export const authors = pgTable(
     influences: text('influences').array(),
     metadataProvider: varchar('metadata_provider', { length: 50 }),
     metadataProviderId: varchar('metadata_provider_id', { length: 128 }),
+    /** Set when a user chose this provider match; enrichment then looks the id up instead of searching by name. */
+    metadataProviderPinned: boolean('metadata_provider_pinned').notNull().default(false),
     lastEnrichedAt: timestamp('last_enriched_at', { withTimezone: true }),
   },
   (t) => [
     unique('authors_name_unique').on(t.name),
     index('authors_name_trgm_idx').using('gin', t.name.op('gin_trgm_ops')),
     index('authors_name_unaccent_trgm_idx').using('gin', sql`public.bookorbit_unaccent(${t.name}) gin_trgm_ops`),
+    index('authors_name_normalized_key_idx').on(normalizeMetadataTextKeySql(t.name)),
+    check('authors_gender_chk', sql`${t.gender} is null or ${t.gender} in ('female', 'male', 'non_binary')`),
   ],
 );
 
@@ -221,6 +295,8 @@ export const authorEnrichmentQueue = pgTable(
     lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
     lastError: text('last_error'),
     lastHttpStatus: integer('last_http_status'),
+    /** Set by a run that asked to bypass cached provider answers; survives requeues. */
+    ignoreCache: boolean('ignore_cache').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
@@ -240,6 +316,53 @@ export const authorEnrichmentQueue = pgTable(
     ),
     check('author_enrichment_queue_attempt_count_nonnegative_chk', sql`${t.attemptCount} >= 0`),
   ],
+);
+
+// The chapter lists the editor saved for a book, newest kept per book, so a bad save or a bad
+// lookup can be undone after the fact.
+export const bookChapterVersions = pgTable(
+  'book_chapter_versions',
+  {
+    id: serial('id').primaryKey(),
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    chapters: jsonb('chapters').$type<AudiobookChapter[]>().notNull(),
+    source: varchar('source', { length: 20 }).$type<AudiobookChapterSource>().notNull(),
+    chapterCount: integer('chapter_count').notNull(),
+    createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('bcv_book_created_idx').on(t.bookId, t.createdAt),
+    index('bcv_created_by_idx')
+      .on(t.createdBy)
+      .where(sql`${t.createdBy} is not null`),
+  ],
+);
+
+// Books waiting for, or finished with, a bulk chapter lookup on Audible. One row per book: queuing a
+// book again replaces its last outcome. Rows a person still has to look at keep their result.
+export const chapterLookupQueue = pgTable(
+  'chapter_lookup_queue',
+  {
+    claimToken: uuid('claim_token').notNull().defaultRandom(),
+    bookId: integer('book_id')
+      .primaryKey()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    userId: integer('user_id').references(() => users.id, { onDelete: 'set null' }),
+    status: varchar('status', { length: 20 }).$type<ChapterLookupQueueStatus>().notNull().default('queued'),
+    reason: varchar('reason', { length: 40 }),
+    result: jsonb('result').$type<ChapterLookupReviewSummary | null>(),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    /** A retry waits until this time, so a short outage does not use up every attempt at once. */
+    availableAt: timestamp('available_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('clq_status_available_idx').on(t.status, t.availableAt), index('clq_user_status_idx').on(t.userId, t.status)],
 );
 
 export const genres = pgTable(
@@ -294,6 +417,7 @@ export const bookTags = pgTable(
 
 export type BookMetadata = typeof bookMetadata.$inferSelect;
 export type NewBookMetadata = typeof bookMetadata.$inferInsert;
+export type BookChapterVersionRow = typeof bookChapterVersions.$inferSelect;
 export type BookCommunityRating = typeof bookCommunityRatings.$inferSelect;
 export type NewBookCommunityRating = typeof bookCommunityRatings.$inferInsert;
 
@@ -321,6 +445,8 @@ export const bookMetadataFetchQueue = pgTable(
     lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
     lastError: text('last_error'),
     lastHttpStatus: integer('last_http_status'),
+    /** Set by a run that asked to bypass cached provider answers; survives requeues. */
+    ignoreCache: boolean('ignore_cache').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
@@ -339,3 +465,26 @@ export const bookMetadataFetchQueue = pgTable(
 
 export type BookMetadataFetchQueue = typeof bookMetadataFetchQueue.$inferSelect;
 export type NewBookMetadataFetchQueue = typeof bookMetadataFetchQueue.$inferInsert;
+
+export const bookChapterJobs = pgTable(
+  'book_chapter_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 10 }).$type<import('@bookorbit/types').BookChapterJobKind>().notNull(),
+    baseRevision: varchar('base_revision', { length: 64 }).notNull(),
+    status: varchar('status', { length: 12 }).$type<import('@bookorbit/types').BookChapterJobState['status']>().notNull().default('queued'),
+    filesWritten: integer('files_written').notNull().default(0),
+    filesTotal: integer('files_total').notNull().default(0),
+    result: jsonb('result').$type<import('@bookorbit/types').BookChapterJobState['result']>(),
+    errorCode: varchar('error_code', { length: 100 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('bcj_status_created_idx').on(t.status, t.createdAt), uniqueIndex('bcj_request_idx').on(t.userId, t.bookId, t.kind, t.baseRevision)],
+);

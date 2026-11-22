@@ -1,11 +1,16 @@
 import type {
   AudiobookChapter,
+  AudiobookChapterSource,
   BookFileWriteStatus,
   BookSeriesMembership,
   BookMetadataLockField,
   BookCommunityRating,
   CustomMetadataBookValue,
+  LinkedBookSummary,
   ComicMetadataFields,
+  BookCoverSlot,
+  CoverAspectRatio,
+  CoverMedium,
   NarratorRef,
   ProviderIds,
   ReadAloudProgressSync,
@@ -14,6 +19,8 @@ import type {
 } from '@bookorbit/types';
 
 export class BookFileDto {
+  fileHash?: string | null;
+  contentVersion?: string;
   id: number;
   format: string | null;
   role: string;
@@ -30,6 +37,8 @@ export class AudioMetadataDto {
   durationSeconds: number | null;
   abridged: boolean;
   chapters: AudiobookChapter[] | null;
+  chaptersSource: AudiobookChapterSource | null;
+  chaptersUpdatedAt: string | null;
 }
 
 export class BookDetailDto {
@@ -59,11 +68,20 @@ export class BookDetailDto {
   personalNoteUpdatedAt: Date | null;
   communityRatings: BookCommunityRating[];
   coverSource: 'extracted' | 'custom' | null;
+  coverMedia: CoverMedium[];
+  covers: Record<CoverMedium, BookCoverSlot | null>;
+  /** The frame of the cover the book shows by default: square when that is its audiobook art. */
+  coverAspectRatio: CoverAspectRatio;
+  coverVersion: string;
   hardcoverEditionId: string | null;
   providerIds: ProviderIds;
+  /** Record links for external providers' ids. See `BookDetail.providerLinks`. */
+  providerLinks?: Partial<Record<string, string>>;
   authors: { id: number; name: string; sortName: string | null }[];
   genres: string[];
   tags: string[];
+  genreRefs: { id: number; name: string }[];
+  tagRefs: { id: number; name: string }[];
   files: BookFileDto[];
   lastWrittenAt: Date | null;
   metadataScore: number | null;
@@ -76,4 +94,7 @@ export class BookDetailDto {
   lockedFields: BookMetadataLockField[];
   collections: { id: number; name: string }[];
   fileWriteStatus: BookFileWriteStatus;
+  linkedBooks: LinkedBookSummary[];
+  linkGroupId: number | null;
+  linkIsLead: boolean;
 }

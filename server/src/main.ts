@@ -12,20 +12,24 @@ import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyCompress from '@fastify/compress';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { appConfig } from './config/config';
+import { DEV_CLIENT_ORIGIN } from './config/dev-client-origin';
 import { setupSwaggerDocs } from './swagger';
 import {
   parseBooleanEnv,
   parseTrustProxy,
   buildHelmetOptions,
   buildEmptyJsonBodyStream,
+  markEmptyBodyInjected,
   registerConditionalHsts,
   registerDeclaredBodyLimits,
+  registerDeclaredCompressionOptOuts,
   registerEmptyBodyContentTypeParser,
   shouldInjectEmptyJsonBody,
   shouldServeSpaFallback,
 } from './common/utils/bootstrap.utils';
+import { applyStaticCacheHeaders } from './common/utils/static-cache.utils';
 
 const MAX_COVER_BYTES = 20 * 1024 * 1024;
 
@@ -33,7 +37,8 @@ async function bootstrap() {
   const allowCloudflareInsights = parseBooleanEnv(process.env.CSP_ALLOW_CLOUDFLARE_INSIGHTS, false);
 
   const adapter = new FastifyAdapter({ logger: false, trustProxy: parseTrustProxy(process.env.TRUST_PROXY), maxParamLength: 1000 });
-  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
+  // Raw JSON bytes are what App Attest assertions hash for routes that take a body.
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true, rawBody: true });
   app.useLogger(app.get(Logger));
 
   const fastify = adapter.getInstance();
@@ -41,10 +46,12 @@ async function bootstrap() {
   const standardFastify = fastify as unknown as FastifyInstance;
 
   registerDeclaredBodyLimits(fastify);
+  registerDeclaredCompressionOptOuts(fastify);
 
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
   fastify.addHook('preParsing', (request, _reply, payload, done) => {
     if (shouldInjectEmptyJsonBody(request.method, request.headers)) {
+      markEmptyBodyInjected(request);
       done(null, buildEmptyJsonBodyStream(request.headers));
       return;
     }
@@ -93,7 +100,7 @@ async function bootstrap() {
 
   if (process.env.NODE_ENV !== 'production') {
     app.enableCors({
-      origin: process.env.CLIENT_URL ?? 'http://localhost:5173',
+      origin: process.env.CLIENT_URL ?? DEV_CLIENT_ORIGIN,
       credentials: true,
     });
   }
@@ -117,9 +124,11 @@ async function bootstrap() {
       });
     };
 
+    const publicRoot = join(__dirname, '..', 'public');
     await app.register(fastifyStatic as never, {
-      root: join(__dirname, '..', 'public'),
+      root: publicRoot,
       prefix: '/',
+      setHeaders: (reply: FastifyReply, filePath: string) => applyStaticCacheHeaders(reply, publicRoot, filePath),
     });
   }
 

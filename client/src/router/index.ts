@@ -6,7 +6,7 @@ import {
   type RouteLocationNormalizedLoaded,
   type RouteRecordRaw,
 } from 'vue-router'
-import { APP_FEATURES, Permission } from '@bookorbit/types'
+import { JOBS_VIEW_PERMISSIONS, Permission } from '@bookorbit/types'
 import { normalizeEmailTab } from '@/features/email/lib/email-tabs'
 import { normalizeMetadataTab, type MetadataTab } from '@/features/settings/lib/metadata-tabs'
 import { normalizeReaderTab, type ReaderTab } from '@/features/settings/lib/reader-tabs'
@@ -54,6 +54,7 @@ const ACCOUNT_ROUTES: Record<AccountTab, string> = {
   privacy: 'settings-account-privacy',
   notifications: 'settings-notifications',
   restrictions: 'settings-account-restrictions',
+  'api-keys': 'settings-account-api-keys',
 }
 
 const APPEARANCE_ROUTES: Record<AppearanceTab, string> = {
@@ -62,6 +63,7 @@ const APPEARANCE_ROUTES: Record<AppearanceTab, string> = {
   icons: 'settings-appearance-icons',
   layout: 'settings-appearance-layout',
   behavior: 'settings-appearance-behavior',
+  'library-visibility': 'settings-appearance-library-visibility',
   language: 'settings-appearance-language',
 }
 
@@ -75,12 +77,14 @@ const READER_ROUTES: Record<ReaderTab, string> = {
 }
 
 const METADATA_ROUTES: Record<MetadataTab, string> = {
+  reminders: 'settings-metadata-reminders',
   providers: 'settings-metadata-providers',
   'field-rules': 'settings-metadata-field-rules',
   'custom-fields': 'settings-metadata-custom-fields',
   score: 'settings-metadata-score',
   'auto-fetch': 'settings-metadata-auto-fetch',
   authors: 'settings-metadata-authors',
+  'search-cache': 'settings-metadata-search-cache',
   'genre-blocklist': 'settings-metadata-genre-blocklist',
 }
 
@@ -91,6 +95,7 @@ const ADMIN_ROUTES: Record<AdminTab, string> = {
   oidc: 'settings-admin-oidc',
   'server-fonts': 'settings-admin-server-fonts',
   tts: 'settings-admin-tts',
+  'api-keys': 'settings-admin-api-keys',
 }
 
 const SYSTEM_ROUTES: Record<SystemTab, string> = {
@@ -135,63 +140,6 @@ function resolveLegacyIntegrationRoute(tab: unknown): string | null {
   }
 }
 
-const PODCAST_SETTINGS_ROUTES: RouteRecordRaw[] = APP_FEATURES.podcasts
-  ? [
-      {
-        path: 'podcasts',
-        name: 'settings-podcasts',
-        component: () => import('@/features/settings/PodcastSettings.vue'),
-        meta: { maxWidth: 'max-w-4xl', title: () => t('titles.podcasts') },
-      },
-    ]
-  : []
-
-const PODCAST_APP_ROUTES: RouteRecordRaw[] = APP_FEATURES.podcasts
-  ? [
-      {
-        path: '/podcasts/libraries',
-        name: 'podcast-libraries',
-        component: () => import('@/features/podcast/views/PodcastLibrariesView.vue'),
-        meta: { title: () => t('titles.podcastLibraries') },
-      },
-      {
-        path: '/podcasts/playlist/:id',
-        name: 'podcast-playlist',
-        component: () => import('@/features/podcast/views/PodcastScopeView.vue'),
-        meta: { title: (to) => fallbackById('titles.podcastScope', numericParam(to, 'id')) },
-      },
-      {
-        path: '/podcasts/collection/:id',
-        name: 'podcast-collection',
-        component: () => import('@/features/podcast/views/PodcastCollectionView.vue'),
-        meta: { title: (to) => fallbackById('titles.podcastCollection', numericParam(to, 'id')) },
-      },
-      {
-        path: '/podcasts/library/:id',
-        name: 'podcast-library',
-        component: () => import('@/features/podcast/views/PodcastLibraryView.vue'),
-        meta: { title: (to) => fallbackById('titles.podcasts', numericParam(to, 'id')) },
-      },
-      {
-        path: '/podcasts/:podcastId',
-        name: 'podcast-show',
-        component: () => import('@/features/podcast/views/PodcastShowView.vue'),
-        meta: { title: (to) => fallbackById('titles.podcast', numericParam(to, 'podcastId')) },
-      },
-    ]
-  : []
-
-const PODCAST_STANDALONE_ROUTES: RouteRecordRaw[] = APP_FEATURES.podcasts
-  ? [
-      {
-        path: '/listen/podcast/:episodeId',
-        name: 'podcast-player',
-        component: () => import('@/features/podcast/views/PodcastPlayerView.vue'),
-        meta: { title: (to) => `${t('podcast.actions.listen')} · ${fallbackById('titles.podcastEpisode', numericParam(to, 'episodeId'))}` },
-      },
-    ]
-  : []
-
 export const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -201,10 +149,11 @@ export const routes: RouteRecordRaw[] = [
         path: '',
         name: 'dashboard',
         component: () => import('@/views/DashboardView.vue'),
-        meta: { title: () => t('titles.dashboard') },
+        meta: { titleRow: true, title: () => t('titles.dashboard') },
       },
       {
         path: '/settings',
+        meta: { titleRow: true },
         component: () => import('@/views/SettingsView.vue'),
         children: [
           { path: '', redirect: { name: 'settings-appearance-theme' } },
@@ -247,6 +196,17 @@ export const routes: RouteRecordRaw[] = [
             meta: { title: () => t('titles.account.restrictions') },
           },
           {
+            path: 'account/api-keys',
+            name: 'settings-account-api-keys',
+            component: () => import('@/features/api-keys/ApiKeysSettings.vue'),
+            meta: {
+              maxWidth: 'max-w-5xl',
+              requiredPermission: Permission.ApiKeys,
+              permissionFallback: 'settings-account-profile',
+              title: () => t('titles.account.apiKeys'),
+            },
+          },
+          {
             path: 'appearance',
             name: 'settings-appearance',
             redirect: tabRedirect(normalizeAppearanceTab, APPEARANCE_ROUTES),
@@ -261,7 +221,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'appearance/book-covers',
             name: 'settings-appearance-book-covers',
             component: () => import('@/features/settings/AppearanceBookCoverSettings.vue'),
-            meta: { title: () => t('titles.appearance.book-covers') },
+            meta: { maxWidth: 'max-w-4xl', title: () => t('titles.appearance.book-covers') },
           },
           {
             path: 'appearance/icons',
@@ -280,6 +240,12 @@ export const routes: RouteRecordRaw[] = [
             name: 'settings-appearance-behavior',
             component: () => import('@/features/settings/AppearanceBehaviorSettings.vue'),
             meta: { title: () => t('titles.appearance.behavior') },
+          },
+          {
+            path: 'appearance/library-visibility',
+            name: 'settings-appearance-library-visibility',
+            component: () => import('@/features/settings/AppearanceLibraryVisibilitySettings.vue'),
+            meta: { title: () => t('titles.appearance.library-visibility') },
           },
           {
             path: 'appearance/language',
@@ -324,7 +290,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'reader/fonts',
             name: 'settings-reader-fonts',
             component: () => import('@/features/settings/FontsSettings.vue'),
-            meta: { title: () => t('titles.reader.fonts') },
+            meta: { maxWidth: 'max-w-[82rem]', title: () => t('titles.reader.fonts') },
           },
           {
             path: 'reader/general',
@@ -347,6 +313,12 @@ export const routes: RouteRecordRaw[] = [
             redirect: tabRedirect(normalizeMetadataTab, METADATA_ROUTES),
           },
           {
+            path: 'metadata/reminders',
+            name: 'settings-metadata-reminders',
+            component: () => import('@/features/settings/MetadataRemindersSettings.vue'),
+            meta: { maxWidth: 'max-w-3xl', title: () => t('metadataReminders.title') },
+          },
+          {
             path: 'metadata/providers',
             name: 'settings-metadata-providers',
             component: () => import('@/features/settings/metadata-preferences/MetadataPreferencesSettings.vue'),
@@ -364,7 +336,8 @@ export const routes: RouteRecordRaw[] = [
             path: 'metadata/custom-fields',
             name: 'settings-metadata-custom-fields',
             component: () => import('@/features/settings/metadata-preferences/CustomMetadataSettings.vue'),
-            meta: { maxWidth: 'max-w-4xl', title: () => t('titles.metadata.custom-fields') },
+            // The roster's five columns need the width Users gets; 4xl left half of a 1080p pane empty.
+            meta: { maxWidth: 'max-w-6xl', title: () => t('titles.metadata.custom-fields') },
           },
           {
             path: 'metadata/score',
@@ -378,13 +351,24 @@ export const routes: RouteRecordRaw[] = [
             path: 'metadata/auto-fetch',
             name: 'settings-metadata-auto-fetch',
             component: () => import('@/features/settings/metadata-auto-fetch/BookMetadataFetchSettings.vue'),
-            meta: { maxWidth: 'max-w-3xl', title: () => t('titles.metadata.auto-fetch') },
+            meta: { maxWidth: 'max-w-[100rem]', title: () => t('titles.metadata.auto-fetch') },
           },
           {
             path: 'metadata/authors',
             name: 'settings-metadata-authors',
             component: () => import('@/features/settings/AuthorEnrichmentSettings.vue'),
             meta: { maxWidth: 'max-w-3xl', title: () => t('titles.metadata.authors') },
+          },
+          {
+            path: 'metadata/search-cache',
+            name: 'settings-metadata-search-cache',
+            component: () => import('@/features/settings/metadata-cache/MetadataCacheSettings.vue'),
+            meta: {
+              maxWidth: 'max-w-5xl',
+              requiredPermission: Permission.ManageMetadataConfig,
+              permissionFallback: 'settings-metadata-reminders',
+              title: () => t('titles.metadata.search-cache'),
+            },
           },
           {
             path: 'metadata/genre-blocklist',
@@ -430,7 +414,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'email',
             name: 'settings-email',
             component: () => import('@/features/email/components/EmailSettings.vue'),
-            meta: { maxWidth: 'max-w-3xl', title: resolveEmailTitle },
+            meta: { maxWidth: 'max-w-[72rem]', title: resolveEmailTitle },
           },
           {
             path: 'hardcover',
@@ -459,7 +443,6 @@ export const routes: RouteRecordRaw[] = [
             component: () => import('@/features/tts/TtsSettings.vue'),
             meta: { title: () => t('titles.tts') },
           },
-          ...PODCAST_SETTINGS_ROUTES,
 
           // ── Server ─────────────────────────────────────────────────────────
           {
@@ -496,17 +479,45 @@ export const routes: RouteRecordRaw[] = [
             meta: { maxWidth: 'max-w-3xl', title: () => t('titles.admin.oidc') },
           },
           {
+            path: 'admin/api-keys',
+            name: 'settings-admin-api-keys',
+            component: () => import('@/features/api-keys/ApiKeysAdminSettings.vue'),
+            meta: {
+              maxWidth: 'max-w-3xl',
+              requiredPermission: Permission.ManageAppSettings,
+              permissionFallback: 'settings-account-profile',
+              title: () => t('titles.admin.api-keys'),
+            },
+          },
+          {
             path: 'admin/server-fonts',
             name: 'settings-admin-server-fonts',
             component: () => import('@/features/settings/ServerFontsSettings.vue'),
             props: { embedded: true },
-            meta: { maxWidth: 'max-w-3xl', title: () => t('titles.admin.server-fonts') },
+            meta: { maxWidth: 'max-w-[82rem]', title: () => t('titles.admin.server-fonts') },
           },
           {
             path: 'admin/tts',
             name: 'settings-admin-tts',
             component: () => import('@/features/tts/TtsAdminSettings.vue'),
             meta: { maxWidth: 'max-w-4xl', title: () => t('titles.admin.tts') },
+          },
+          {
+            path: 'admin/ai',
+            name: 'settings-admin-ai',
+            component: () => import('@/features/ai/AiAdminSettings.vue'),
+            meta: {
+              maxWidth: 'max-w-6xl',
+              requiredPermission: Permission.ManageAppSettings,
+              permissionFallback: 'settings-account-profile',
+              title: () => t('titles.admin.ai'),
+            },
+          },
+          {
+            path: 'admin/setup',
+            name: 'settings-admin-setup',
+            component: () => import('@/features/setup-overview/views/SetupOverviewView.vue'),
+            meta: { maxWidth: 'max-w-6xl', title: () => t('setupOverview.title') },
           },
           {
             path: 'admin/book-dock',
@@ -562,7 +573,7 @@ export const routes: RouteRecordRaw[] = [
         path: '/book-dock',
         name: 'book-dock',
         component: () => import('@/views/BookDockView.vue'),
-        meta: { title: () => t('titles.bookDock') },
+        meta: { titleRow: true, title: () => t('titles.bookDock') },
       },
       // A request opens as a drawer over the list rather than as its own page, but it keeps its
       // own URL: these are children so a hard load of /requests/:id renders the list underneath.
@@ -570,7 +581,7 @@ export const routes: RouteRecordRaw[] = [
         path: '/requests',
         name: 'book-requests',
         component: () => import('@/features/book-requests/BookRequestsPage.vue'),
-        meta: { title: () => t('titles.bookRequests') },
+        meta: { titleRow: true, title: () => t('titles.bookRequests') },
         children: [
           {
             path: ':id',
@@ -590,19 +601,19 @@ export const routes: RouteRecordRaw[] = [
         path: '/whats-new',
         name: 'whats-new',
         component: () => import('@/features/whats-new/WhatsNewView.vue'),
-        meta: { title: () => t('titles.whatsNew') },
+        meta: { titleRow: true, title: () => t('titles.whatsNew') },
       },
       {
         path: '/annotations',
         name: 'annotations',
         component: () => import('@/features/annotations/views/AnnotationsHubView.vue'),
-        meta: { title: () => t('titles.annotations') },
+        meta: { titleRow: true, title: () => t('titles.annotations') },
       },
       {
         path: '/statistics',
         name: 'statistics',
         component: () => import('@/features/statistics/components/StatisticsPage.vue'),
-        meta: { title: resolveStatisticsTitle },
+        meta: { titleRow: true, title: resolveStatisticsTitle },
         beforeEnter: (to) => {
           if (to.query.tab === 'achievements') {
             return { name: 'achievements' }
@@ -610,59 +621,58 @@ export const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: '/history',
+        name: 'reading-history',
+        component: () => import('@/features/reading-history/views/ReadingHistoryView.vue'),
+        meta: { titleRow: true, title: () => t('titles.readingHistory') },
+      },
+      {
         path: '/achievements',
         name: 'achievements',
         component: () => import('@/views/AchievementsView.vue'),
-        meta: { title: () => t('titles.achievements') },
+        meta: { titleRow: true, title: () => t('titles.achievements') },
       },
       {
         path: '/libraries',
         name: 'libraries',
         component: () => import('@/features/library/views/LibrariesView.vue'),
-        meta: { title: () => t('titles.libraries') },
+        meta: { titleRow: true, title: () => t('titles.libraries') },
       },
       {
         path: '/smart-scopes',
         name: 'smart-scopes',
         component: () => import('@/features/smart-scope/views/SmartScopesView.vue'),
-        meta: { title: () => t('titles.smartScopes') },
+        meta: { titleRow: true, title: () => t('titles.smartScopes') },
       },
       {
         path: '/collections',
         name: 'collections',
         component: () => import('@/features/collection/views/CollectionsView.vue'),
-        meta: { title: () => t('titles.collections') },
+        meta: { titleRow: true, title: () => t('titles.collections') },
       },
       {
         path: '/library/:id',
         name: 'library',
         component: () => import('@/views/HomeView.vue'),
-        meta: {
-          title: (to) => fallbackById('titles.library', numericParam(to, 'id')),
-        },
+        meta: { titleRow: true, title: (to) => fallbackById('titles.library', numericParam(to, 'id')) },
       },
-      ...PODCAST_APP_ROUTES,
       {
         path: '/smart-scope/:id',
         name: 'smartScope',
         component: () => import('@/views/SmartScopeView.vue'),
-        meta: {
-          title: (to) => fallbackById('titles.smartScope', numericParam(to, 'id')),
-        },
+        meta: { titleRow: true, title: (to) => fallbackById('titles.smartScope', numericParam(to, 'id')) },
       },
       {
         path: '/collection/:id',
         name: 'collection',
         component: () => import('@/views/CollectionView.vue'),
-        meta: {
-          title: (to) => fallbackById('titles.collection', numericParam(to, 'id')),
-        },
+        meta: { titleRow: true, title: (to) => fallbackById('titles.collection', numericParam(to, 'id')) },
       },
       {
         path: '/authors',
         name: 'authors',
         component: () => import('@/features/author/views/AuthorsView.vue'),
-        meta: { title: () => t('titles.authors') },
+        meta: { titleRow: true, title: () => t('titles.authors') },
       },
       {
         path: '/authors/:id',
@@ -676,7 +686,7 @@ export const routes: RouteRecordRaw[] = [
         path: '/series',
         name: 'series',
         component: () => import('@/features/series/views/SeriesView.vue'),
-        meta: { title: () => t('titles.series') },
+        meta: { titleRow: true, title: () => t('titles.series') },
       },
       {
         path: '/series/:seriesId',
@@ -686,6 +696,62 @@ export const routes: RouteRecordRaw[] = [
           title: (to) => fallbackById('titles.seriesItem', numericParam(to, 'seriesId')),
         },
       },
+      {
+        path: '/genres',
+        name: 'genres',
+        component: () => import('@/features/taxonomy/views/TaxonomyIndexView.vue'),
+        props: { kind: 'genre' },
+        meta: { titleRow: true, title: () => t('titles.genres') },
+      },
+      {
+        path: '/tags',
+        name: 'tags',
+        component: () => import('@/features/taxonomy/views/TaxonomyIndexView.vue'),
+        props: { kind: 'tag' },
+        meta: { titleRow: true, title: () => t('titles.tags') },
+      },
+      {
+        path: '/genres/:id',
+        name: 'genre-detail',
+        component: () => import('@/features/taxonomy/views/TaxonomyView.vue'),
+        props: (to) => ({ kind: 'genre', id: numericParam(to, 'id') ?? 0 }),
+        meta: { titleRow: true, title: (to) => fallbackById('titles.genre', numericParam(to, 'id')) },
+      },
+      {
+        path: '/tags/:id',
+        name: 'tag-detail',
+        component: () => import('@/features/taxonomy/views/TaxonomyView.vue'),
+        props: (to) => ({ kind: 'tag', id: numericParam(to, 'id') ?? 0 }),
+        meta: { titleRow: true, title: (to) => fallbackById('titles.tag', numericParam(to, 'id')) },
+      },
+      {
+        path: '/jobs',
+        component: () => import('@/features/jobs/views/JobsAreaView.vue'),
+        meta: { titleRow: true, requiredPermission: [...JOBS_VIEW_PERMISSIONS] },
+        children: [
+          { path: '', redirect: { name: 'jobs-activity' } },
+          {
+            path: 'activity',
+            name: 'jobs-activity',
+            component: () => import('@/features/jobs/views/JobsActivityView.vue'),
+            meta: { title: () => t('titles.jobs') },
+          },
+          {
+            path: 'story-guides',
+            name: 'jobs-story-guides',
+            component: () => import('@/features/ai/views/AiStoryGuidesView.vue'),
+            meta: {
+              requiredPermission: Permission.ManageAppSettings,
+              permissionFallback: 'jobs-activity',
+              title: () => t('titles.aiStoryGuides'),
+            },
+          },
+          { path: ':pathMatch(.*)*', redirect: '/jobs/activity' },
+        ],
+      },
+      // The AI area became Jobs; old links and bookmarks land on the same pages.
+      { path: '/ai/story-guides', redirect: { name: 'jobs-story-guides' } },
+      { path: '/ai/:pathMatch(.*)*', redirect: '/jobs/activity' },
       {
         path: '/tools',
         component: () => import('@/features/tools/views/ToolsView.vue'),
@@ -714,6 +780,12 @@ export const routes: RouteRecordRaw[] = [
             name: 'tools-missing-resources',
             component: () => import('@/features/tools/missing-resources/views/MissingResourcesView.vue'),
             meta: { title: () => t('titles.missingResources') },
+          },
+          {
+            path: 'chapter-health',
+            name: 'tools-chapter-health',
+            component: () => import('@/features/tools/chapter-health/views/ChapterHealthView.vue'),
+            meta: { title: () => t('titles.chapterHealth') },
           },
           {
             path: ':pathMatch(.*)*',
@@ -766,7 +838,6 @@ export const routes: RouteRecordRaw[] = [
       title: (to) => `${t('titles.readPrefix')} · ${fallbackById('titles.book', numericParam(to, 'bookId'))}`,
     },
   },
-  ...PODCAST_STANDALONE_ROUTES,
   {
     path: '/login',
     name: 'login',

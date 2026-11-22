@@ -5,13 +5,11 @@ import type { SidebarCap, SidebarSectionId } from '@bookorbit/types'
 import SidebarZone from '../SidebarZone.vue'
 
 const sections = reactive<Record<SidebarSectionId, { open: boolean; cap?: SidebarCap }>>({
+  reading: { open: true },
   browse: { open: true },
   libraries: { open: true, cap: 8 },
-  podcasts: { open: true, cap: 8 },
   smartScopes: { open: true, cap: 8 },
   collections: { open: true, cap: 8 },
-  podcastScopes: { open: true, cap: 8 },
-  podcastCollections: { open: true, cap: 8 },
 })
 
 vi.mock('@/composables/useSidebarPrefs', () => ({

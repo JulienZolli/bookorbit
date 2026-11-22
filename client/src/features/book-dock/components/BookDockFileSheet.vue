@@ -4,8 +4,10 @@ import { useI18n } from 'vue-i18n'
 import { formatDateTime } from '@/i18n/formatters'
 import { X, BookOpen, Check, Trash2, Sparkles, ArrowLeft, Wand2, AlertCircle } from '@lucide/vue'
 import {
+  getBookMediaKind,
   resolveBookDockSearchTitle,
   type BookDockFile,
+  type CoverMedium,
   type BookDockMetadata,
   type MetadataCandidate,
   type MetadataSource,
@@ -15,12 +17,16 @@ import {
   SERIES_INDEX_MAX_LENGTH,
 } from '@bookorbit/types'
 import BookDockStatusBadge from './BookDockStatusBadge.vue'
-import MetadataSearchPanel from '@/features/book/components/detail/tabs/MetadataSearchPanel.vue'
-import MetadataDiffPanel from '@/features/book/components/detail/tabs/MetadataDiffPanel.vue'
+import IdentifierInput from '@/components/ui/IdentifierInput.vue'
+import InputWithSuggestions from '@/components/ui/InputWithSuggestions.vue'
+import MetadataMatchWorkspace from '@/features/book/components/metadata-match/MetadataMatchWorkspace.vue'
+import type { MetadataQuery } from '@/features/book/components/metadata-match/MetadataMatchQuery.vue'
 import { useBookDockDetail } from '../composables/useBookDockDetail'
-import { useLibraries } from '@/features/library/composables/useLibraries'
+import { useBookDestination } from '@/features/library/composables/useBookDestination'
+import BookDestinationFields from '@/features/library/components/BookDestinationFields.vue'
 import { useMetadataSearch } from '@/features/book/composables/useMetadataSearch'
-import type { MetadataPatch } from '@/features/book/composables/useMetadataDiff'
+import { useSeriesNameSearch } from '@/features/book/composables/useMetadataFieldSearch'
+import type { MetadataDiffApply } from '@/features/book/composables/useMetadataDiff'
 import { formatBytes } from '@/lib/formatting'
 import { toDisplayCoverUrl } from '@/features/book/lib/metadata-fetch'
 
@@ -34,22 +40,22 @@ const emit = defineEmits<{
   updated: [BookDockFile]
 }>()
 
-const { saved, saveError, saveMetadata, setTarget, coverUrl } = useBookDockDetail()
-const { libraries, fetchLibraries: fetchLibs } = useLibraries()
+const { saved, saveError, saveMetadata, setTarget, coverUrl, fetchReadAlong } = useBookDockDetail()
+const destination = useBookDestination({ defaultToFirstLibrary: true })
+const { search: searchSeries } = useSeriesNameSearch()
+const { libraryId: targetLibraryId, folderId: targetFolderId, hasDestination, fetchLibraries: fetchLibs } = destination
 
 const meta = computed(() => props.file.selectedMetadata ?? props.file.embeddedMetadata ?? ({} as BookDockMetadata))
 
 const metaView = ref<'editor' | 'search' | 'diff'>('editor')
-const selectedCandidate = ref<MetadataCandidate | null>(null)
-const diffSource = ref<'search' | 'fetched'>('search')
+/** Metadata fetched earlier, compared on its own without a search. */
+const fetchedCandidate = ref<MetadataCandidate | null>(null)
 
-const sheetWidthClass = computed(() => (metaView.value === 'editor' ? 'sm:w-md lg:w-lg' : 'sm:w-3/4 sm:max-w-4xl'))
+const sheetWidthClass = computed(() => (metaView.value === 'editor' ? 'sm:w-md lg:w-lg' : 'sm:w-[min(100vw-3rem,80rem)] sm:max-w-none'))
 
-const targetLibraryId = ref<number | null>(null)
-const targetFolderId = ref<number | null>(null)
-
-const selectedLibrary = computed(() => libraries.value.find((l) => l.id === targetLibraryId.value))
-const folders = computed(() => selectedLibrary.value?.folders ?? [])
+const persistedTargetLibraryId = ref<number | null>(null)
+const persistedTargetFolderId = ref<number | null>(null)
+const finishing = ref(false)
 
 const form = reactive({
   title: '',
@@ -96,28 +102,15 @@ watch(
     selectedCoverUrl.value = m.coverUrl ?? ''
     metaView.value = 'editor'
 
-    targetLibraryId.value = props.file.targetLibraryId ?? libraries.value[0]?.id ?? null
-    const lib = libraries.value.find((l) => l.id === targetLibraryId.value)
-    targetFolderId.value = props.file.targetFolderId ?? lib?.folders?.[0]?.id ?? null
+    destination.reset(props.file.targetLibraryId, props.file.targetFolderId)
+    persistedTargetLibraryId.value = props.file.targetLibraryId
+    persistedTargetFolderId.value = props.file.targetFolderId
   },
   { immediate: true },
 )
 
-watch(
-  () => libraries.value,
-  (libs) => {
-    if (!libs.length) return
-    if (targetLibraryId.value === null) {
-      targetLibraryId.value = props.file.targetLibraryId ?? libs[0]?.id ?? null
-    }
-    if (targetFolderId.value === null) {
-      const lib = libs.find((l) => l.id === targetLibraryId.value)
-      targetFolderId.value = props.file.targetFolderId ?? lib?.folders?.[0]?.id ?? null
-    }
-  },
-)
-
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+let pendingTargetSave: Promise<BookDockFile | null> | null = null
 
 onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer)
@@ -143,6 +136,8 @@ function buildMetadataPatchFromForm(): Partial<BookDockMetadata> {
     isbn10: form.isbn10 || undefined,
     seriesName: form.seriesName || undefined,
     seriesIndex: normalizedSeriesIndex() ?? undefined,
+    // A provider match keeps its whole series list; with the series cleared it would still be filed.
+    seriesMemberships: form.seriesName.trim() ? passthroughMetadata.value.seriesMemberships : undefined,
     genres: form.genres
       ? form.genres
           .split(',')
@@ -162,6 +157,11 @@ function onFieldChange() {
   }, 1000)
 }
 
+function onSeriesNameChange(value: string | null) {
+  form.seriesName = value ?? ''
+  onFieldChange()
+}
+
 function onPublishedDateChange() {
   if (/^\d{4}-\d{2}-\d{2}$/.test(form.publishedDate)) {
     form.publishedYear = form.publishedDate.slice(0, 4)
@@ -174,21 +174,35 @@ function onPublishedYearChange() {
   onFieldChange()
 }
 
-async function onLibraryChange(event: Event) {
-  const raw = Number((event.target as HTMLSelectElement).value)
-  const id = Number.isFinite(raw) && raw > 0 ? raw : null
-  targetLibraryId.value = id
-  const lib = libraries.value.find((l) => l.id === targetLibraryId.value)
-  targetFolderId.value = lib?.folders?.[0]?.id ?? null
-  const updated = await setTarget(props.file.id, targetLibraryId.value, targetFolderId.value)
-  if (updated) emit('updated', updated)
+async function persistTarget(): Promise<BookDockFile | null> {
+  if (!hasDestination.value) return null
+  const libraryId = targetLibraryId.value
+  const folderId = targetFolderId.value
+  const previousSave = pendingTargetSave
+  const request = (previousSave ?? Promise.resolve(null)).then(() => setTarget(props.file.id, libraryId, folderId))
+  pendingTargetSave = request
+
+  const updated = await request
+  if (updated) {
+    persistedTargetLibraryId.value = libraryId
+    persistedTargetFolderId.value = folderId
+    emit('updated', updated)
+  }
+  if (pendingTargetSave === request) pendingTargetSave = null
+  return updated
 }
 
-async function onFolderChange(event: Event) {
-  const raw = Number((event.target as HTMLSelectElement).value)
-  targetFolderId.value = Number.isFinite(raw) && raw > 0 ? raw : null
-  const updated = await setTarget(props.file.id, targetLibraryId.value, targetFolderId.value)
-  if (updated) emit('updated', updated)
+async function handleDone() {
+  if (finishing.value) return
+  finishing.value = true
+  try {
+    if (pendingTargetSave) await pendingTargetSave
+    const targetChanged = targetLibraryId.value !== persistedTargetLibraryId.value || targetFolderId.value !== persistedTargetFolderId.value
+    if (targetChanged && !(await persistTarget())) return
+    emit('close')
+  } finally {
+    finishing.value = false
+  }
 }
 
 function formatDate(iso: string): string {
@@ -203,15 +217,23 @@ const {
   filteredResults,
   providerCounts,
   interruptedProviders,
+  retryingProviders,
   isStreaming,
   hasSearched,
   providers,
   selectedProviders,
+  resultProviderOrder,
+  coverProviderOrder,
+  audioCoverProviderOrder,
   loadProviders,
   search,
+  searchFresh,
+  retryProvider,
   toggleProvider,
   selectFieldRuleProviders,
   clearProviderFilter,
+  cacheSummary,
+  cacheInfoFor,
 } = useMetadataSearch()
 
 const searchDefaults = computed(() => ({
@@ -272,31 +294,68 @@ const providerIds = computed<ProviderIds>(() => ({
   aladin: passthroughMetadata.value.aladinId ?? null,
 }))
 
-function openSearch() {
+async function openSearch() {
   metaView.value = 'search'
-  loadProviders()
+  if (hasSearched.value) return
+  await loadProviders()
+  const defaults = searchDefaults.value
+  if (defaults.title || defaults.isbn) handleSearchSubmit({ title: defaults.title ?? '', author: defaults.author ?? '', isbn: defaults.isbn ?? '' })
 }
 
-function handleSearchSubmit(params: { title: string; author: string; isbn: string }) {
-  search(params)
-}
+// A dock file has one medium, so its search asks only the providers for it, and audio files get square art.
+const fileMediaKind = computed(() => getBookMediaKind(props.file.format))
+const fileCoverMedium = computed<CoverMedium>(() => (fileMediaKind.value === 'audiobook' ? 'audio' : 'ebook'))
 
-function selectCandidate(candidate: MetadataCandidate) {
-  selectedCandidate.value = candidate
-  diffSource.value = 'search'
-  metaView.value = 'diff'
-}
+const fileCoverPriority = computed(() => (fileCoverMedium.value === 'audio' ? audioCoverProviderOrder.value : coverProviderOrder.value))
 
-function backFromDiff() {
-  if (diffSource.value === 'fetched') {
-    metaView.value = 'editor'
-  } else {
-    metaView.value = 'search'
+/**
+ * Whether this EPUB carries narration, asked of the file as it opens. A search on an EPUB waits for
+ * the answer: the first one goes out by itself as soon as the search opens, which can be before the
+ * file has been read.
+ */
+let readAlongCheck: { id: number; answer: Promise<boolean> } | null = null
+watch(
+  () => props.file.id,
+  (id) => {
+    readAlongCheck = props.file.format?.toLowerCase() === 'epub' ? { id, answer: fetchReadAlong(id) } : null
+  },
+  { immediate: true },
+)
+
+function handleSearchSubmit(params: MetadataQuery) {
+  const mediaKind = fileMediaKind.value
+  if (mediaKind === 'unknown') {
+    search(params)
+    return
   }
-  selectedCandidate.value = null
+  const id = props.file.id
+  const check = readAlongCheck?.id === id ? readAlongCheck : null
+  if (!check) {
+    search({ ...params, mediaKind })
+    return
+  }
+  void check.answer.then((readAlong) => {
+    // Another file was opened meanwhile, and these terms were for this one.
+    if (props.file.id !== id) return
+    // A read-along also asks the audiobook sources, as the same book on a shelf would be.
+    search(readAlong ? { ...params, mediaKind, mediaKinds: ['ebook', 'audiobook'] } : { ...params, mediaKind })
+  })
 }
 
-async function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string }) {
+function backToEditor() {
+  metaView.value = 'editor'
+  fetchedCandidate.value = null
+}
+
+function handleRetry(provider: MetadataProviderKey) {
+  void retryProvider(provider)
+}
+
+function handleSearchFresh() {
+  void searchFresh()
+}
+
+async function handleApply(patch: MetadataDiffApply) {
   const p = patch.formPatch
   const bookDockPatch = { ...p }
   delete bookDockPatch.customMetadata
@@ -315,9 +374,10 @@ async function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string 
   if ('authors' in p) form.authors = (p.authors ?? []).join(', ')
   if ('genres' in p) form.genres = (p.genres ?? []).join(', ')
 
-  if (patch.coverUrl !== undefined) {
-    selectedCoverUrl.value = patch.coverUrl
-    passthroughMetadata.value.coverUrl = patch.coverUrl
+  const coverUrl = patch.coverUrl ?? patch.audioCoverUrl
+  if (coverUrl !== undefined) {
+    selectedCoverUrl.value = coverUrl
+    passthroughMetadata.value.coverUrl = coverUrl
   }
 
   if (debounceTimer) {
@@ -327,8 +387,7 @@ async function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string 
   const updated = await saveMetadata(props.file.id, buildMetadataPatchFromForm())
   if (updated) emit('updated', updated)
 
-  metaView.value = 'editor'
-  selectedCandidate.value = null
+  backToEditor()
 }
 
 const hasFetchedMetadata = computed(() => {
@@ -363,7 +422,7 @@ function onCurrentBookDockCoverError(event: Event) {
 function openFetchedDiff() {
   const f = props.file.fetchedMetadata
   if (!f) return
-  selectedCandidate.value = {
+  fetchedCandidate.value = {
     provider: 'auto' as MetadataProviderKey,
     providerId: '',
     title: f.title ?? '',
@@ -389,7 +448,6 @@ function openFetchedDiff() {
     chapters: f.chapters ?? undefined,
     comicMetadata: f.comicMetadata ?? undefined,
   }
-  diffSource.value = 'fetched'
   metaView.value = 'diff'
 }
 
@@ -401,7 +459,7 @@ onMounted(() => {
 
 <template>
   <div class="fixed inset-0 z-50 flex">
-    <div class="hidden sm:block flex-1 bg-black/50 backdrop-blur-sm" @click="$emit('close')" />
+    <div class="hidden sm:block flex-1 bg-scrim" @click="$emit('close')" />
 
     <div
       class="relative flex flex-col w-full h-full bg-background sm:border-l border-border shadow-2xl overflow-hidden transition-[width,max-width] duration-300"
@@ -527,26 +585,29 @@ onMounted(() => {
             </label>
             <label>
               <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.field.isbn13') }}</span>
-              <input
+              <IdentifierInput
                 v-model="form.isbn13"
+                kind="isbn"
                 class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm font-mono outline-none focus:ring-1 focus:ring-ring"
                 @input="onFieldChange"
               />
             </label>
             <label>
               <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.field.isbn10') }}</span>
-              <input
+              <IdentifierInput
                 v-model="form.isbn10"
+                kind="isbn"
                 class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm font-mono outline-none focus:ring-1 focus:ring-ring"
                 @input="onFieldChange"
               />
             </label>
             <label>
               <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.field.series') }}</span>
-              <input
-                v-model="form.seriesName"
+              <InputWithSuggestions
+                :model-value="form.seriesName"
+                :search-fn="searchSeries"
                 class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-                @input="onFieldChange"
+                @update:model-value="onSeriesNameChange"
               />
             </label>
             <label>
@@ -583,28 +644,12 @@ onMounted(() => {
             </label>
           </div>
 
-          <div class="space-y-3 pt-1">
-            <label class="block">
-              <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.destinationLibrary') }}</span>
-              <select
-                class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-                :value="targetLibraryId ?? ''"
-                @change="onLibraryChange"
-              >
-                <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
-              </select>
-            </label>
-            <label class="block">
-              <span class="text-xs font-medium text-muted-foreground">{{ t('bookDock.destinationFolder') }}</span>
-              <select
-                class="mt-1 w-full h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-                :value="targetFolderId ?? ''"
-                @change="onFolderChange"
-              >
-                <option v-for="folder in folders" :key="folder.id" :value="folder.id">{{ folder.path }}</option>
-              </select>
-            </label>
-          </div>
+          <BookDestinationFields
+            :destination="destination"
+            :library-label="t('bookDock.destinationLibrary')"
+            :folder-label="t('bookDock.destinationFolder')"
+            @change="persistTarget"
+          />
 
           <p class="text-xs text-muted-foreground">{{ t('bookDock.sheet.added', { date: formatDate(file.createdAt) }) }}</p>
         </div>
@@ -631,7 +676,8 @@ onMounted(() => {
             </button>
             <button
               class="relative h-8 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium transition-all hover:opacity-90 active:scale-95"
-              @click="$emit('close')"
+              :disabled="finishing"
+              @click="handleDone"
             >
               {{ t('bookDock.done') }}
             </button>
@@ -639,53 +685,52 @@ onMounted(() => {
         </div>
       </template>
 
-      <!-- Metadata search view -->
-      <template v-else-if="metaView === 'search'">
+      <!-- Metadata search and compare -->
+      <template v-else>
         <div class="flex items-center gap-2 px-4 py-2 border-b border-border shrink-0">
           <button
             class="size-7 rounded-full flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-            @click="metaView = 'editor'"
+            :aria-label="t('common.back')"
+            @click="backToEditor"
           >
             <ArrowLeft class="size-4" />
           </button>
           <Sparkles class="size-3.5 text-primary" />
-          <span class="text-sm font-medium">{{ t('bookDock.sheet.searchMetadata') }}</span>
+          <span class="text-sm font-medium">{{
+            metaView === 'diff' ? t('book.detail.editMetadata.searchDrawer.compareTitle') : t('bookDock.sheet.searchMetadata')
+          }}</span>
         </div>
-        <div class="flex-1 min-h-0">
-          <MetadataSearchPanel
-            :search-defaults="searchDefaults"
-            :providers="providers"
-            :filtered-results="filteredResults"
-            :provider-counts="providerCounts"
-            :selected-providers="selectedProviders"
-            :is-streaming="isStreaming"
-            :has-searched="hasSearched"
-            :interrupted-providers="interruptedProviders"
-            @search="handleSearchSubmit"
-            @toggle-provider="toggleProvider"
-            @clear-filter="clearProviderFilter"
-            @select-field-rules="selectFieldRuleProviders"
-            @select="selectCandidate"
-          />
-        </div>
-      </template>
-
-      <!-- Metadata diff view -->
-      <template v-else-if="metaView === 'diff' && selectedCandidate">
-        <div class="flex-1 min-h-0">
-          <MetadataDiffPanel
-            :current="currentSource"
-            :candidates="diffSource === 'fetched' ? [selectedCandidate] : filteredResults"
-            :initial-candidate="selectedCandidate"
-            :filtered-results="diffSource === 'fetched' ? [selectedCandidate] : filteredResults"
-            :providers="providers"
-            :back-label="diffSource === 'fetched' ? t('common.back') : t('bookDock.sheet.results')"
-            :current-cover-url="currentBookDockCoverUrl"
-            :provider-ids="providerIds"
-            @back="backFromDiff"
-            @apply="handleApply"
-          />
-        </div>
+        <MetadataMatchWorkspace
+          class="min-h-0 flex-1"
+          :current="currentSource"
+          :provider-ids="providerIds"
+          :current-cover-url="currentBookDockCoverUrl"
+          :cover-medium="fileCoverMedium"
+          :cover-priority="fileCoverPriority"
+          :search-defaults="searchDefaults"
+          :providers="providers"
+          :results="filteredResults"
+          :provider-counts="providerCounts"
+          :selected-providers="selectedProviders"
+          :interrupted-providers="interruptedProviders"
+          :retrying-providers="retryingProviders"
+          :provider-order="resultProviderOrder"
+          :is-streaming="isStreaming"
+          :has-searched="hasSearched"
+          :fixed-candidate="metaView === 'diff' ? fetchedCandidate : null"
+          :apply-hint="t('book.detail.editMetadata.match.footer.fileHint')"
+          can-search-fresh
+          :cache-summary="cacheSummary"
+          :cache-info="cacheInfoFor"
+          @search="handleSearchSubmit"
+          @toggle-provider="toggleProvider"
+          @select-all="clearProviderFilter"
+          @select-field-rules="selectFieldRuleProviders"
+          @retry-provider="handleRetry"
+          @search-fresh="handleSearchFresh"
+          @apply="handleApply"
+          @cancel="backToEditor"
+        />
       </template>
     </div>
   </div>

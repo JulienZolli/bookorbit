@@ -7,6 +7,9 @@ import { uploadError } from './upload-errors';
 
 export const SUPPORTED_BOOK_FORMATS = new Set<string>(UPLOAD_SUPPORTED_FORMATS);
 
+/** How much of a file's start `validateContent` reads to recognise its format. */
+export const CONTENT_SIGNATURE_BYTES = 512;
+
 @Injectable()
 export class UploadValidatorService {
   /**
@@ -15,17 +18,23 @@ export class UploadValidatorService {
    */
   validateFormat(filename: string, libraryAllowedFormats: string[]): string {
     const ext = extname(filename).toLowerCase().slice(1);
-    const normalizedAllowed = libraryAllowedFormats.map((f) => f.trim().toLowerCase()).filter(Boolean);
 
     if (!SUPPORTED_BOOK_FORMATS.has(ext)) {
       throw uploadError.unsupportedFormat(`Unsupported file type .${ext}. Allowed types: ${[...SUPPORTED_BOOK_FORMATS].join(', ')}`);
     }
 
-    if (normalizedAllowed.length > 0 && !normalizedAllowed.includes(ext)) {
+    if (!this.isAllowedByLibrary(filename, libraryAllowedFormats)) {
       throw uploadError.formatNotAllowed(`This library does not allow .${ext} files`);
     }
 
     return ext;
+  }
+
+  /** Whether a library's own format list lets this file in. An empty list allows every supported format. */
+  isAllowedByLibrary(filename: string, libraryAllowedFormats: string[]): boolean {
+    const ext = extname(filename).toLowerCase().slice(1);
+    const normalizedAllowed = libraryAllowedFormats.map((f) => f.trim().toLowerCase()).filter(Boolean);
+    return normalizedAllowed.length === 0 || normalizedAllowed.includes(ext);
   }
 
   /**
@@ -63,7 +72,7 @@ export class UploadValidatorService {
   async validateContent(absolutePath: string, format: string): Promise<void> {
     const handle = await open(absolutePath, 'r');
     try {
-      const header = Buffer.alloc(512);
+      const header = Buffer.alloc(CONTENT_SIGNATURE_BYTES);
       const { bytesRead } = await handle.read(header, 0, header.length, 0);
       const bytes = header.subarray(0, bytesRead);
       if (!matchesFormatSignature(bytes, format)) {
@@ -85,6 +94,8 @@ function matchesFormatSignature(bytes: Buffer, format: string): boolean {
       return bytes[0] === 0x50 && bytes[1] === 0x4b;
     case 'pdf':
       return ascii.startsWith('%PDF-');
+    case 'djvu':
+      return bytes.length >= 16 && ascii.startsWith('AT&TFORM') && ['DJVU', 'DJVM'].includes(ascii.slice(12, 16));
     case 'cbr':
       return ascii.startsWith('Rar!\x1a\x07');
     case 'cb7':

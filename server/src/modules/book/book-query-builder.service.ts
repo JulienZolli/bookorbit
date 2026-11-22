@@ -2,8 +2,16 @@ import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { AnyColumn, SQL, and, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, not, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
-import { parseCustomRuleFieldId, parseCustomSortFieldId, parseSeriesIndex } from '@bookorbit/types';
+import {
+  PLAIN_EPUB_FILTER_FORMAT,
+  READ_ALONG_FORMAT_PRIORITY,
+  STORY_GUIDE_FEATURE,
+  parseCustomRuleFieldId,
+  parseCustomSortFieldId,
+  parseSeriesIndex,
+} from '@bookorbit/types';
 import type {
+  AuthorGender,
   CommunityRatingProvider,
   ContentFilterRules,
   CustomMetadataFieldTypeMap,
@@ -19,13 +27,16 @@ import { buildContentFilterClauses } from '../../common/utils/content-filter-sql
 import { accentInsensitiveIlike, buildSearchPattern, escapeLikePattern } from '../../common/utils/accent-insensitive-search.utils';
 import { compareSeriesIndexSql, seriesIndexSortKey, seriesIndexSortKeySql } from '../../common/utils/series-index-sql.utils';
 import * as schema from '../../db/schema';
+import { activeCoverSlotSql, coverMediaSql } from '../book-cover-store/book-cover-store.repository';
 import { BookSortBuilder, customMetadataValueColumn, resolveRandomSortSeed, type BookSortContext } from './book-sort-builder.service';
 import {
   audiobookProgress,
+  aiArtifacts,
   authors,
   bookAuthors,
   bookCustomMetadataValues,
   bookFiles,
+  bookFileTexts,
   bookGenres,
   bookCommunityRatings,
   bookMetadata,
@@ -123,6 +134,7 @@ export class BookQueryBuilder {
 
     return or(
       accentInsensitiveIlike(bookMetadata.title, pattern),
+      accentInsensitiveIlike(bookMetadata.subtitle, pattern),
       existsAuthor,
       accentInsensitiveIlike(bookMetadata.seriesName, pattern),
       existsSeries,
@@ -192,6 +204,8 @@ export class BookQueryBuilder {
         );
       case 'author':
         return this.authorRuleToSql(operator, value as string[]);
+      case 'authorGender':
+        return this.authorGenderRuleToSql(operator, value as AuthorGender[]);
       case 'genre':
         return this.genreRuleToSql(operator, value as string[]);
       case 'tag':
@@ -202,6 +216,8 @@ export class BookQueryBuilder {
         return this.libraryRuleToSql(operator, value as string[]);
       case 'format':
         return this.formatRuleToSql(operator, value as string[]);
+      case 'storyGuide':
+        return this.storyGuideRuleToSql(operator);
       case 'fileSize':
         return this.numericRuleToSql(
           sql<number>`(SELECT ${bookFiles.sizeBytes} FROM ${bookFiles} WHERE ${bookFiles.id} = ${books.primaryFileId})`,
@@ -228,6 +244,8 @@ export class BookQueryBuilder {
         return this.numericRuleToSql(bookMetadata.metadataScore, operator, value as number, valueTo as number | undefined);
       case 'cover':
         return this.coverRuleToSql(operator);
+      case 'audioCover':
+        return this.audioCoverRuleToSql(operator);
       case 'lockStatus':
         return this.lockStatusRuleToSql(operator);
       case 'seriesStatus':
@@ -387,6 +405,7 @@ export class BookQueryBuilder {
       case 'before':
       case 'after':
       case 'withinLast':
+      case 'moreThanAgo':
         return this.dateExprRuleToSql(sql`${bookCustomMetadataValues.valueDate}`, operator, value as string, valueTo, timeZone, 'custom metadata');
       case 'isTrue':
         return eq(bookCustomMetadataValues.valueBoolean, true);
@@ -614,6 +633,53 @@ export class BookQueryBuilder {
     }
   }
 
+  private authorGenderRuleToSql(operator: string, values?: AuthorGender[]): SQL {
+    const existsAuthorGender = (whereClause?: SQL) => {
+      const predicates: SQL[] = [eq(bookAuthors.bookId, books.id)];
+      if (whereClause) predicates.push(whereClause);
+      const sq = this.db
+        .select({ one: sql`1` })
+        .from(bookAuthors)
+        .innerJoin(authors, eq(bookAuthors.authorId, authors.id))
+        .where(and(...predicates)!);
+      return sql`exists (${sq})`;
+    };
+
+    switch (operator) {
+      case 'includesAny':
+        if (!values?.length) return sql`1 = 0`;
+        return existsAuthorGender(inArray(authors.gender, values));
+      case 'excludesAll':
+        if (!values?.length) return sql`1 = 1`;
+        return not(existsAuthorGender(inArray(authors.gender, values)));
+      case 'isEmpty':
+        return not(existsAuthorGender(isNotNull(authors.gender)));
+      case 'isNotEmpty':
+        return existsAuthorGender(isNotNull(authors.gender));
+      default:
+        throw new BadRequestException(`Invalid operator '${operator}' for authorGender field`);
+    }
+  }
+
+  private storyGuideRuleToSql(operator: string): SQL {
+    const sq = this.db
+      .select({ one: sql`1` })
+      .from(bookFiles)
+      .innerJoin(bookFileTexts, eq(bookFileTexts.fileId, bookFiles.id))
+      .innerJoin(aiArtifacts, and(eq(aiArtifacts.feature, STORY_GUIDE_FEATURE), eq(aiArtifacts.subjectKey, bookFileTexts.textKey))!)
+      .where(eq(bookFiles.bookId, books.id));
+    const hasStoryGuide = sql`exists (${sq})`;
+
+    switch (operator) {
+      case 'isPresent':
+        return hasStoryGuide;
+      case 'isMissing':
+        return not(hasStoryGuide);
+      default:
+        throw new BadRequestException(`Invalid operator '${operator}' for storyGuide field`);
+    }
+  }
+
   private genreRuleToSql(operator: string, values?: string[]): SQL {
     const existsGenre = (whereClause?: SQL) => {
       const predicates: SQL[] = [eq(bookGenres.bookId, books.id)];
@@ -656,13 +722,26 @@ export class BookQueryBuilder {
       return sql`exists (${sq})`;
     };
 
+    const matchesFormats = (): SQL | undefined => {
+      if (!values?.length) return undefined;
+      const physicalFormats = values.filter((value) => value !== READ_ALONG_FORMAT_PRIORITY && value !== PLAIN_EPUB_FILTER_FORMAT);
+      const clauses: SQL[] = [];
+      if (physicalFormats.length > 0) clauses.push(inArray(bookFiles.format, physicalFormats));
+      if (values.includes(READ_ALONG_FORMAT_PRIORITY)) {
+        clauses.push(and(eq(bookFiles.format, 'epub'), eq(bookFiles.mediaOverlayAvailable, true))!);
+      }
+      if (values.includes(PLAIN_EPUB_FILTER_FORMAT)) {
+        clauses.push(and(eq(bookFiles.format, 'epub'), eq(bookFiles.mediaOverlayAvailable, false))!);
+      }
+      return or(...clauses);
+    };
+    const match = matchesFormats();
+
     switch (operator) {
       case 'includesAny':
-        if (!values?.length) return sql`1 = 0`;
-        return existsFormat(inArray(bookFiles.format, values));
+        return match ? existsFormat(match) : sql`1 = 0`;
       case 'excludesAll':
-        if (!values?.length) return sql`1 = 1`;
-        return not(existsFormat(inArray(bookFiles.format, values)));
+        return match ? not(existsFormat(match)) : sql`1 = 1`;
       default:
         throw new BadRequestException(`Invalid operator '${operator}' for format field`);
     }
@@ -681,6 +760,12 @@ export class BookQueryBuilder {
         this.assertNumber(days, operator, 'value');
         if (days! < 0) throw new BadRequestException(`Operator '${operator}' requires a non-negative value`);
         return sql`${books.addedAt} >= NOW() - (${days} * INTERVAL '1 day')`;
+      }
+      case 'moreThanAgo': {
+        const days = typeof value === 'string' ? Number(value) : value;
+        this.assertNumber(days, operator, 'value');
+        if (days! < 0) throw new BadRequestException(`Operator '${operator}' requires a non-negative value`);
+        return sql`${books.addedAt} < NOW() - (${days} * INTERVAL '1 day')`;
       }
       default:
         throw new BadRequestException(`Invalid operator '${operator}' for date field`);
@@ -716,6 +801,14 @@ export class BookQueryBuilder {
         const wholeDays = Math.floor(days!);
         const shiftDays = wholeDays > 0 ? wholeDays - 1 : 0;
         return sql`${dateExpr} >= (timezone(${timeZone}, now())::date - ${shiftDays}::int)`;
+      }
+      case 'moreThanAgo': {
+        const days = typeof value === 'string' ? Number(value) : value;
+        this.assertNumber(days, operator, 'value');
+        if (days! < 0) throw new BadRequestException(`Operator '${operator}' requires a non-negative value`);
+        const wholeDays = Math.floor(days!);
+        const shiftDays = wholeDays > 0 ? wholeDays - 1 : 0;
+        return sql`${dateExpr} < (timezone(${timeZone}, now())::date - ${shiftDays}::int)`;
       }
       case 'isEmpty':
         return sql`${dateExpr} is null`;
@@ -761,6 +854,14 @@ export class BookQueryBuilder {
         const wholeDays = Math.floor(days!);
         const shiftDays = wholeDays > 0 ? wholeDays - 1 : 0;
         return sql`${dateExpr} >= (timezone(${timeZone}, now())::date - ${shiftDays}::int)`;
+      }
+      case 'moreThanAgo': {
+        const days = typeof value === 'string' ? Number(value) : value;
+        this.assertNumber(days, operator, 'value');
+        if (days! < 0) throw new BadRequestException(`Operator '${operator}' requires a non-negative value`);
+        const wholeDays = Math.floor(days!);
+        const shiftDays = wholeDays > 0 ? wholeDays - 1 : 0;
+        return sql`${dateExpr} < (timezone(${timeZone}, now())::date - ${shiftDays}::int)`;
       }
       default:
         throw new BadRequestException(`Invalid operator '${operator}' for ${fieldLabel} field`);
@@ -834,6 +935,21 @@ export class BookQueryBuilder {
     }
   }
 
+  // Only books whose cover media include audio have an audio slot to fill, so both operators
+  // leave ebook-only books out rather than reporting them as missing one.
+  private audioCoverRuleToSql(operator: string): SQL {
+    const activeAudioSlot = activeCoverSlotSql(books.id, 'audio');
+    const { hasAudio } = coverMediaSql(books.id);
+    switch (operator) {
+      case 'isMissing':
+        return and(hasAudio, not(activeAudioSlot))!;
+      case 'isPresent':
+        return and(hasAudio, activeAudioSlot)!;
+      default:
+        throw new BadRequestException(`Invalid operator '${operator}' for audio cover field`);
+    }
+  }
+
   private lockStatusRuleToSql(operator: string): SQL {
     switch (operator) {
       case 'isLocked':
@@ -858,7 +974,9 @@ export class BookQueryBuilder {
   /**
    * Set membership against the same window-function pipeline as the "Up Next in Series" shelf
    * (DashboardRepository.findUpNextInSeriesBookIds): per (library, series), the next unstarted book
-   * whose immediately preceding entry is finished. Implemented as a subquery (not a per-row predicate)
+   * whose immediately preceding entry is finished and whose read status is unset, unread or want to
+   * read. The status gate applies to candidates only, so an abandoned volume ends the series rather
+   * than letting the volume after it through. Implemented as a subquery (not a per-row predicate)
    * so results match the shelf exactly. Keep the merged-progress / completion definitions in sync with
    * that repository. Library scoping is omitted here because the window partitions by library already;
    * the surrounding query restricts to the user's accessible libraries.
@@ -885,6 +1003,7 @@ export class BookQueryBuilder {
           m.series_index as series_index,
           b.added_at as added_at,
           ${mergedProgress} as current_progress,
+          ubs.status as read_status,
           case when ${isCompleted} then true else false end as is_completed
         from ${books} b
         inner join ${bookMetadata} m on m.book_id = b.id
@@ -903,6 +1022,7 @@ export class BookQueryBuilder {
           s.added_at,
           s.is_completed,
           s.current_progress,
+          s.read_status,
           lag(s.is_completed) over (
             partition by s.library_id, s.series_id
             order by ${seriesIndexSortKey(sql.raw('s.series_index'))} asc,
@@ -913,6 +1033,7 @@ export class BookQueryBuilder {
       select distinct on (o.library_id, o.series_id) o.id
       from ordered o
       where o.previous_is_completed = true and o.is_completed = false and o.current_progress = 0
+        and (o.read_status is null or o.read_status in ('unread', 'want_to_read'))
       order by o.library_id, o.series_id, ${seriesIndexSortKey(sql.raw('o.series_index'))} asc,
         o.series_index collate "C" asc, o.added_at asc, o.id asc
     )`;
@@ -1021,8 +1142,7 @@ export class BookQueryBuilder {
         .from(collectionBooks)
         .innerJoin(
           collections,
-          // Book collections only: a podcast collection sharing a name must never widen a book filter.
-          and(eq(collectionBooks.collectionId, collections.id), eq(collections.userId, userId), eq(collections.mediaType, 'books')),
+          and(eq(collectionBooks.collectionId, collections.id), or(eq(collections.userId, userId), eq(collections.isPublic, true))),
         )
         .where(and(...predicates)!);
       return sql`exists (${sq})`;
@@ -1111,7 +1231,12 @@ export class BookQueryBuilder {
       }
       switch (field) {
         case 'title':
+          parts.push(`sort_title ${D} NULLS LAST`);
+          break;
+        // sort_series is NULL for standalone books, so series stacks lead in both directions
+        // and the standalones that follow are ordered by title.
         case 'series':
+          parts.push(`sort_series ${D} NULLS LAST`);
           parts.push(`sort_title ${D} NULLS LAST`);
           break;
         case 'addedAt':
@@ -1146,6 +1271,9 @@ export class BookQueryBuilder {
           break;
         case 'pageCount':
           parts.push(`page_count ${D} NULLS LAST`);
+          break;
+        case 'metadataScore':
+          parts.push(`metadata_score ${D} NULLS LAST`);
           break;
         case 'updatedAt':
           parts.push(`updated_at ${D} NULLS LAST`);

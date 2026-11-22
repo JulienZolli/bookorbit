@@ -22,6 +22,7 @@ import type { FastifyReply } from 'fastify';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 
+import { InteractiveOnly } from '../../common/decorators/api-key-policy.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
@@ -78,6 +79,7 @@ export class UserController {
   }
 
   @Patch('me')
+  @InteractiveOnly()
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot edit account settings')
   @Auditable({
     action: AuditAction.UserSelfUpdate,
@@ -91,7 +93,7 @@ export class UserController {
 
   @Patch('me/settings')
   updateMySettings(@CurrentUser() user: RequestUser, @Body() dto: UpdateMeSettingsDto) {
-    return this.userService.updateMySettings(user.id, dto);
+    return this.userService.updateMySettings(user, dto);
   }
 
   @Patch('me/reader-storage-mode')
@@ -242,6 +244,7 @@ export class UserController {
   }
 
   @Put(':id/permissions')
+  @InteractiveOnly()
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.ManageUsers)
   @Auditable({
@@ -255,6 +258,7 @@ export class UserController {
   }
 
   @Put(':id/superuser')
+  @InteractiveOnly()
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.ManageUsers)
   @Auditable({
@@ -277,6 +281,12 @@ export class UserController {
     return this.userService.getLibraryIds(id);
   }
 
+  @Get(':id/library-access')
+  @RequirePermission(Permission.ManageUsers)
+  getLibraryGrants(@Param('id', ParseIntPipe) id: number) {
+    return this.userService.getLibraryGrants(id);
+  }
+
   @Put(':id/libraries')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.ManageUsers)
@@ -291,6 +301,7 @@ export class UserController {
   }
 
   @Post(':id/reset-password')
+  @InteractiveOnly()
   @RequirePermission(Permission.ManageUsers)
   @Auditable({
     action: AuditAction.AuthPasswordAdminReset,

@@ -3,6 +3,8 @@ import { dirname, relative } from 'path';
 
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { BookConsolidationService } from '../book-consolidation/book-consolidation.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { FileLockService, bookOperationLockKey } from '../file-write/file-lock.service';
 import type { BookMovePlan, PlannedFileMove } from './book-move-planner.service';
 import type { BookFileMoveUpdate, MoveTargetLibrary } from './book-move.repository';
@@ -16,6 +18,7 @@ export interface ExecuteMoveInput {
   target: MoveTargetLibrary;
   /** Target book replaced by this move, when resolving a duplicate with "merge". */
   mergeDuplicateBookId?: number | null;
+  userId?: number | null;
 }
 
 export type ExecuteMoveResult =
@@ -53,6 +56,8 @@ export class BookMoveExecutorService {
     private readonly moveRepo: BookMoveRepository,
     private readonly lockService: FileLockService,
     private readonly selfWriteRegistry: SelfWriteRegistry,
+    private readonly coverStore: BookCoverStore,
+    private readonly consolidation: BookConsolidationService,
   ) {}
 
   async execute(input: ExecuteMoveInput): Promise<ExecuteMoveResult> {
@@ -115,6 +120,14 @@ export class BookMoveExecutorService {
         targetFolderPathKey: plan.targetFolderPathKey,
         fileUpdates,
         mergeDuplicateBookId: input.mergeDuplicateBookId ?? null,
+        // The replaced copy's readers keep their history, shelves and devices on the moved book.
+        absorbDuplicate: (tx, duplicateBookId) =>
+          this.consolidation.absorbDuplicate(tx, {
+            targetBookId: plan.bookId,
+            duplicateBookId,
+            incomingFiles: fileUpdates.map((update) => ({ fileId: update.fileId, absolutePath: update.absolutePath })),
+            mergedByUserId: input.userId ?? null,
+          }),
       });
 
       if (!applied.moved) {
@@ -130,6 +143,7 @@ export class BookMoveExecutorService {
       );
 
       if (applied.mergedBookId != null) {
+        await this.coverStore.removeCoverDirectory(applied.mergedBookId).catch(() => undefined);
         return { status: 'merged', crossDevice, mergedBookId: applied.mergedBookId };
       }
       return { status: 'success', crossDevice };

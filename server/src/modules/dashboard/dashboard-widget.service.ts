@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { DEFAULT_LOCALE, type Locale } from '@bookorbit/types';
 
 import type {
   CurrentlyReadingWidgetData,
@@ -6,7 +7,9 @@ import type {
   DashboardWidgetBatchResult,
   DiversityScoreWidgetData,
   HighlightOfTheDayWidgetData,
+  HighlightsWidgetData,
   LibraryOverviewWidgetData,
+  LibraryVisibilityPlace,
   LongWaitWidgetData,
   MonthlyChallengeWidgetData,
   NeglectedGemsWidgetData,
@@ -19,11 +22,19 @@ import type {
   YearProjectionWidgetData,
 } from '@bookorbit/types';
 
-import type { RequestUser } from '../../common/types/request-user';
+import { serverText } from '../../common/i18n/server-text';
+import { principalCacheKey, type RequestUser } from '../../common/types/request-user';
 import { StatsCache } from '../../common/cache/stats-cache';
 import { mapWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { addDateKeyDays } from '../../common/utils/reading-daily-stats.utils';
+import { toTimeZoneStartOfDay } from '../../common/utils/timezone.utils';
 import { LibraryService } from '../library/library.service';
+import {
+  READING_ATTEMPT_CHANGED,
+  ReadingAttemptEventsService,
+  type ReadingAttemptChangedPayload,
+} from '../user-book-status/reading-attempt-events.service';
 import {
   buildDaysSeries,
   computeChallengeResult,
@@ -31,12 +42,15 @@ import {
   computeProjection,
   computeReadingDna,
   computeRhythm,
+  daysBetweenDateKeys,
   findEligibleChallenges,
-  formatDay,
   pickAnnotationIndex,
+  resolveReaderClock,
   selectChallenge,
+  type ReaderClock,
 } from './dashboard-widget.calculations';
 import { DashboardWidgetRepository } from './dashboard-widget.repository';
+import { withoutHiddenLibraries } from '../../common/library-visibility/library-visibility';
 import { dashboardLibraryScopeCacheKey, resolveDashboardLibraryIds } from './dashboard-library-scope';
 
 const DASHBOARD_LIVE_TTL_MS = 120_000;
@@ -44,28 +58,67 @@ const DASHBOARD_STALE_TTL_MS = 300_000;
 const DASHBOARD_CACHE_MAX_ENTRIES = 200;
 // Matches the scroller batch: enough to overlap query latency without flooding the connection pool.
 const WIDGET_QUERY_CONCURRENCY = 3;
+const RHYTHM_WINDOW_DAYS = 14;
+// computeProjection divides the recent window's totals by 30.
+const PROJECTION_RECENT_DAYS = 30;
 
 @Injectable()
-export class DashboardWidgetService {
+export class DashboardWidgetService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DashboardWidgetService.name);
-  private readonly liveCache = new StatsCache({ ttlMs: DASHBOARD_LIVE_TTL_MS, maxEntries: DASHBOARD_CACHE_MAX_ENTRIES });
-  private readonly staleCache = new StatsCache({ ttlMs: DASHBOARD_STALE_TTL_MS, maxEntries: DASHBOARD_CACHE_MAX_ENTRIES });
+  private readonly liveCache = new StatsCache({
+    ttlMs: DASHBOARD_LIVE_TTL_MS,
+    maxEntries: DASHBOARD_CACHE_MAX_ENTRIES,
+  });
+  private readonly staleCache = new StatsCache({
+    ttlMs: DASHBOARD_STALE_TTL_MS,
+    maxEntries: DASHBOARD_CACHE_MAX_ENTRIES,
+  });
 
   constructor(
     private readonly widgetRepo: DashboardWidgetRepository,
     private readonly libraryService: LibraryService,
+    private readonly readingAttemptEvents: ReadingAttemptEventsService,
   ) {}
+
+  private readonly onReadingAttemptChanged = ({ userId }: ReadingAttemptChangedPayload): void => {
+    if (userId === null) {
+      this.liveCache.clear();
+      this.staleCache.clear();
+    } else this.clearCacheForUser(userId);
+  };
+
+  onModuleInit(): void {
+    this.readingAttemptEvents.on(READING_ATTEMPT_CHANGED, this.onReadingAttemptChanged);
+  }
+
+  onModuleDestroy(): void {
+    this.readingAttemptEvents.removeListener(READING_ATTEMPT_CHANGED, this.onReadingAttemptChanged);
+  }
 
   private getContentFilters(user: RequestUser) {
     return user.isSuperuser ? undefined : user.contentFilters;
   }
 
   private cacheOwnerKey(user: RequestUser, libraryIds: readonly number[]): string {
-    return `${user.id}:${dashboardLibraryScopeCacheKey(libraryIds)}`;
+    return principalCacheKey(user, `${user.id}:${dashboardLibraryScopeCacheKey(libraryIds)}`);
   }
 
-  private async getLibraryIds(user: RequestUser): Promise<number[]> {
-    return resolveDashboardLibraryIds(await this.libraryService.findAccessibleLibraryIds(user), user);
+  private async getLibraryIds(user: RequestUser, place?: LibraryVisibilityPlace): Promise<number[]> {
+    const libraryIds = resolveDashboardLibraryIds(await this.libraryService.findAccessibleLibraryIds(user), user);
+    return place ? withoutHiddenLibraries(libraryIds, user, place) : libraryIds;
+  }
+
+  private readerClock(user: RequestUser): ReaderClock {
+    return resolveReaderClock(user.settings?.timezone);
+  }
+
+  /**
+   * Cache key for a widget whose answer depends on the reader's calendar. Carrying the local day
+   * means an entry cached before the reader's midnight is never served after it, and carrying the
+   * zone means a changed timezone setting is not answered from the old zone's entry.
+   */
+  private calendarCacheKey(widget: string, clock: ReaderClock): string {
+    return `${widget}:${clock.timeZone}:${clock.today}`;
   }
 
   clearCacheForUser(userId: number): void {
@@ -77,19 +130,45 @@ export class DashboardWidgetService {
   async getReadingGoal(user: RequestUser): Promise<ReadingGoalWidgetData> {
     const settings = user.settings as UserSettings | undefined;
     const goalBooks = settings?.dashboardConfig?.readingGoal ?? null;
-    const year = new Date().getUTCFullYear();
+    const { year } = this.readerClock(user);
 
-    const accessibleLibraryIds = await this.getLibraryIds(user);
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    // Keyed by the local year alone: attempt end dates are already local days, so the zone only
+    // decides which year it is.
+    this.readingAttemptEvents.flushPendingChanges(user.id);
     const completedBooks = await this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), `reading-goal-completed:${year}`, async () => {
       const contentFilters = this.getContentFilters(user);
-      return this.widgetRepo.getCompletedBooksThisYear(user.id, accessibleLibraryIds, contentFilters);
+      return this.widgetRepo.countCompletedBooks(user.id, accessibleLibraryIds, `${year}-01-01`, `${year + 1}-01-01`, contentFilters);
     });
 
     return { goalBooks, completedBooks, year };
   }
 
+  /** The books finished this local year with the local day each was finished, most recently finished first. */
+  async getFinishedThisYear(user: RequestUser, limit: number): Promise<Array<{ bookId: number; finishedOn: string }>> {
+    const { year } = this.readerClock(user);
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), `finished-this-year-days:${year}:${limit}`, async () => {
+      const contentFilters = this.getContentFilters(user);
+      return this.widgetRepo.getRecentlyFinishedBooks(user.id, accessibleLibraryIds, `${year}-01-01`, `${year + 1}-01-01`, limit, contentFilters);
+    });
+  }
+
+  /** The books finished this local year, most recently finished first. */
+  async getFinishedThisYearBookIds(user: RequestUser, limit: number): Promise<number[]> {
+    const { year } = this.readerClock(user);
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), `finished-this-year:${year}:${limit}`, async () => {
+      const contentFilters = this.getContentFilters(user);
+      return this.widgetRepo.getRecentlyFinishedBookIds(user.id, accessibleLibraryIds, `${year}-01-01`, `${year + 1}-01-01`, limit, contentFilters);
+    });
+  }
+
   async getCurrentlyReading(user: RequestUser): Promise<CurrentlyReadingWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'shelves');
+    this.readingAttemptEvents.flushPendingChanges(user.id);
     return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'currently-reading', async () => {
       const contentFilters = this.getContentFilters(user);
       return this.widgetRepo.getCurrentlyReadingBooks(user.id, accessibleLibraryIds, contentFilters);
@@ -97,81 +176,172 @@ export class DashboardWidgetService {
   }
 
   async getReadingStreak(user: RequestUser): Promise<ReadingStreakWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'reading-streak', async () => {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('reading-streak', clock), async () => {
       const contentFilters = this.getContentFilters(user);
-      return this.widgetRepo.getReadingStreak(user.id, accessibleLibraryIds, contentFilters);
+      return this.widgetRepo.getReadingStreak(user.id, accessibleLibraryIds, clock.today, contentFilters);
+    });
+  }
+
+  /** Minutes read per local day for the `days` days ending today, oldest first. */
+  async getReadingDays(user: RequestUser, days: number): Promise<{ startDate: string; minutes: number[] }> {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey(`reading-days:${days}`, clock), async () => {
+      const startDate = addDateKeyDays(clock.today, -(days - 1));
+      const rows = await this.widgetRepo.getReadingSecondsByDay(user.id, accessibleLibraryIds, startDate, clock.today);
+      const byDay = new Map(rows.map((row) => [row.day, row.seconds]));
+      const minutes: number[] = [];
+      for (let index = 0; index < days; index++) {
+        minutes.push(Math.round((byDay.get(addDateKeyDays(startDate, index)) ?? 0) / 60));
+      }
+      return { startDate, minutes };
+    });
+  }
+
+  /** The books read most in the four weeks around this day a year ago. */
+  async getYearAgoCandidates(user: RequestUser, limit: number) {
+    const accessibleLibraryIds = await this.getLibraryIds(user);
+    const clock = this.readerClock(user);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey(`year-ago:${limit}`, clock), async () => {
+      const centre = addDateKeyDays(clock.today, -365);
+      const start = toTimeZoneStartOfDay(addDateKeyDays(centre, -14), clock.timeZone);
+      const end = toTimeZoneStartOfDay(addDateKeyDays(centre, 15), clock.timeZone);
+      return this.widgetRepo.getTopBooksReadBetween(user.id, start, end, clock.timeZone, limit);
     });
   }
 
   async getLibraryOverview(user: RequestUser): Promise<LibraryOverviewWidgetData> {
     const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'library-overview', async () => {
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('library-overview', clock), async () => {
       const contentFilters = this.getContentFilters(user);
-      return this.widgetRepo.getLibraryOverview(accessibleLibraryIds, contentFilters);
+      const yearStart = toTimeZoneStartOfDay(`${clock.year}-01-01`, clock.timeZone);
+      return this.widgetRepo.getLibraryOverview(accessibleLibraryIds, yearStart, contentFilters);
     });
   }
 
   async getHighlightOfTheDay(user: RequestUser): Promise<HighlightOfTheDayWidgetData | null> {
     const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'highlight-of-the-day', async () => {
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('highlight-of-the-day', clock), async () => {
       const contentFilters = this.getContentFilters(user);
       const total = await this.widgetRepo.getAnnotationCount(user.id, accessibleLibraryIds, contentFilters);
       if (total === 0) return null;
-      const dateStr = formatDay(new Date());
-      const offset = pickAnnotationIndex(user.id, dateStr, total);
+      const offset = pickAnnotationIndex(user.id, clock.today, total);
       return this.widgetRepo.getAnnotationByOffset(user.id, accessibleLibraryIds, offset, contentFilters);
     });
   }
 
-  async getMonthlyChallenge(user: RequestUser): Promise<MonthlyChallengeWidgetData> {
+  async getHighlights(user: RequestUser): Promise<HighlightsWidgetData> {
     const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'monthly-challenge', async () => {
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('highlights', clock), async () => {
       const contentFilters = this.getContentFilters(user);
-      const today = new Date();
-      const year = today.getUTCFullYear();
-      const month = today.getUTCMonth() + 1;
-      const monthStart = new Date(Date.UTC(year, month - 1, 1));
-      const sixMonthsAgo = new Date(today);
-      sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
-
-      const data = await this.widgetRepo.getChallengePatternData(user.id, accessibleLibraryIds, monthStart, sixMonthsAgo, contentFilters);
-      const eligible = findEligibleChallenges(data);
-      const challengeType = selectChallenge(eligible, user.id, year, month);
-
-      const result = computeChallengeResult(
-        challengeType,
-        {
-          shortBooksCompleted: data.shortBooksCompleted,
-          newGenresRead: data.newGenresRead,
-          oldestInProgressFinished: data.oldestInProgressFinished,
-          maxStreakThisMonth: data.maxStreakThisMonth,
-          newAuthorsRead: data.newAuthorsRead,
-          pagesReadThisMonth: data.pagesReadThisMonth,
-        },
-        year,
-        month,
-      );
-
-      return { challengeType, ...result };
+      const total = await this.widgetRepo.getAnnotationCount(user.id, accessibleLibraryIds, contentFilters);
+      if (total === 0) return [];
+      const start = pickAnnotationIndex(user.id, clock.today, total);
+      const first = await this.widgetRepo.getAnnotationByOffset(user.id, accessibleLibraryIds, start, contentFilters);
+      if (!first) return [];
+      const others = await this.widgetRepo.getHighlightsFromOtherBooks(user.id, accessibleLibraryIds, first.bookId, 2, contentFilters);
+      const highlights = [first, ...others];
+      // An account with highlights in one or two books can still fill its remaining cards with
+      // other annotations. The offset scan never repeats the first row and skips selected rows.
+      for (let step = 1; highlights.length < Math.min(total, 3) && step < total; step++) {
+        const candidate = await this.widgetRepo.getAnnotationByOffset(user.id, accessibleLibraryIds, (start + step) % total, contentFilters);
+        if (
+          candidate &&
+          !highlights.some((item) => item.bookId === candidate.bookId && item.createdAt === candidate.createdAt && item.text === candidate.text)
+        ) {
+          highlights.push(candidate);
+        }
+      }
+      return highlights;
     });
   }
 
+  async getMonthlyChallenge(user: RequestUser, locale: Locale = DEFAULT_LOCALE): Promise<MonthlyChallengeWidgetData> {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    // The cache holds the English result and the language is applied on the way out, so one entry
+    // serves every language a user's clients ask in.
+    const challenge = await this.staleCache.get(
+      this.cacheOwnerKey(user, accessibleLibraryIds),
+      this.calendarCacheKey('monthly-challenge', clock),
+      async () => {
+        const contentFilters = this.getContentFilters(user);
+        const { year, month } = clock;
+        const monthStartDay = `${clock.today.slice(0, 7)}-01`;
+        const monthStart = toTimeZoneStartOfDay(monthStartDay, clock.timeZone);
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
+
+        const data = await this.widgetRepo.getChallengePatternData(
+          user.id,
+          accessibleLibraryIds,
+          { start: monthStart, startDay: monthStartDay, today: clock.today },
+          sixMonthsAgo,
+          contentFilters,
+        );
+        const eligible = findEligibleChallenges(data);
+        const challengeType = selectChallenge(eligible, user.id, year, month);
+
+        const result = computeChallengeResult(
+          challengeType,
+          {
+            shortBooksCompleted: data.shortBooksCompleted,
+            newGenresRead: data.newGenresRead,
+            oldestInProgressFinished: data.oldestInProgressFinished,
+            maxStreakThisMonth: data.maxStreakThisMonth,
+            newAuthorsRead: data.newAuthorsRead,
+            pagesReadThisMonth: data.pagesReadThisMonth,
+          },
+          year,
+          month,
+        );
+
+        return { challengeType, ...result };
+      },
+    );
+    return {
+      ...challenge,
+      title: serverText(locale, `monthlyChallenge.${challenge.challengeType}.title`, challenge.title),
+      description: serverText(locale, `monthlyChallenge.${challenge.challengeType}.description`, challenge.description),
+    };
+  }
+
   async getYearProjection(user: RequestUser): Promise<YearProjectionWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'year-projection', async () => {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('year-projection', clock), async () => {
       const contentFilters = this.getContentFilters(user);
-      const today = new Date();
-      const year = today.getUTCFullYear();
-      const yearStart = new Date(Date.UTC(year, 0, 1));
-      const thirtyDaysAgo = new Date(today);
-      thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+      const yearStartDay = `${clock.year}-01-01`;
+      const nextYearStartDay = `${clock.year + 1}-01-01`;
+      const recentStartDay = addDateKeyDays(clock.today, -(PROJECTION_RECENT_DAYS - 1));
 
-      const isLeapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-      const daysInYear = isLeapYear ? 366 : 365;
-      const dayOfYear = Math.ceil((today.getTime() - yearStart.getTime()) / (1000 * 60 * 60 * 24));
+      const daysInYear = daysBetweenDateKeys(yearStartDay, nextYearStartDay);
+      const dayOfYear = daysBetweenDateKeys(yearStartDay, clock.today) + 1;
 
-      const data = await this.widgetRepo.getYearProjectionData(user.id, accessibleLibraryIds, yearStart, thirtyDaysAgo, contentFilters);
+      const data = await this.widgetRepo.getYearProjectionData(
+        user.id,
+        accessibleLibraryIds,
+        {
+          yearStartDay,
+          nextYearStartDay,
+          recentStartDay,
+          recentEndDay: addDateKeyDays(clock.today, 1),
+          recentStart: toTimeZoneStartOfDay(recentStartDay, clock.timeZone),
+        },
+        contentFilters,
+      );
 
       return computeProjection({
         ...data,
@@ -184,6 +354,7 @@ export class DashboardWidgetService {
 
   async getNeglectedGems(user: RequestUser): Promise<NeglectedGemsWidgetData> {
     const accessibleLibraryIds = await this.getLibraryIds(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
     return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'neglected-gems', async () => {
       const contentFilters = this.getContentFilters(user);
       return this.widgetRepo.getNeglectedGems(user.id, accessibleLibraryIds, new Date(), contentFilters);
@@ -191,18 +362,21 @@ export class DashboardWidgetService {
   }
 
   async getReadingDna(user: RequestUser): Promise<ReadingDnaWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'reading-dna', async () => {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('reading-dna', clock), async () => {
       const contentFilters = this.getContentFilters(user);
       const since = new Date();
       since.setUTCMonth(since.getUTCMonth() - 6);
-      const data = await this.widgetRepo.getReadingDnaData(user.id, accessibleLibraryIds, since, contentFilters);
+      const data = await this.widgetRepo.getReadingDnaData(user.id, accessibleLibraryIds, since, clock.timeZone, contentFilters);
       return computeReadingDna(data.avgPageCount, data.uniqueGenres, data.totalBooks, data.readingDaysRatio, data.peakHour, data.avgPagesPerHour);
     });
   }
 
   async getLongWait(user: RequestUser): Promise<LongWaitWidgetData | null> {
     const accessibleLibraryIds = await this.getLibraryIds(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
     return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'long-wait', async () => {
       const contentFilters = this.getContentFilters(user);
       return this.widgetRepo.getLongWait(user.id, accessibleLibraryIds, new Date(), contentFilters);
@@ -210,7 +384,8 @@ export class DashboardWidgetService {
   }
 
   async getDiversityScore(user: RequestUser): Promise<DiversityScoreWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    this.readingAttemptEvents.flushPendingChanges(user.id);
     return this.staleCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'diversity-score', async () => {
       const contentFilters = this.getContentFilters(user);
       const data = await this.widgetRepo.getDiversityData(user.id, accessibleLibraryIds, contentFilters);
@@ -226,27 +401,26 @@ export class DashboardWidgetService {
   }
 
   async getReadingRhythm(user: RequestUser): Promise<ReadingRhythmWidgetData> {
-    const accessibleLibraryIds = await this.getLibraryIds(user);
-    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), 'reading-rhythm', async () => {
+    const accessibleLibraryIds = await this.getLibraryIds(user, 'stats');
+    const clock = this.readerClock(user);
+    this.readingAttemptEvents.flushPendingChanges(user.id);
+    return this.liveCache.get(this.cacheOwnerKey(user, accessibleLibraryIds), this.calendarCacheKey('reading-rhythm', clock), async () => {
       const contentFilters = this.getContentFilters(user);
-      const today = new Date();
-      const since = new Date(today);
-      since.setUTCDate(since.getUTCDate() - 13);
-      const sinceStr = formatDay(since);
-      const rawDays = await this.widgetRepo.getReadingRhythmData(user.id, accessibleLibraryIds, sinceStr, contentFilters);
-      const days = buildDaysSeries(rawDays, today, 14);
+      const since = addDateKeyDays(clock.today, -(RHYTHM_WINDOW_DAYS - 1));
+      const rawDays = await this.widgetRepo.getReadingRhythmData(user.id, accessibleLibraryIds, since, contentFilters);
+      const days = buildDaysSeries(rawDays, clock.today, RHYTHM_WINDOW_DAYS);
       const rhythm = computeRhythm(days);
       return { days, ...rhythm };
     });
   }
 
-  private readonly widgetLoaders: Record<WidgetType, (user: RequestUser) => Promise<DashboardWidgetBatchResult['data']>> = {
+  private readonly widgetLoaders: Record<WidgetType, (user: RequestUser, locale: Locale) => Promise<DashboardWidgetBatchResult['data']>> = {
     'reading-goal': (user) => this.getReadingGoal(user),
     'currently-reading': (user) => this.getCurrentlyReading(user),
     'reading-streak': (user) => this.getReadingStreak(user),
     'library-overview': (user) => this.getLibraryOverview(user),
     'highlight-of-the-day': (user) => this.getHighlightOfTheDay(user),
-    'monthly-challenge': (user) => this.getMonthlyChallenge(user),
+    'monthly-challenge': (user, locale) => this.getMonthlyChallenge(user, locale),
     'year-projection': (user) => this.getYearProjection(user),
     'neglected-gems': (user) => this.getNeglectedGems(user),
     'reading-dna': (user) => this.getReadingDna(user),
@@ -263,14 +437,14 @@ export class DashboardWidgetService {
    * retry, so a request lost in that crowd leaves a tile stuck on "Failed to load" for the life of
    * the page. Failures are reported per widget rather than failing the batch.
    */
-  async getWidgets(types: readonly WidgetType[], user: RequestUser): Promise<DashboardWidgetBatchResponse> {
+  async getWidgets(types: readonly WidgetType[], user: RequestUser, locale: Locale = DEFAULT_LOCALE): Promise<DashboardWidgetBatchResponse> {
     const startedAt = Date.now();
     this.logger.debug(`[dashboard.widget_batch] [start] userId=${user.id} widgetCount=${types.length} - widget batch started`);
 
     const items = await mapWithConcurrency(types, WIDGET_QUERY_CONCURRENCY, async (type): Promise<DashboardWidgetBatchResult> => {
       const widgetStartedAt = Date.now();
       try {
-        return { type, data: await this.widgetLoaders[type](user), failed: false };
+        return { type, data: await this.widgetLoaders[type](user, locale), failed: false };
       } catch (error) {
         const errorClass = error instanceof Error ? error.constructor.name : typeof error;
         const message = sanitizeLogValue(error instanceof Error ? error.message : error);

@@ -169,7 +169,7 @@ describe('Migration Audiobookshelf live and backup (e2e)', { timeout: 300_000 },
     expect(started.statusCode).toBe(201);
     expect(started.body.state).toBe('running');
     const finished = await waitForMigrationToFinish(ctx, started.body.id);
-    expect(finished.progress.run.state).toBe('completed');
+    expect(finished.progress.run).toMatchObject({ state: 'completed', errorMessage: null });
     expect(finished.report.run.state).toBe('completed');
     expect(finished.report.totals.failed).toBe(0);
     expect(finished.report.totals.unresolved).toBeGreaterThanOrEqual(1);
@@ -339,6 +339,19 @@ describe('Migration Audiobookshelf live and backup (e2e)', { timeout: 300_000 },
     const glassAudio = audioRows.find((row) => row.userId === scenario.targetUsers.maya.id && row.bookId === scenario.targetBooks.glass.bookId);
     expect(glassAudio?.positionSeconds).toBeCloseTo(15, 0);
 
+    const [glassMetadata] = await ctx.db
+      .select({ chapters: schema.bookMetadata.chapters, chaptersSource: schema.bookMetadata.chaptersSource })
+      .from(schema.bookMetadata)
+      .where(eq(schema.bookMetadata.bookId, scenario.targetBooks.glass.bookId));
+    expect(glassMetadata).toEqual({
+      chapters: [
+        { title: 'Prologue: The Breakwater', startMs: 0 },
+        { title: 'Chapter 1: Low Tide', startMs: 12_500 },
+        { title: 'Chapter 2: Open Water', startMs: 60_000 },
+      ],
+      chaptersSource: 'migration',
+    });
+
     const readingRows = await ctx.db
       .select()
       .from(schema.readingProgress)
@@ -367,8 +380,9 @@ describe('Migration Audiobookshelf live and backup (e2e)', { timeout: 300_000 },
     const theoMap = statusRows.find((row) => row.userId === scenario.targetUsers.theo.id && row.bookId === scenario.targetBooks.map.bookId);
     const theoBrass = statusRows.find((row) => row.userId === scenario.targetUsers.theo.id && row.bookId === scenario.targetBooks.brass.bookId);
     expect(theoMap).toMatchObject({ status: 'read', source: 'manual' });
+    expect(theoMap?.startedAt?.toISOString()).toBe(scenario.expected.theoMapStartedAt);
     expect(theoMap?.finishedAt?.toISOString()).toBe(scenario.expected.theoMapFinishedAt);
-    expect(theoBrass).toMatchObject({ status: 'read', source: 'manual' });
+    expect(theoBrass).toMatchObject({ status: 'read', source: 'manual', startedAt: null });
     expect(theoBrass?.finishedAt?.toISOString()).toBe(scenario.expected.theoBrassFinishedAt);
 
     const bookmarkRows = await ctx.db.select().from(schema.bookmarks).where(eq(schema.bookmarks.userId, scenario.targetUsers.maya.id));

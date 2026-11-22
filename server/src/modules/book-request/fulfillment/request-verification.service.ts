@@ -7,12 +7,14 @@ import {
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
+import { access } from 'fs/promises';
 import { basename } from 'path';
 import { DEFAULT_BOOK_REQUEST_AUTOMATION_SETTINGS, NotificationType, UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES } from '@bookorbit/types';
 import type {
   BookDockMetadata,
   BookRequestStatus,
   BookRequestReview,
+  BookRequestReviewEdition,
   BookRequestReviewFile,
   BookRequestVerificationReason,
   BookRequestVerificationRow,
@@ -20,6 +22,12 @@ import type {
 } from '@bookorbit/types';
 
 import { normalizeMetadataIsbn } from '../../../common/text-match/isbn-normalize';
+import {
+  inferSeriesPositionFromTitle,
+  parseSeriesPosition,
+  sameSeriesName,
+  sameSeriesPosition,
+} from '../../../common/text-match/series-position-match';
 import { mainTitlePart, symmetricTitleSimilarity } from '../../../common/text-match/title-match';
 import type { RequestUser } from '../../../common/types/request-user';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
@@ -33,6 +41,7 @@ import { BookRequestNotifier } from '../book-request-notifier.service';
 import { BookRequestRepository } from '../book-request.repository';
 import { BookRequestDownloadRepository } from './book-request-download.repository';
 import { RequestAutomationSettingsService } from './request-automation-settings.service';
+import { RequestCompanionService } from './request-companion.service';
 import { RequestFulfillmentService } from './request-fulfillment.service';
 
 /**
@@ -45,6 +54,9 @@ import { RequestFulfillmentService } from './request-fulfillment.service';
  * metadata providers and cannot be guessed from here. This is the value they start from.
  */
 const DEFAULT_VERIFICATION_THRESHOLD = DEFAULT_BOOK_REQUEST_AUTOMATION_SETTINGS.verificationThreshold;
+
+/** Prose for the stored reason and the notification. The drawer reads `heldOnRequest` instead. */
+const HELD_ON_REQUEST_REASON = 'the release was sent to be reviewed before it is filed';
 
 const TITLE_WEIGHT = 0.7;
 const AUTHOR_WEIGHT = 0.3;
@@ -77,6 +89,8 @@ export interface VerificationOutcome {
 @Injectable()
 export class RequestVerificationService implements OnModuleInit {
   private readonly logger = new Logger(RequestVerificationService.name);
+  /** The tail of each pair's filing turns, so the two halves never file at the same time. */
+  private readonly pairFilings = new Map<number, Promise<void>>();
 
   constructor(
     private readonly events: BookDockEventsService,
@@ -89,6 +103,7 @@ export class RequestVerificationService implements OnModuleInit {
     private readonly notifier: BookRequestNotifier,
     private readonly gateway: BookRequestGateway,
     private readonly settings: RequestAutomationSettingsService,
+    private readonly companions: RequestCompanionService,
   ) {}
 
   onModuleInit(): void {
@@ -113,14 +128,19 @@ export class RequestVerificationService implements OnModuleInit {
 
     const row = await this.dockRepo.findById(fileId);
     if (!row) {
-      await this.fulfillment.failDownload(download, 'The Book Dock entry for this download disappeared');
+      await this.fulfillment.failDownload(download, 'The Library Dock entry for this download disappeared');
       return;
     }
 
     const { verificationEnabled, verificationThreshold } = await this.settings.get();
     // Off means the operator has chosen to trust the grab: the import goes straight into the
-    // target library without waiting on a score, and nothing is ever held for a human to look at.
+    // target library without waiting on a score, and nothing is held for a human to look at
+    // unless the person who sent the release asked to look at it.
     if (!verificationEnabled) {
+      if (download.holdForReview) {
+        await this.holdOnRequest(download, joined.request, fileId);
+        return;
+      }
       this.logger.log(
         `[book_request.verify] [end] requestId=${joined.request.id} dockFileId=${fileId} enabled=false - verification is off, filing the import as grabbed`,
       );
@@ -137,8 +157,22 @@ export class RequestVerificationService implements OnModuleInit {
       await this.holdForReview(download, joined.request, outcome);
       return;
     }
+    // After the score rather than instead of it: a release that also failed verification is held
+    // for that reason, which says more than "you asked".
+    if (download.holdForReview) {
+      await this.holdOnRequest(download, joined.request, fileId);
+      return;
+    }
 
     await this.finalize(download, joined.request, fileId);
+  }
+
+  /** The sender's own request to look first outranks a passing score and verification being off. */
+  private async holdOnRequest(download: BookRequestDownloadRow, request: BookRequestRow, fileId: number): Promise<void> {
+    this.logger.log(
+      `[book_request.verify] [end] requestId=${request.id} dockFileId=${fileId} holdForReview=true - held for the review the sender asked for`,
+    );
+    await this.fulfillment.holdForReview(download, request, HELD_ON_REQUEST_REASON);
   }
 
   private async finalize(download: BookRequestDownloadRow, request: BookRequestRow, fileId: number): Promise<void> {
@@ -156,16 +190,39 @@ export class RequestVerificationService implements OnModuleInit {
     request: BookRequestRow,
     fileId: number,
   ): Promise<{ ok: true; bookId: number | null } | { ok: false; reason: string }> {
+    // The two halves of a pair can finish within moments of each other. Filed side by side, each
+    // would find the other not yet landed and both would become books of their own; one after the
+    // other, the second finds the first's book and joins it.
+    return this.serializeByPair(request, async () => {
+      // Read again inside the turn: the half that filed first may have just pointed this one at its book.
+      const current = (await this.requests.findById(request.id))?.request ?? request;
+      return this.fileIntoLibraryNow(download, current, fileId);
+    });
+  }
+
+  private async fileIntoLibraryNow(
+    download: BookRequestDownloadRow,
+    request: BookRequestRow,
+    fileId: number,
+  ): Promise<{ ok: true; bookId: number | null } | { ok: false; reason: string }> {
+    const join = await this.companions.resolveJoin(request);
+
     // A request with no folder still has a library; take its first folder rather than falling
     // through to the Book Dock's global default, which is usually unset and never the point here.
-    const folderId = request.targetFolderId ?? (await this.resolveFolder(request.targetLibraryId));
+    const folderId = join?.folderId ?? request.targetFolderId ?? (await this.resolveFolder(request.targetLibraryId));
     if (folderId === null) return { ok: false, reason: 'the destination library has no folder to file the book into' };
 
     const result = await this.finalizeService.finalizeManagedFile(fileId, {
-      libraryId: request.targetLibraryId ?? undefined,
+      libraryId: join?.libraryId ?? request.targetLibraryId ?? undefined,
       folderId,
+      ...(join ? { joinBook: join.joinBook } : {}),
     });
-    if (!result.success) return { ok: false, reason: result.message ?? 'the Book Dock could not file this book' };
+    if (!result.success) return { ok: false, reason: result.message ?? 'the Library Dock could not file this book' };
+    if (join) {
+      this.logger.log(
+        `[book_request.join_book] [end] requestId=${request.id} bookId=${join.joinBook.bookId} landedBookId=${result.bookId ?? 'none'} - filed as another format of an existing book`,
+      );
+    }
 
     // Conditional, like every other write in the pipeline. Scoring an import and handing it to the
     // Book Dock takes long enough for somebody to cancel the request underneath it, and an
@@ -200,9 +257,32 @@ export class RequestVerificationService implements OnModuleInit {
       message: `"${request.title}" is ready`,
       meta: { requestId: request.id, bookId: result.bookId ?? null },
     });
+    if (result.bookId != null) await this.companions.handOn(request, result.bookId);
     this.gateway.emitChanged();
 
     return { ok: true, bookId: result.bookId ?? null };
+  }
+
+  /**
+   * Runs one filing at a time per pair, keyed on the pair rather than on either request so both
+   * halves queue behind the same turn. A request made on its own is never held up by anything.
+   */
+  private async serializeByPair<T>(request: BookRequestRow, run: () => Promise<T>): Promise<T> {
+    if (request.companionRequestId === null) return run();
+    const key = Math.min(request.id, request.companionRequestId);
+
+    const previous = this.pairFilings.get(key) ?? Promise.resolve();
+    const turn = previous.then(run, run);
+    const settled = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.pairFilings.set(key, settled);
+    try {
+      return await turn;
+    } finally {
+      if (this.pairFilings.get(key) === settled) this.pairFilings.delete(key);
+    }
   }
 
   /**
@@ -214,15 +294,29 @@ export class RequestVerificationService implements OnModuleInit {
    * that sent them there.
    */
   async getReview(requestId: number): Promise<BookRequestReview> {
-    const { request, fileId } = await this.loadHeld(requestId);
+    const { request, download, fileId } = await this.loadHeld(requestId);
 
     const row = fileId === null ? undefined : await this.dockRepo.findById(fileId);
     const canFile = (request.targetFolderId ?? (await this.resolveFolder(request.targetLibraryId))) !== null;
 
+    const heldOnRequest = download?.holdForReview ?? false;
+    const releaseInfoUrl = download?.releaseInfoUrl ?? null;
+
     // Filing or discarding the entry by hand empties both pointers to it, which leaves the request
     // held over a file that is not there any more. Saying so is the only useful thing left.
     if (!row) {
-      return { requestId, bookDockFileId: null, verification: null, files: [], totalSizeBytes: null, canFile: false };
+      return {
+        requestId,
+        bookDockFileId: null,
+        verification: null,
+        files: [],
+        totalSizeBytes: null,
+        canFile: false,
+        heldOnRequest,
+        releaseInfoUrl,
+        edition: null,
+        hasCover: false,
+      };
     }
 
     const [unitFiles, settings] = await Promise.all([
@@ -260,7 +354,28 @@ export class RequestVerificationService implements OnModuleInit {
       files,
       totalSizeBytes: sized.length ? sized.reduce((total, file) => total + (file.fileSize ?? 0), 0) : null,
       canFile,
+      heldOnRequest,
+      releaseInfoUrl,
+      edition: editionFacts(row.embeddedMetadata),
+      hasCover: Boolean(row.coverPath),
     };
+  }
+
+  /**
+   * Where the cover found in a held import is on disk. Read through the request rather than the
+   * Book Dock's own route, because the person reviewing an import need not hold Book Dock
+   * permissions; the request route has already decided they may look at this one.
+   */
+  async getReviewCoverPath(requestId: number): Promise<string> {
+    const { fileId } = await this.loadHeld(requestId);
+    const row = fileId === null ? undefined : await this.dockRepo.findById(fileId);
+    if (!row?.coverPath) throw new NotFoundException('This import has no cover');
+    try {
+      await access(row.coverPath);
+    } catch {
+      throw new NotFoundException('This import has no cover');
+    }
+    return row.coverPath;
   }
 
   /**
@@ -271,7 +386,7 @@ export class RequestVerificationService implements OnModuleInit {
   async fileHeldImport(requestId: number, user: RequestUser): Promise<void> {
     const { request, download, fileId } = await this.loadHeld(requestId);
     if (fileId === null || download === null) {
-      throw new BadRequestException('The Book Dock entry this request was held over is gone, so there is nothing left to file');
+      throw new BadRequestException('The Library Dock entry this request was held over is gone, so there is nothing left to file');
     }
 
     const filed = await this.fileIntoLibrary(download, request, fileId);
@@ -315,7 +430,7 @@ export class RequestVerificationService implements OnModuleInit {
     }
 
     const claimedDownload = download
-      ? await this.downloads.updateIf(download.id, ['needs_review'], { status: 'failed', errorMessage: reason })
+      ? await this.downloads.updateIf(download.id, ['needs_review'], { status: 'failed', errorMessage: reason, failureCode: 'discarded' })
       : undefined;
     if (download && !claimedDownload) {
       await this.requests.updateIf(requestId, ['failed'], {
@@ -410,7 +525,7 @@ export class RequestVerificationService implements OnModuleInit {
  * gained a "Book 1 (Unabridged)" suffix, not that something somewhere came to 65.
  */
 export function verifyAgainstRequest(
-  request: Pick<BookRequestRow, 'title' | 'subtitle' | 'authors' | 'isbn13'>,
+  request: Pick<BookRequestRow, 'title' | 'subtitle' | 'authors' | 'seriesName' | 'seriesIndex' | 'isbn13'>,
   fetched: BookDockMetadata | null,
   embedded: BookDockMetadata | null,
   threshold: number = DEFAULT_VERIFICATION_THRESHOLD,
@@ -453,6 +568,17 @@ export function verifyAgainstRequest(
 
   const isbnVerdict: BookRequestVerificationVerdict = requestedIsbn && importedIsbn ? 'mismatch' : 'unknown';
 
+  const importedSeriesIndex = resolveImportedSeriesIndex(request.seriesName, importedTitle, fetched, embedded);
+  if (request.seriesIndex !== null && importedSeriesIndex !== null && !sameSeriesPosition(request.seriesIndex, importedSeriesIndex)) {
+    return {
+      score: 0,
+      passed: false,
+      reason: `imported series position ${importedSeriesIndex} does not match requested position ${request.seriesIndex}`,
+      code: 'below_threshold',
+      rows: rows(isbnVerdict),
+    };
+  }
+
   if (!importedTitle) {
     return { score: 0, passed: false, reason: 'the imported file has no readable title to compare', code: 'no_title', rows: rows(isbnVerdict) };
   }
@@ -484,6 +610,35 @@ export function verifyAgainstRequest(
   };
 }
 
+function resolveImportedSeriesIndex(
+  requestedSeriesName: string | null,
+  importedTitle: string,
+  fetched: BookDockMetadata | null,
+  embedded: BookDockMetadata | null,
+): number | null {
+  for (const metadata of [fetched, embedded]) {
+    if (!metadata) continue;
+
+    if (requestedSeriesName) {
+      const membership = metadata.seriesMemberships?.find((item) => sameSeriesName(item.seriesName, requestedSeriesName));
+      const membershipIndex = parseSeriesPosition(membership?.seriesIndex);
+      if (membershipIndex !== null) return membershipIndex;
+
+      if (sameSeriesName(metadata.seriesName, requestedSeriesName)) {
+        const primaryIndex = parseSeriesPosition(metadata.seriesIndex);
+        if (primaryIndex !== null) return primaryIndex;
+      }
+
+      if (metadata.seriesName || metadata.seriesMemberships?.length) continue;
+    }
+
+    const unnamedIndex = parseSeriesPosition(metadata.seriesIndex);
+    if (unnamedIndex !== null) return unnamedIndex;
+  }
+
+  return inferSeriesPositionFromTitle(importedTitle, requestedSeriesName);
+}
+
 /**
  * The bar a single field has to clear to read as agreement. Deliberately looser than exact: a
  * subtitle the request omitted, or "Herbert, Frank" against "Frank Herbert", is the same book by
@@ -503,6 +658,33 @@ function joinTitle(title: string, subtitle: string | null): string {
  * The unit's own directory name, which is what a release names after the book. Only offered for a
  * multi-file unit: a loose single file has no directory that means anything.
  */
+/** Null when the file states none of it, so the drawer draws no empty section. */
+function editionFacts(metadata: BookDockMetadata | null): BookRequestReviewEdition | null {
+  if (!metadata) return null;
+  const facts: BookRequestReviewEdition = {
+    publisher: nonEmpty(metadata.publisher),
+    publishedDate: nonEmpty(metadata.publishedDate) ?? (isCount(metadata.publishedYear) ? String(metadata.publishedYear) : null),
+    language: nonEmpty(metadata.language),
+    pageCount: isCount(metadata.pageCount) ? metadata.pageCount : null,
+    isbn10: nonEmpty(metadata.isbn10),
+    narrators: Array.isArray(metadata.narrators) ? metadata.narrators.map((narrator) => nonEmpty(narrator)).filter((name) => name !== null) : [],
+    durationSeconds: isCount(metadata.durationSeconds) ? metadata.durationSeconds : null,
+    abridged: typeof metadata.abridged === 'boolean' ? metadata.abridged : null,
+    chapterCount: Array.isArray(metadata.chapters) && metadata.chapters.length > 0 ? metadata.chapters.length : null,
+  };
+  const stated = Object.values(facts).some((value) => (Array.isArray(value) ? value.length > 0 : value !== null));
+  return stated ? facts : null;
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed === '' ? null : trimmed;
+}
+
+function isCount(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
 function unitTitleFallback(row: { unitDirectory: string | null }): string | null {
   if (!row.unitDirectory) return null;
   const name = basename(row.unitDirectory)

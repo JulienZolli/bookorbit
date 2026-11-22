@@ -15,6 +15,7 @@ import * as schema from '../../../src/db/schema';
 import { bookFiles, books, fileWriteLog, libraries, libraryFolders, scanJobs } from '../../../src/db/schema';
 import { GlobalExceptionFilter } from '../../../src/common/filters/http-exception.filter';
 import { createMetadataWriteFixtureRoot, type MetadataWriteFixtureRoot } from './metadata-write-fixture-builder';
+import { allowAppAttest } from '../allow-app-attest';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -71,6 +72,8 @@ export type LibraryFileWritePatch = {
   fileWritePdfMaxFileSizeMb?: number;
   fileWriteCbxEnabled?: boolean;
   fileWriteCbxMaxFileSizeMb?: number;
+  fileWriteAudioEnabled?: boolean;
+  fileWriteAllFiles?: boolean;
 };
 
 export function authHeader(token: string): Record<string, string> {
@@ -89,9 +92,11 @@ export async function createMetadataWriteE2EContext(): Promise<MetadataWriteE2EC
   process.env.FILE_WRITE_DEBOUNCE_MS = '25';
   process.env.FILE_WRITE_MAX_CONCURRENT_WRITES = '1';
 
-  const moduleFixture = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+  const moduleFixture = await allowAppAttest(
+    Test.createTestingModule({
+      imports: [AppModule],
+    }),
+  ).compile();
 
   const app = moduleFixture.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
   app.setGlobalPrefix('api/v1');
@@ -141,9 +146,11 @@ export async function createLibraryWithFolder(
     fileWriteCbxMaxFileSizeMb?: number;
     fileWriteEpubMaxFileSizeMb?: number;
     fileWritePdfMaxFileSizeMb?: number;
+    /** Where the library folder is created instead of the fixture's books folder, such as another filesystem. */
+    basePath?: string;
   } = {},
 ): Promise<CreatedLibrary> {
-  const folderPath = `${ctx.fixture.booksPath}/library-${randomUUID()}`;
+  const folderPath = `${options.basePath ?? ctx.fixture.booksPath}/library-${randomUUID()}`;
   await mkdir(folderPath, { recursive: true });
 
   const [library] = await ctx.db
@@ -196,6 +203,8 @@ export async function setLibraryFileWriteSettings(db: Db, libraryId: number, pat
   if (patch.fileWritePdfMaxFileSizeMb !== undefined) updateValues.fileWritePdfMaxFileSizeMb = patch.fileWritePdfMaxFileSizeMb;
   if (patch.fileWriteCbxEnabled !== undefined) updateValues.fileWriteCbxEnabled = patch.fileWriteCbxEnabled;
   if (patch.fileWriteCbxMaxFileSizeMb !== undefined) updateValues.fileWriteCbxMaxFileSizeMb = patch.fileWriteCbxMaxFileSizeMb;
+  if (patch.fileWriteAudioEnabled !== undefined) updateValues.fileWriteAudioEnabled = patch.fileWriteAudioEnabled;
+  if (patch.fileWriteAllFiles !== undefined) updateValues.fileWriteAllFiles = patch.fileWriteAllFiles;
 
   if (Object.keys(updateValues).length > 0) {
     await db.update(libraries).set(updateValues).where(eq(libraries.id, libraryId));

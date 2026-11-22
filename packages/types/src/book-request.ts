@@ -1,8 +1,29 @@
-import { CONCRETE_BOOK_MEDIA_KINDS, type ConcreteBookMediaKind } from "./book";
 import type { BookRequestDownloadItem } from "./download-client";
+import { AUDIO_FORMAT_LIST, COMIC_FORMAT_LIST, EBOOK_FORMAT_LIST } from "./book";
 
-export const BOOK_REQUEST_MEDIA_KINDS = CONCRETE_BOOK_MEDIA_KINDS;
-export type BookRequestMediaKind = ConcreteBookMediaKind;
+/** What a book can be requested as: an ebook or an audiobook, alone or as a pair. */
+export const BOOK_REQUEST_MEDIA_KINDS = ["ebook", "audiobook"] as const;
+export type BookRequestMediaKind = (typeof BOOK_REQUEST_MEDIA_KINDS)[number];
+
+/** The `ebook` API kind covers readable books and comics; audio stays a separate request. */
+export const BOOK_REQUEST_FORMATS_BY_MEDIA_KIND: Readonly<Record<BookRequestMediaKind, readonly string[]>> = {
+  ebook: [...EBOOK_FORMAT_LIST, ...COMIC_FORMAT_LIST],
+  audiobook: AUDIO_FORMAT_LIST,
+};
+
+/**
+ * A medium requests no longer offer, still carried by requests made before it was retired. Those
+ * rows keep loading, and can be cancelled, hidden or deleted; nothing creates one any more, and
+ * nothing fetches a release for one.
+ */
+export type LegacyBookRequestMediaKind = "comic";
+
+/** Every medium a stored request can carry, including the retired one. */
+export type StoredBookRequestMediaKind = BookRequestMediaKind | LegacyBookRequestMediaKind;
+
+export function isBookRequestMediaKind(value: string): value is BookRequestMediaKind {
+  return (BOOK_REQUEST_MEDIA_KINDS as readonly string[]).includes(value);
+}
 
 /** Bounds exact indexer passes before the title-and-author fallback. */
 export const MAX_BOOK_REQUEST_SEARCH_ISBNS = 8;
@@ -250,6 +271,11 @@ export const BOOK_REQUEST_HANDBACK_CODES = [
    * so it stops holding the dedupe claim on a work nobody is actually fetching.
    */
   "ABANDONED",
+  /**
+   * Not automation either: the download finished, but BookOrbit could not read what it left on
+   * disk, so nothing was imported. Carries `path`, the location BookOrbit tried to read.
+   */
+  "DOWNLOAD_UNREADABLE",
 ] as const;
 
 export type BookRequestHandbackCode = (typeof BOOK_REQUEST_HANDBACK_CODES)[number];
@@ -289,6 +315,10 @@ export const BOOK_REQUEST_SUBMIT_ERROR_CODES = [
   "SUBMIT_ON_BEHALF_FORBIDDEN",
   /** The named requester does not exist, or is not an account that could file this itself. */
   "SUBMIT_ON_BEHALF_UNKNOWN_USER",
+  /** The book a request was asked to join is gone, or sits in a library the requester cannot reach. */
+  "SUBMIT_TARGET_BOOK_NOT_FOUND",
+  /** The book a request was asked to join already has the requested medium. Carries `mediaKind`. */
+  "SUBMIT_TARGET_BOOK_HAS_MEDIUM",
 ] as const;
 
 export type BookRequestSubmitErrorCode = (typeof BOOK_REQUEST_SUBMIT_ERROR_CODES)[number];
@@ -402,7 +432,8 @@ export interface BookRequestItem extends BookRequestWorkSnapshot {
   userId: number;
   requesterUsername: string;
   requesterName: string;
-  mediaKind: BookRequestMediaKind;
+  /** A retired medium only on a request made before it was retired; see `LegacyBookRequestMediaKind`. */
+  mediaKind: StoredBookRequestMediaKind;
   status: BookRequestStatus;
   preferredFormats: string[];
   note: string | null;
@@ -411,6 +442,8 @@ export interface BookRequestItem extends BookRequestWorkSnapshot {
   targetFolderId: number | null;
   decidedByUserId: number | null;
   decidedByUsername: string | null;
+  /** The decider's display name. Null when nobody has decided, or when that account is gone. */
+  decidedByName: string | null;
   decidedAt: string | null;
   decisionNote: string | null;
   matchedBookId: number | null;
@@ -429,7 +462,8 @@ export interface BookRequestItem extends BookRequestWorkSnapshot {
   statusReason: string | null;
   /**
    * Set only where a failure has been classified, which today means automation handing a request
-   * back. Null elsewhere, and the UI falls back to `statusReason` when it is.
+   * back or a finished download that could not be read. Null elsewhere, and the UI falls back to
+   * `statusReason` when it is.
    */
   failureCode: BookRequestHandbackCode | null;
   failureMeta: BookRequestFailureMeta | null;
@@ -438,8 +472,29 @@ export interface BookRequestItem extends BookRequestWorkSnapshot {
   download: BookRequestDownloadItem | null;
   /** Whether the signed-in user has hidden this from their own list. Never shared between users. */
   dismissed: boolean;
+  /**
+   * The other half of an ebook and audiobook pair. Set on both halves, so either one names the
+   * other; null on every request made on its own.
+   */
+  companionRequestId: number | null;
+  /**
+   * The book this request's files join when they arrive, rather than becoming a book of their own.
+   * Set when a missing format was requested from a book's page, and on the second half of a pair
+   * once the first half has landed.
+   */
+  targetBookId: number | null;
+  /**
+   * The companion itself, present only on a list asked for with `groupPairs`, and only when the
+   * caller can see it. A pair is then one entry, led by its ebook half.
+   */
+  companion?: BookRequestItem | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The medium on the other side of a pair. */
+export function bookRequestCompanionKind(mediaKind: BookRequestMediaKind): BookRequestMediaKind {
+  return mediaKind === "ebook" ? "audiobook" : "ebook";
 }
 
 export interface BookRequestPage {
@@ -471,6 +526,39 @@ export interface CreateBookRequestPayload extends Partial<BookRequestWorkSnapsho
    * ordinary case: the caller is the requester.
    */
   userId?: number;
+  /**
+   * The book the arriving files should join, for a format that book is missing. Advertised by the
+   * `book-request-pairs` server feature.
+   */
+  targetBookId?: number;
+}
+
+/** What one half of a pair may set for itself; everything else about the work is shared. */
+export interface BookRequestPairHalfPayload {
+  targetLibraryId?: number | null;
+  targetFolderId?: number | null;
+  preferredFormats?: string[];
+  /** The cover this half shows, when it differs from the pair's: audiobook art is square. */
+  coverUrl?: string | null;
+}
+
+/**
+ * An ebook and an audiobook of one work, asked for together. Each half is submitted under the same
+ * rules a single request is, so either one may join a request that already exists or arrive
+ * already available, and the two are linked whichever way each one went.
+ */
+export interface CreateBookRequestPairPayload extends Partial<BookRequestWorkSnapshot> {
+  title: string;
+  note?: string | null;
+  selfServe?: boolean;
+  userId?: number;
+  ebook?: BookRequestPairHalfPayload;
+  audiobook?: BookRequestPairHalfPayload;
+}
+
+export interface BookRequestPairSubmitResult {
+  ebook: BookRequestSubmitResult;
+  audiobook: BookRequestSubmitResult;
 }
 
 /**
@@ -570,4 +658,73 @@ export interface BookRequestBulkFailure {
 export interface BookRequestBulkResult {
   updated: BookRequestItem[];
   failed: BookRequestBulkFailure[];
+  /**
+   * Requests the action took off the caller's list entirely (a deletion, or leaving a request
+   * somebody else made), which have no item left to report. Absent on the actions that existed
+   * before it, so a released client that decodes only the two lists above is unaffected.
+   */
+  removed?: number[];
+}
+
+/**
+ * The sections a request list can be narrowed to, as the page names them rather than as the
+ * pipeline does. `hidden` holds only the rows the viewer hid; every other view leaves them out.
+ * Optional on the list routes: a caller that sends none gets the list it always got.
+ */
+export const BOOK_REQUEST_LIST_VIEWS = ["needs_action", "in_progress", "finished", "closed", "hidden"] as const;
+export type BookRequestListView = (typeof BOOK_REQUEST_LIST_VIEWS)[number];
+
+/** The statuses behind each view other than `hidden`, shared so the counts and the list agree. */
+export const BOOK_REQUEST_VIEW_STATUSES: Record<Exclude<BookRequestListView, "hidden">, readonly BookRequestStatus[]> = {
+  needs_action: ["pending", "approved", "needs_review", "failed"],
+  in_progress: ["searching", "grabbed", "downloading", "importing"],
+  finished: ["available"],
+  closed: ["rejected", "cancelled"],
+};
+
+/** The longest list search the routes accept. */
+export const BOOK_REQUEST_SEARCH_MAX_LENGTH = 200;
+
+/**
+ * Row counts for one list under the filters it was asked with, one per view. `active` is every row
+ * that is not hidden. `awaitingManualPick` counts the approved rows automation handed back because
+ * automatic grabbing is off, which is what the list's banner reports instead of every row repeating it.
+ */
+export interface BookRequestViewCounts {
+  active: number;
+  needs_action: number;
+  in_progress: number;
+  finished: number;
+  closed: number;
+  hidden: number;
+  awaitingManualPick: number;
+}
+
+/** The most requests "select all matching" will gather; a larger match is reported as truncated. */
+export const BOOK_REQUEST_SELECT_ALL_LIMIT = 5000;
+
+/**
+ * One request matched by a list's filters, with just enough to decide which bulk actions reach it.
+ * `rowId` is the list row it sits in: its own id, or the id of the ebook half a pair folds into.
+ */
+export interface BookRequestSelectionEntry {
+  id: number;
+  rowId: number;
+  title: string;
+  mediaKind: StoredBookRequestMediaKind;
+  status: BookRequestStatus;
+  userId: number;
+  fulfillerUserId: number | null;
+  /** Hidden by the caller. */
+  dismissed: boolean;
+  /** The caller follows this request without having made it. */
+  subscribed: boolean;
+}
+
+export interface BookRequestSelection {
+  items: BookRequestSelectionEntry[];
+  /** Rows (not requests) the filters match, the same figure the list reports as its total. */
+  totalRows: number;
+  /** More matched than `BOOK_REQUEST_SELECT_ALL_LIMIT`; `items` holds the first of them in list order. */
+  truncated: boolean;
 }

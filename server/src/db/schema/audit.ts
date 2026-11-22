@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { bigserial, index, integer, jsonb, pgTable, text, timestamp, varchar } from 'drizzle-orm/pg-core';
 
+import { apiKeys } from './api-keys';
 import { users } from './auth';
 
 export const auditLog = pgTable(
@@ -12,9 +13,13 @@ export const auditLog = pgTable(
     action: varchar('action', { length: 100 }).notNull(),
     resource: varchar('resource', { length: 100 }),
     resourceId: integer('resource_id'),
+    /** The target's name when the event was written, so a deleted target can still be named. */
+    resourceLabel: varchar('resource_label', { length: 255 }),
     description: text('description').notNull(),
     ip: varchar('ip', { length: 45 }),
     meta: jsonb('meta'),
+    /** The API key the action was made with, when it was made with one. */
+    apiKeyId: integer('api_key_id').references(() => apiKeys.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -27,8 +32,10 @@ export const auditLog = pgTable(
     index('idx_audit_action').on(t.action),
     index('idx_audit_action_trgm').using('gin', t.action.op('gin_trgm_ops')),
     index('idx_audit_description_trgm').using('gin', t.description.op('gin_trgm_ops')),
+    index('idx_audit_resource_label_trgm').using('gin', t.resourceLabel.op('gin_trgm_ops')),
     index('idx_audit_meta_text_trgm').using('gin', sql`(${t.meta}::text) gin_trgm_ops`),
     index('idx_audit_ip').on(t.ip),
+    index('idx_audit_api_key_id').on(t.apiKeyId),
     index('idx_audit_created_at').on(t.createdAt),
     index('idx_audit_reading_insights_access').on(t.resource, t.resourceId, t.action, t.createdAt),
   ],

@@ -38,6 +38,9 @@ function makeSeries(overrides: Partial<SeriesSummary> = {}): SeriesSummary {
     lastAddedAt: null,
     libraryNames: ['Novels'],
     expectedBookCount: null,
+    ownedVolumeCount: 2,
+    readVolumeCount: 1,
+    readingVolumeCount: 0,
     volumes: [
       { index: 1, bookId: 10, title: 'One', status: 'read' },
       { index: 2, bookId: null, title: null, status: 'missing' },
@@ -121,8 +124,10 @@ async function mountView() {
     global: {
       plugins: [i18n],
       stubs: {
-        ViewHeader: { template: '<div><slot name="toolbar" /></div>' },
+        BrowseHeader: { template: '<div><slot name="bar" /></div>' },
+        BrowseInlineGroup: { template: '<div><slot /></div>' },
         Popover: { template: '<div><slot /></div>' },
+        PopoverAnchor: { template: '<div><slot /></div>' },
         PopoverTrigger: { template: '<div><slot /></div>' },
         PopoverContent: { template: '<div><slot /></div>' },
         BookCoverArtwork: true,

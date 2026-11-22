@@ -1,19 +1,18 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Tag } from '@lucide/vue'
 import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 
-import { useThemeStore } from '@/stores/theme'
-import { getThemePalette, readCssColor } from '@/lib/echarts'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { useUserGenreReadingTime } from '../../composables/useUserGenreReadingTime'
 import ChartCard from '../ChartCard.vue'
 import ChartEmptyState from '../ChartEmptyState.vue'
 
 const MIN_GENRES = 2
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useUserGenreReadingTime()
@@ -28,8 +27,8 @@ watchEffect(() => {
   option.value = {}
   if (isEmpty.value || !hasEnoughData.value || !data.value.length) return
 
-  const palette = getThemePalette(themeStore.resolvedTheme, themeStore.accent, 0.8, 0.8)
-  const background = readCssColor('--background')
+  const palette = chartTokens.value.palette(0.8, 0.8)
+  const background = chartTokens.value.color('--background')
   const bySourceByGenre = new Map(data.value.map((item) => [item.genre, item.bySource]))
 
   option.value = {
@@ -94,6 +93,6 @@ watchEffect(() => {
       :title="t('statistics.empty.notEnoughData')"
       :description="t('statistics.charts.genreReadingTime.notEnoughData', { count: MIN_GENRES })"
     />
-    <VChart v-else :option autoresize style="height: 100%" />
+    <AppChart v-else :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

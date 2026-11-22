@@ -1,25 +1,31 @@
 <script setup lang="ts">
 import { useWindowSize } from '@vueuse/core'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatNumber } from '@/i18n/formatters'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowUpDown, ChevronDown, ChevronLeft, ImageMinus, Layers, LayoutGrid, List, Upload } from '@lucide/vue'
+import { ChevronLeft, ImageMinus, Layers, LayoutGrid, List, Upload } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 import type { AuthorDetail, AuthorSummary, BookCard } from '@bookorbit/types'
 import VirtualBookGrid from '@/features/book/components/VirtualBookGrid.vue'
+import SingleSortControl from '@/features/book/components/sort-filter/SingleSortControl.vue'
+import LibraryMenuButton from '@/components/browse-header/LibraryMenuButton.vue'
 import BookListRow from '@/features/book/components/BookListRow.vue'
 import DeleteBookDialog from '@/features/book/components/DeleteBookDialog.vue'
 import { useScrollRestoreOnActivate } from '@/features/book/composables/useScrollRestoreOnActivate'
 import { useSeriesCollapsePreference } from '@/features/book/composables/useSeriesCollapsePreference'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useLibraries } from '@/features/library/composables/useLibraries'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { usePageTitle } from '@/composables/usePageTitle'
 import { useDeleteBook } from '@/features/book/composables/useDeleteBook'
 import AuthorHeader from '../components/AuthorHeader.vue'
 import AuthorConfirmDialog from '../components/AuthorConfirmDialog.vue'
+import AuthorFactsFields from '../components/AuthorFactsFields.vue'
+import AuthorMatchSheet from '../components/AuthorMatchSheet.vue'
+import { authorFactsDraft, authorFactsPayload, sameFactsDraft, type AuthorFactsDraft, type AuthorFactsField } from '../lib/author-facts'
 import {
   deleteAuthorImage,
   deleteAuthors,
@@ -31,24 +37,31 @@ import {
   uploadAuthorImage,
 } from '../api/author'
 import { useAuthorBooks } from '../composables/useAuthorBooks'
+import type { AuthorBookSort, SortDirection } from '../types/author'
 import { useAuthorDetail } from '../composables/useAuthorDetail'
 import { useAuthorMetadataPreview } from '../composables/useAuthorMetadataPreview'
 import EntityNotFound from '@/components/EntityNotFound.vue'
+import { showCacheFallbackToast } from '@/features/metadata-cache/lib/cache-feedback'
+import { splitMetadataCacheUsage, usageFallbackProviders } from '@/features/metadata-cache/lib/metadata-cache'
+import { metadataProviderLabel } from '@/features/book/lib/metadata-refresh-feedback'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const mainRef = ref<HTMLElement | null>(null)
 useScrollRestoreOnActivate(mainRef)
-const { hasPermission, isSuperuser } = usePermissions()
+const { isSuperuser } = usePermissions()
 const { width: windowWidth } = useWindowSize()
 
 const { portraitCoverSize, gridGap } = useDisplaySettings()
 const { libraries, fetchLibraries } = useLibraries()
+const { hasPermissionInAnyLibrary } = useLibraryPermissions()
 
 const authorBooksViewMode = ref<'grid' | 'list'>('grid')
 
-const authorId = computed(() => Number(route.params.id))
+// Kept alive per path, so this page's author never changes. The shared route moves on while the
+// page is hidden, and following its `id` would load whichever author shares the next page's id.
+const authorId = shallowRef(Number(route.params.id))
 const { author, loading: loadingAuthor, error: authorError, notFound: authorNotFound, load: loadAuthor } = useAuthorDetail(authorId)
 const {
   items: books,
@@ -75,6 +88,11 @@ watch(
   { immediate: true },
 )
 const authorName = computed(() => author.value?.name ?? '')
+const pinnedMatch = computed(() => {
+  const value = author.value
+  if (!value?.metadataProviderPinned || !value.metadataProvider || !value.metadataProviderId) return null
+  return { provider: value.metadataProvider, providerId: value.metadataProviderId }
+})
 const pageTitle = computed(() => {
   if (author.value?.name) return t('author.detail.pageTitleNamed', { name: author.value.name })
   return Number.isFinite(authorId.value) ? t('author.detail.pageTitleId', { id: authorId.value }) : t('author.detail.pageTitle')
@@ -82,13 +100,17 @@ const pageTitle = computed(() => {
 usePageTitle(pageTitle)
 const {
   preview: metadataPreview,
+  previewCache: metadataPreviewCache,
+  cacheSummary: metadataCacheSummary,
   loading: loadingMetadataPreview,
+  searched: metadataPreviewSearched,
   error: metadataPreviewError,
   cancel: cancelMetadataPreview,
   load: loadMetadataPreview,
-} = useAuthorMetadataPreview(authorName)
+  loadFresh: loadFreshMetadataPreview,
+} = useAuthorMetadataPreview(authorName, pinnedMatch)
 
-const canUpdate = computed(() => hasPermission('library_edit_metadata'))
+const canUpdate = computed(() => hasPermissionInAnyLibrary('library_edit_metadata', 'editor'))
 const canMerge = computed(() => isSuperuser.value)
 const canDelete = computed(() => isSuperuser.value)
 
@@ -107,13 +129,21 @@ const authorImageInput = ref<HTMLInputElement | null>(null)
 const draftName = ref('')
 const draftSortName = ref('')
 const draftDescription = ref('')
-const seededDrafts = ref<{ name: string; sortName: string; description: string } | null>(null)
+const draftFacts = ref<AuthorFactsDraft>(authorFactsDraft(null))
+const invalidFacts = ref<AuthorFactsField[]>([])
+const seededDrafts = ref<{ name: string; sortName: string; description: string; facts: AuthorFactsDraft } | null>(null)
 const authorImageBusy = computed(() => uploadingImage.value || removingImage.value)
+const matchSheetOpen = ref(false)
 
 const draftsDirty = computed(() => {
   const seeded = seededDrafts.value
   if (!seeded) return false
-  return draftName.value !== seeded.name || draftSortName.value !== seeded.sortName || draftDescription.value !== seeded.description
+  return (
+    draftName.value !== seeded.name ||
+    draftSortName.value !== seeded.sortName ||
+    draftDescription.value !== seeded.description ||
+    !sameFactsDraft(draftFacts.value, seeded.facts)
+  )
 })
 
 const mergeQuery = ref('')
@@ -130,13 +160,13 @@ const selectedMergeBookCount = computed(() => {
   return mergeCandidates.value.filter((candidate) => selected.has(candidate.id)).reduce((sum, candidate) => sum + candidate.bookCount, 0)
 })
 
-const BOOK_SORT_OPTIONS = [{ value: 'addedAt' }, { value: 'title' }, { value: 'publishedYear' }] as const
+const BOOK_SORT_FIELDS: AuthorBookSort[] = ['addedAt', 'title', 'publishedYear']
 
-const bookSortOptions = computed(() => [
-  { value: 'addedAt', label: t('author.detail.books.sort.recentlyAdded') },
-  { value: 'title', label: t('author.detail.books.sort.title') },
-  { value: 'publishedYear', label: t('author.detail.books.sort.publishedYear') },
-])
+const bookSortLabels = computed<Record<AuthorBookSort, string>>(() => ({
+  addedAt: t('author.detail.books.sort.recentlyAdded'),
+  title: t('author.detail.books.sort.title'),
+  publishedYear: t('author.detail.books.sort.publishedYear'),
+}))
 
 // 'move-to-library' is part of the shared card contract; this view does not
 // opt in, so it never fires here.
@@ -178,10 +208,13 @@ function seedDrafts(value: AuthorDetail | null) {
     name: value?.name ?? '',
     sortName: value?.sortName ?? '',
     description: value?.description ?? '',
+    facts: authorFactsDraft(value),
   }
   draftName.value = seeded.name
   draftSortName.value = seeded.sortName
   draftDescription.value = seeded.description
+  draftFacts.value = authorFactsDraft(value)
+  invalidFacts.value = []
   seededDrafts.value = seeded
 }
 
@@ -195,6 +228,16 @@ watch(
     seedDrafts(value)
   },
   { immediate: true },
+)
+
+// After a failed save, re-check as the user types so a corrected field loses its error at once.
+watch(
+  draftFacts,
+  (draft) => {
+    if (invalidFacts.value.length === 0 || !seededDrafts.value) return
+    invalidFacts.value = authorFactsPayload(draft, seededDrafts.value.facts).invalid
+  },
+  { deep: true },
 )
 
 function goBack() {
@@ -259,12 +302,17 @@ async function saveAuthorEdits() {
     return
   }
 
+  const facts = authorFactsPayload(draftFacts.value, seededDrafts.value?.facts ?? authorFactsDraft(author.value))
+  invalidFacts.value = facts.invalid
+  if (facts.invalid.length > 0) return
+
   savingEdit.value = true
   try {
     const updated = await updateAuthor(author.value.id, {
       name,
       sortName: draftSortName.value.trim() || null,
       description: draftDescription.value.trim() || null,
+      ...facts.payload,
     })
     author.value = updated
     seedDrafts(updated)
@@ -423,35 +471,47 @@ const authorBookGridGap = computed(() => {
   return Math.min(normalizedGap, 12)
 })
 
-function onLibraryFilterChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  libraryId.value = value ? Number(value) : null
+function handleLibraryChange(value: number | null) {
+  libraryId.value = value
 }
 
-function onMobileSortChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  if (BOOK_SORT_OPTIONS.some((option) => option.value === value)) {
-    sort.value = value as (typeof BOOK_SORT_OPTIONS)[number]['value']
-  }
-}
-
-function toggleBookOrder() {
-  order.value = order.value === 'asc' ? 'desc' : 'asc'
+function handleBookSort(field: AuthorBookSort, dir: SortDirection) {
+  sort.value = field
+  order.value = dir
 }
 
 async function refreshMetadata() {
   if (!author.value || refreshingMetadata.value) return
   refreshingMetadata.value = true
   try {
-    const updated = await refreshAuthorMetadata(author.value.id)
+    const { value: updated, usage } = splitMetadataCacheUsage(await refreshAuthorMetadata(author.value.id))
     author.value = updated
     await loadMetadataPreview()
     showRefreshResultToast(updated)
+    showCacheFallbackToast(usageFallbackProviders(usage), metadataProviderLabel)
   } catch (error) {
     toast.error(error instanceof Error ? error.message : t('author.detail.toast.refreshFailed'))
   } finally {
     refreshingMetadata.value = false
   }
+}
+
+function searchMetadataPreviewFresh() {
+  void loadFreshMetadataPreview()
+}
+
+function openMatchSheet() {
+  matchSheetOpen.value = true
+}
+
+function closeMatchSheet() {
+  matchSheetOpen.value = false
+}
+
+async function handleMatchUpdated(updated: AuthorDetail) {
+  author.value = updated
+  seedDrafts(updated)
+  await loadMetadataPreview()
 }
 
 onMounted(async () => {
@@ -474,13 +534,6 @@ onUnmounted(() => {
   observer?.disconnect()
   if (mergeSearchTimer) clearTimeout(mergeSearchTimer)
   cancelMetadataPreview()
-})
-
-watch(authorId, () => {
-  selectedMergeIds.value = []
-  mergeCandidates.value = []
-  mergeQuery.value = ''
-  void Promise.all([loadAuthor(), loadBooks(true)]).then(() => loadMetadataPreview())
 })
 
 watch([sort, order, libraryId, collapseSeries], () => {
@@ -512,7 +565,7 @@ defineOptions({ name: 'AuthorDetailView' })
 <template>
   <div class="flex h-full flex-col">
     <main ref="mainRef" class="flex flex-1 min-h-0 w-full min-w-0 flex-col overflow-y-auto overflow-x-hidden pr-0 sm:pr-2">
-      <div class="mb-3 mt-2 mr-0 sm:mr-4 flex items-center gap-2 px-1">
+      <div class="mb-3 mt-2 mr-0 sm:mr-4 flex min-h-11 items-center gap-2 px-1">
         <button
           class="inline-flex h-8 items-center gap-1 rounded-md border border-input px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           @click="goBack"
@@ -540,7 +593,10 @@ defineOptions({ name: 'AuthorDetailView' })
           :image-url="author.imageUrl ?? metadataPreview?.imageUrl ?? null"
           :preview-description="metadataPreview?.description ?? null"
           :preview-provider="metadataPreview?.provider ?? null"
+          :preview-cache="metadataPreviewCache"
+          :cache-summary="metadataCacheSummary"
           :loading-preview="loadingMetadataPreview"
+          :preview-searched="metadataPreviewSearched"
           :can-update="canUpdate"
           :can-merge="canMerge"
           :can-delete="canDelete"
@@ -548,8 +604,11 @@ defineOptions({ name: 'AuthorDetailView' })
           @edit="toggleEdit"
           @merge="toggleMerge"
           @refresh="refreshMetadata"
+          @search-fresh="searchMetadataPreviewFresh"
+          @find-match="openMatchSheet"
           @delete="confirmDeleteOpen = true"
         />
+        <AuthorMatchSheet v-if="author && matchSheetOpen && canUpdate" :author="author" @close="closeMatchSheet" @updated="handleMatchUpdated" />
 
         <div v-if="metadataPreviewError" class="mt-3 rounded-md border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           {{ t('author.detail.previewError') }}
@@ -571,6 +630,7 @@ defineOptions({ name: 'AuthorDetailView' })
               {{ t('author.detail.edit.description') }}
               <textarea v-model="draftDescription" rows="3" class="mt-1 w-full rounded-md border border-input bg-background px-2.5 py-2 text-sm" />
             </label>
+            <AuthorFactsFields v-model="draftFacts" :invalid="invalidFacts" />
             <div class="space-y-1.5">
               <p class="text-xs text-muted-foreground">{{ t('author.detail.edit.image') }}</p>
               <input ref="authorImageInput" type="file" accept="image/*" class="hidden" :disabled="authorImageBusy" @change="onAuthorImageSelected" />
@@ -653,26 +713,18 @@ defineOptions({ name: 'AuthorDetailView' })
           <div class="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <h2 class="text-sm font-semibold text-foreground">{{ t('author.detail.books.heading') }}</h2>
             <div class="w-full space-y-2 sm:hidden">
-              <div class="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-2">
-                <div class="relative min-w-0">
-                  <select
-                    :value="sort"
-                    class="h-8 w-full appearance-none rounded-md border border-input bg-background px-2.5 pr-8 text-sm text-foreground outline-none transition-colors focus:border-primary/60"
-                    @change="onMobileSortChange"
-                  >
-                    <option v-for="opt in bookSortOptions" :key="opt.value" :value="opt.value">
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                  <ArrowUpDown :size="13" class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <div class="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+                <div class="flex min-w-0 items-center">
+                  <SingleSortControl
+                    :field="sort"
+                    :dir="order"
+                    :fields="BOOK_SORT_FIELDS"
+                    :labels="bookSortLabels"
+                    default-field="addedAt"
+                    default-dir="desc"
+                    @change="handleBookSort"
+                  />
                 </div>
-
-                <button
-                  class="h-8 rounded-md border border-input bg-background px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  @click="toggleBookOrder"
-                >
-                  {{ order === 'asc' ? t('author.detail.books.asc') : t('author.detail.books.desc') }}
-                </button>
 
                 <button
                   data-testid="author-collapse-series-toggle-mobile"
@@ -712,47 +764,32 @@ defineOptions({ name: 'AuthorDetailView' })
                 </div>
               </div>
 
-              <div class="relative min-w-0">
-                <select
-                  :value="libraryId ?? ''"
-                  class="h-8 w-full appearance-none rounded-md border border-input bg-background px-2.5 pr-8 text-sm text-foreground outline-none transition-colors focus:border-primary/60"
-                  @change="onLibraryFilterChange"
-                >
-                  <option value="">{{ t('author.detail.books.allLibraries') }}</option>
-                  <option v-for="library in libraries" :key="library.id" :value="library.id">
-                    {{ library.name }}
-                  </option>
-                </select>
-                <ChevronDown :size="14" class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <div class="flex">
+                <LibraryMenuButton
+                  :library-id="libraryId"
+                  :libraries="libraries"
+                  :all-label="t('author.detail.books.allLibraries')"
+                  @update:library-id="handleLibraryChange"
+                />
               </div>
             </div>
 
             <div class="hidden flex-wrap items-center gap-2 sm:flex">
-              <select
-                v-model="sort"
-                class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-              >
-                <option value="addedAt">{{ t('author.detail.books.sort.recentlyAdded') }}</option>
-                <option value="title">{{ t('author.detail.books.sort.title') }}</option>
-                <option value="publishedYear">{{ t('author.detail.books.sort.publishedYear') }}</option>
-              </select>
-
-              <select
-                v-model="order"
-                class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-              >
-                <option value="desc">{{ t('author.detail.books.descending') }}</option>
-                <option value="asc">{{ t('author.detail.books.ascending') }}</option>
-              </select>
-
-              <select
-                :value="libraryId ?? ''"
-                class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-                @change="onLibraryFilterChange"
-              >
-                <option value="">{{ t('author.detail.books.allLibraries') }}</option>
-                <option v-for="library in libraries" :key="library.id" :value="library.id">{{ library.name }}</option>
-              </select>
+              <SingleSortControl
+                :field="sort"
+                :dir="order"
+                :fields="BOOK_SORT_FIELDS"
+                :labels="bookSortLabels"
+                default-field="addedAt"
+                default-dir="desc"
+                @change="handleBookSort"
+              />
+              <LibraryMenuButton
+                :library-id="libraryId"
+                :libraries="libraries"
+                :all-label="t('author.detail.books.allLibraries')"
+                @update:library-id="handleLibraryChange"
+              />
 
               <button
                 data-testid="author-collapse-series-toggle"

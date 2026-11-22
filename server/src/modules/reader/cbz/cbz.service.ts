@@ -1,11 +1,15 @@
-import { Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import { Readable } from 'stream';
-import { readFile } from 'fs/promises';
-import { createExtractorFromData, UnrarError } from 'node-unrar-js';
-import { getSevenZip } from '../../../common/sevenzip';
+import { Injectable, NotFoundException, OnModuleDestroy, UnprocessableEntityException } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { createReadStream } from 'fs';
+import { mkdtemp, rm, stat } from 'fs/promises';
+import { tmpdir } from 'os';
+import { extname, join } from 'path';
+import { createExtractorFromFile, UnrarError } from 'node-unrar-js';
 import { imageContentTypeFromPath } from '../../../common/image-content-type';
 import { detectComicContainerFormat } from '../../../common/comic-format-detect';
 import { createCbzZipEntryReadStream, readCbzZipIndex, type CbzZipEntry } from '../../../common/cbz-zip-reader';
+import { compareArchiveEntryNames } from '../../../common/archive-entry-sort';
+import { cb7PagePath, extractCb7ToDisk, removeCb7Extraction } from './cb7-disk-extraction';
 
 import type { RequestUser } from '../../../common/types/request-user';
 import { BookService } from '../../book/book.service';
@@ -21,10 +25,6 @@ function isImage(name: string): boolean {
 
 function isHidden(name: string): boolean {
   return name.split('/').some((p) => p.startsWith('.'));
-}
-
-function naturalSort(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
 function mimeForExt(name: string): string {
@@ -48,191 +48,322 @@ function unreadableCbrPage(err: Error): UnprocessableEntityException {
   return new UnprocessableEntityException(`CBR page is unreadable: ${err.message}`);
 }
 
-// Buffer.buffer is a shared pool; slice out only the bytes for this buffer.
-function toArrayBuffer(buf: Buffer): ArrayBuffer {
-  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+// ── Freshness ──────────────────────────────────────────────────────────────────
+
+/** Bump when page listing or ordering changes, so a revalidation cannot keep a page from the old order. */
+const PAGE_ETAG_VERSION = 2;
+
+type ComicFormat = 'cbz' | 'cbr' | 'cb7';
+
+function isComicFormat(format: string | null): format is ComicFormat {
+  return format === 'cbz' || format === 'cbr' || format === 'cb7';
+}
+
+/** Which version of a file a cache entry was built from. The metadata writer replaces files in place. */
+interface FileStamp {
+  mtimeMs: number;
+  size: number;
+}
+
+interface Stamped<T> {
+  stamp: FileStamp;
+  value: T;
+}
+
+function sameStamp(a: FileStamp, b: FileStamp): boolean {
+  return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function pageEtag(fileId: number, stamp: FileStamp, pageIndex: number): string {
+  const digest = createHash('sha1').update(`${PAGE_ETAG_VERSION}:${fileId}:${stamp.mtimeMs}:${stamp.size}:${pageIndex}`).digest('base64url');
+  return `"${digest}"`;
+}
+
+/** RFC 9110 weak comparison, which is what If-None-Match uses. */
+export function matchesIfNoneMatch(header: string | undefined, etag: string): boolean {
+  if (!header) return false;
+  return header.split(',').some((candidate) => candidate.trim().replace(/^W\//, '') === etag);
 }
 
 // ── Service ────────────────────────────────────────────────────────────────────
 
 interface RarCache {
-  buffer: ArrayBuffer;
   pages: string[];
 }
 
+interface SevenZipPages {
+  /** This extraction's private folder on temporary disk storage. */
+  dir: string;
+  /** Paths relative to `dir`, in reading order. */
+  pages: string[];
+  sizeBytes: number;
+  activeReaders: number;
+  evicted: boolean;
+}
+
+const SEVEN_Z_CACHE_MAX_BYTES = 512 * 1024 * 1024;
+
+export type ComicPageResult =
+  { notModified: true; etag: string } | { notModified: false; etag: string; stream: NodeJS.ReadableStream; mimeType: string };
+
+interface OpenedComic {
+  absolutePath: string;
+  format: ComicFormat;
+  stamp: FileStamp;
+}
+
 @Injectable()
-export class CbzService {
+export class CbzService implements OnModuleDestroy {
   // CBZ: byte-offset index per fileId
-  private readonly zipIndex = new Map<number, CbzZipEntry[]>();
-  // CBR: archive ArrayBuffer + sorted page names per fileId
-  private readonly rarCache = new Map<number, RarCache>();
-  // CB7: sorted page names per fileId (extracted files live in WASM VFS)
-  private readonly sevenZPages = new Map<number, string[]>();
+  private readonly zipIndex = new Map<number, Stamped<CbzZipEntry[]>>();
+  // CBR: sorted page names per fileId; archive and extracted page bytes stay on disk
+  private readonly rarCache = new Map<number, Stamped<RarCache>>();
+  // CB7: byte-bounded extracted folders on temporary disk storage
+  private readonly sevenZPages = new Map<number, Stamped<SevenZipPages>>();
+  private sevenZCacheBytes = 0;
+  private readonly rarTempDirs = new Set<string>();
   // Resolved actual format per fileId (magic bytes override stored extension)
-  private readonly resolvedFormat = new Map<number, string>();
+  private readonly resolvedFormat = new Map<number, Stamped<ComicFormat>>();
 
   constructor(private readonly bookService: BookService) {}
 
-  private async getFile(fileId: number, user: RequestUser) {
-    return this.bookService.verifyFileAccess(fileId, user);
+  async onModuleDestroy(): Promise<void> {
+    const rarDirs = [...this.rarTempDirs];
+    const sevenZipEntries = [...this.sevenZPages.values()];
+    this.rarTempDirs.clear();
+    this.sevenZPages.clear();
+    this.sevenZCacheBytes = 0;
+    await Promise.all([
+      ...rarDirs.map((dir) => rm(dir, { recursive: true, force: true }).catch(() => {})),
+      ...sevenZipEntries.map((entry) => removeCb7Extraction(entry.value.dir)),
+    ]);
   }
 
-  private async resolveFormat(fileId: number, absolutePath: string, storedFmt: string | null): Promise<string> {
-    if (!this.resolvedFormat.has(fileId)) {
-      let resolved: string;
-      if (storedFmt === 'cbz' || storedFmt === 'cbr' || storedFmt === 'cb7') {
-        resolved = await detectComicContainerFormat(absolutePath, storedFmt);
-      } else {
-        resolved = storedFmt ?? '';
-      }
-      this.resolvedFormat.set(fileId, resolved);
+  private async openComic(fileId: number, user: RequestUser): Promise<OpenedComic> {
+    const file = await this.bookService.verifyFileAccess(fileId, user);
+    if (!isComicFormat(file.format)) {
+      throw new NotFoundException(`Unsupported comic format: ${file.format ?? ''}`);
     }
-    return this.resolvedFormat.get(fileId)!;
+    const stamp = await this.statFile(fileId, file.absolutePath);
+    const format = await this.resolveFormat(fileId, file.absolutePath, file.format, stamp);
+    return { absolutePath: file.absolutePath, format, stamp };
+  }
+
+  private async statFile(fileId: number, absolutePath: string): Promise<FileStamp> {
+    let stats: Awaited<ReturnType<typeof stat>>;
+    try {
+      stats = await stat(absolutePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') throw new NotFoundException('Comic file is missing on disk');
+      throw err;
+    }
+
+    const stamp = { mtimeMs: Number(stats.mtimeMs), size: Number(stats.size) };
+    if (this.hasStaleEntry(fileId, stamp)) await this.invalidate(fileId);
+    return stamp;
+  }
+
+  private hasStaleEntry(fileId: number, stamp: FileStamp): boolean {
+    const entries = [this.zipIndex.get(fileId), this.rarCache.get(fileId), this.sevenZPages.get(fileId), this.resolvedFormat.get(fileId)];
+    return entries.some((entry) => entry !== undefined && !sameStamp(entry.stamp, stamp));
+  }
+
+  private async invalidate(fileId: number): Promise<void> {
+    const sevenZip = this.sevenZPages.get(fileId);
+    this.zipIndex.delete(fileId);
+    this.rarCache.delete(fileId);
+    this.sevenZPages.delete(fileId);
+    this.resolvedFormat.delete(fileId);
+    if (sevenZip) {
+      this.sevenZCacheBytes -= sevenZip.value.sizeBytes;
+      await this.disposeSevenZip(sevenZip.value);
+    }
+  }
+
+  private async resolveFormat(fileId: number, absolutePath: string, storedFmt: ComicFormat, stamp: FileStamp): Promise<ComicFormat> {
+    const cached = this.resolvedFormat.get(fileId);
+    if (cached && sameStamp(cached.stamp, stamp)) return cached.value;
+
+    const resolved = await detectComicContainerFormat(absolutePath, storedFmt);
+    this.resolvedFormat.set(fileId, { stamp, value: resolved });
+    return resolved;
   }
 
   // ── CBZ ──────────────────────────────────────────────────────────────────────
 
-  private async getCbzIndex(fileId: number, filePath: string): Promise<CbzZipEntry[]> {
-    if (!this.zipIndex.has(fileId)) {
-      const index = await readCbzZipIndex(filePath);
-      const entries =
-        index?.entries
-          .filter((entry) => !entry.name.endsWith('/') && !isHidden(entry.name) && isImage(entry.name))
-          .filter((entry) => (entry.compression === 0 || entry.compression === 8) && entry.compressedSize > 0)
-          .sort((a, b) => naturalSort(a.name, b.name)) ?? [];
-      this.zipIndex.set(fileId, entries);
-    }
-    return this.zipIndex.get(fileId)!;
+  private async getCbzIndex(fileId: number, filePath: string, stamp: FileStamp): Promise<CbzZipEntry[]> {
+    const cached = this.zipIndex.get(fileId);
+    if (cached && sameStamp(cached.stamp, stamp)) return cached.value;
+
+    const index = await readCbzZipIndex(filePath);
+    // Not cached: the reader also answers null for a transient read error, which a retry should get past.
+    if (!index) throw new UnprocessableEntityException('CBZ archive is unreadable');
+
+    const entries = index.entries
+      .filter((entry) => !entry.name.endsWith('/') && !isHidden(entry.name) && isImage(entry.name))
+      .filter((entry) => (entry.compression === 0 || entry.compression === 8) && entry.compressedSize > 0)
+      .sort((a, b) => compareArchiveEntryNames(a.name, b.name));
+    this.zipIndex.set(fileId, { stamp, value: entries });
+    return entries;
   }
 
   // ── CBR ──────────────────────────────────────────────────────────────────────
 
-  private async getRarCache(fileId: number, filePath: string): Promise<RarCache> {
-    if (!this.rarCache.has(fileId)) {
-      const buf = await readFile(filePath);
-      const ab = toArrayBuffer(buf);
+  private async getRarCache(fileId: number, filePath: string, stamp: FileStamp): Promise<RarCache> {
+    const cached = this.rarCache.get(fileId);
+    if (cached && sameStamp(cached.stamp, stamp)) return cached.value;
 
-      const pages: string[] = [];
-      try {
-        const extractor = await createExtractorFromData({ data: ab });
-        const { fileHeaders } = extractor.getFileList();
-        for (const h of fileHeaders) {
-          if (!h.flags.directory && isImage(h.name) && !isHidden(h.name)) {
-            pages.push(h.name);
-          }
-        }
-      } catch (err) {
-        // Some RAR 1.5 archives throw ERAR_BAD_DATA at the end-of-archive
-        // marker instead of returning ERAR_END_ARCHIVE. If we already have
-        // pages, the archive is readable - accept the partial list.
-        if (!isUnrarError(err) || pages.length === 0) {
-          throw isUnrarError(err) ? unreadableCbrArchive(err) : err;
+    const pages: string[] = [];
+    try {
+      const extractor = await createExtractorFromFile({ filepath: filePath });
+      const { fileHeaders } = extractor.getFileList();
+      for (const h of fileHeaders) {
+        if (!h.flags.directory && isImage(h.name) && !isHidden(h.name)) {
+          pages.push(h.name);
         }
       }
-
-      pages.sort(naturalSort);
-      this.rarCache.set(fileId, { buffer: ab, pages });
+    } catch (err) {
+      // Some RAR 1.5 archives throw ERAR_BAD_DATA at the end-of-archive
+      // marker instead of returning ERAR_END_ARCHIVE. If we already have
+      // pages, the archive is readable - accept the partial list.
+      if (!isUnrarError(err) || pages.length === 0) {
+        throw isUnrarError(err) ? unreadableCbrArchive(err) : err;
+      }
     }
-    return this.rarCache.get(fileId)!;
+
+    pages.sort(compareArchiveEntryNames);
+    const value = { pages };
+    this.rarCache.set(fileId, { stamp, value });
+    return value;
   }
 
-  private async extractRarPage(buffer: ArrayBuffer, pageName: string): Promise<Uint8Array> {
-    // Generators MUST be fully drained to avoid WASM memory leak
-    let result: Uint8Array | undefined;
+  private async extractRarPage(filePath: string, pageName: string): Promise<NodeJS.ReadableStream> {
+    const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-cbr-'));
+    this.rarTempDirs.add(tempDir);
+    const extractedName = `page${extname(pageName)}`;
+    let found = false;
     try {
-      const extractor = await createExtractorFromData({ data: buffer });
+      const extractor = await createExtractorFromFile({ filepath: filePath, targetPath: tempDir, filenameTransform: () => extractedName });
       // Pass an array so the extractor stops after the first match and never
       // hits the malformed end-of-archive marker present in some RAR 1.5 files.
       const { files } = extractor.extract({ files: [pageName] });
       for (const file of files) {
-        if (!file.fileHeader.flags.directory) result = file.extraction;
+        if (!file.fileHeader.flags.directory) found = true;
       }
     } catch (err) {
+      await this.removeRarTempDir(tempDir);
       if (isUnrarError(err)) {
         throw unreadableCbrPage(err);
       }
       throw err;
     }
-    if (result === undefined) throw new NotFoundException(`Page not found in RAR archive`);
-    return result;
+    if (!found) {
+      await this.removeRarTempDir(tempDir);
+      throw new NotFoundException(`Page not found in RAR archive`);
+    }
+
+    const stream = createReadStream(join(tempDir, extractedName));
+    stream.once('close', () => void this.removeRarTempDir(tempDir));
+    return stream;
+  }
+
+  private async removeRarTempDir(tempDir: string): Promise<void> {
+    this.rarTempDirs.delete(tempDir);
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 
   // ── CB7 ──────────────────────────────────────────────────────────────────────
 
-  private async getSevenZPages(fileId: number, filePath: string): Promise<string[]> {
-    if (!this.sevenZPages.has(fileId)) {
-      const sz = await getSevenZip();
-      const archivePath = `/a${fileId}`;
-      const outDir = `/p${fileId}`;
-
-      const buf = await readFile(filePath);
-      const fd = sz.FS.open(archivePath, 'w+');
-      sz.FS.write(fd, buf, 0, buf.length);
-      sz.FS.close(fd);
-
-      try {
-        sz.FS.mkdir(outDir);
-      } catch {
-        // already exists from a previous run
-      }
-
-      // callMain is synchronous — blocks the event loop while 7z extracts.
-      // Acceptable for a local single-user server; revisit with worker_threads if needed.
-      sz.callMain(['e', archivePath, `-o${outDir}`, '-y']);
-
-      const files = sz.FS.readdir(outDir);
-      const pages = files.filter((f) => f !== '.' && f !== '..' && isImage(f) && !isHidden(f)).sort(naturalSort);
-
-      this.sevenZPages.set(fileId, pages);
+  private async getSevenZPages(fileId: number, filePath: string, stamp: FileStamp): Promise<SevenZipPages> {
+    const cached = this.sevenZPages.get(fileId);
+    if (cached && sameStamp(cached.stamp, stamp)) {
+      this.sevenZPages.delete(fileId);
+      this.sevenZPages.set(fileId, cached);
+      return cached.value;
     }
-    return this.sevenZPages.get(fileId)!;
+
+    const extracted = await extractCb7ToDisk(filePath);
+
+    const previous = this.sevenZPages.get(fileId);
+    const value = { ...extracted, activeReaders: 0, evicted: false };
+    this.sevenZPages.set(fileId, { stamp, value });
+    this.sevenZCacheBytes += value.sizeBytes;
+    if (previous && previous.value.dir !== value.dir) {
+      this.sevenZCacheBytes -= previous.value.sizeBytes;
+      await this.disposeSevenZip(previous.value);
+    }
+    await this.evictSevenZipCache();
+    return value;
+  }
+
+  private async evictSevenZipCache(): Promise<void> {
+    while (this.sevenZCacheBytes > SEVEN_Z_CACHE_MAX_BYTES && this.sevenZPages.size > 1) {
+      const oldest = this.sevenZPages.entries().next().value as [number, Stamped<SevenZipPages>] | undefined;
+      if (!oldest) return;
+      this.sevenZPages.delete(oldest[0]);
+      this.sevenZCacheBytes -= oldest[1].value.sizeBytes;
+      await this.disposeSevenZip(oldest[1].value);
+    }
+  }
+
+  private async disposeSevenZip(value: SevenZipPages): Promise<void> {
+    value.evicted = true;
+    if (value.activeReaders === 0) await removeCb7Extraction(value.dir);
+  }
+
+  private streamSevenZipPage(value: SevenZipPages, pageIndex: number): NodeJS.ReadableStream {
+    value.activeReaders++;
+    const stream = createReadStream(cb7PagePath(value.dir, value.pages[pageIndex]));
+    stream.once('close', () => {
+      value.activeReaders--;
+      if (value.evicted && value.activeReaders === 0) void removeCb7Extraction(value.dir);
+    });
+    return stream;
   }
 
   // ── Public API ────────────────────────────────────────────────────────────────
 
   async getPageCount(fileId: number, user: RequestUser): Promise<number> {
-    const file = await this.getFile(fileId, user);
-    const fmt = await this.resolveFormat(fileId, file.absolutePath, file.format);
+    const comic = await this.openComic(fileId, user);
 
-    if (fmt === 'cbz') return (await this.getCbzIndex(fileId, file.absolutePath)).length;
-    if (fmt === 'cbr') return (await this.getRarCache(fileId, file.absolutePath)).pages.length;
-    if (fmt === 'cb7') return (await this.getSevenZPages(fileId, file.absolutePath)).length;
-
-    throw new NotFoundException(`Unsupported comic format: ${fmt}`);
+    if (comic.format === 'cbz') return (await this.getCbzIndex(fileId, comic.absolutePath, comic.stamp)).length;
+    if (comic.format === 'cbr') return (await this.getRarCache(fileId, comic.absolutePath, comic.stamp)).pages.length;
+    return (await this.getSevenZPages(fileId, comic.absolutePath, comic.stamp)).pages.length;
   }
 
-  async streamPage(fileId: number, pageIndex: number, user: RequestUser): Promise<{ stream: NodeJS.ReadableStream; mimeType: string }> {
-    const file = await this.getFile(fileId, user);
-    const fmt = await this.resolveFormat(fileId, file.absolutePath, file.format);
+  /**
+   * Answers `notModified` without reading the archive when `ifNoneMatch` names this exact page of
+   * this exact version of the file, so a client revalidating a page it already has costs a stat.
+   */
+  async streamPage(fileId: number, pageIndex: number, user: RequestUser, ifNoneMatch?: string): Promise<ComicPageResult> {
+    const comic = await this.openComic(fileId, user);
+    const etag = pageEtag(fileId, comic.stamp, pageIndex);
+    if (matchesIfNoneMatch(ifNoneMatch, etag)) return { notModified: true, etag };
 
-    if (fmt === 'cbz') {
-      const entries = await this.getCbzIndex(fileId, file.absolutePath);
+    if (comic.format === 'cbz') {
+      const entries = await this.getCbzIndex(fileId, comic.absolutePath, comic.stamp);
       if (pageIndex < 0 || pageIndex >= entries.length) {
         throw new NotFoundException(`Page ${pageIndex} out of range`);
       }
       const entry = entries[pageIndex];
-      return { stream: createCbzZipEntryReadStream(file.absolutePath, entry), mimeType: mimeForExt(entry.name) };
+      return { notModified: false, etag, stream: createCbzZipEntryReadStream(comic.absolutePath, entry), mimeType: mimeForExt(entry.name) };
     }
 
-    if (fmt === 'cbr') {
-      const { buffer, pages } = await this.getRarCache(fileId, file.absolutePath);
+    if (comic.format === 'cbr') {
+      const { pages } = await this.getRarCache(fileId, comic.absolutePath, comic.stamp);
       if (pageIndex < 0 || pageIndex >= pages.length) {
         throw new NotFoundException(`Page ${pageIndex} out of range`);
       }
-      const data = await this.extractRarPage(buffer, pages[pageIndex]);
-      return { stream: Readable.from(Buffer.from(data)), mimeType: mimeForExt(pages[pageIndex]) };
+      const stream = await this.extractRarPage(comic.absolutePath, pages[pageIndex]);
+      return { notModified: false, etag, stream, mimeType: mimeForExt(pages[pageIndex]) };
     }
 
-    if (fmt === 'cb7') {
-      const pages = await this.getSevenZPages(fileId, file.absolutePath);
-      if (pageIndex < 0 || pageIndex >= pages.length) {
-        throw new NotFoundException(`Page ${pageIndex} out of range`);
-      }
-      const sz = await getSevenZip();
-      const data = sz.FS.readFile(`/p${fileId}/${pages[pageIndex]}`);
-      return { stream: Readable.from(Buffer.from(data)), mimeType: mimeForExt(pages[pageIndex]) };
+    const value = await this.getSevenZPages(fileId, comic.absolutePath, comic.stamp);
+    const { pages } = value;
+    if (pageIndex < 0 || pageIndex >= pages.length) {
+      throw new NotFoundException(`Page ${pageIndex} out of range`);
     }
-
-    throw new NotFoundException(`Unsupported comic format: ${fmt}`);
+    return { notModified: false, etag, stream: this.streamSevenZipPage(value, pageIndex), mimeType: mimeForExt(pages[pageIndex]) };
   }
 }

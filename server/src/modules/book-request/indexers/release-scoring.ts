@@ -1,12 +1,8 @@
 import {
-  AUDIO_FORMAT_LIST,
+  BOOK_REQUEST_FORMATS_BY_MEDIA_KIND,
   bookRequestIsbn10To13,
-  COMIC_FORMAT_LIST,
-  EBOOK_FORMAT_LIST,
   explainReleaseProfileMismatch,
   ISO_639_2_TO_1,
-  isAudioFormat,
-  isComicFormat,
   isValidBookRequestIsbn10,
   languagesAgree,
   matchReleaseTier,
@@ -14,6 +10,7 @@ import {
 import type { BookRequestMediaKind, DownloadDelivery, ReleaseCandidateItem, ReleaseScoreReason, ReleaseTier } from '@bookorbit/types';
 
 import { normalizeIsbn, normalizeMetadataIsbn } from '../../../common/text-match/isbn-normalize';
+import { inferSeriesPositionFromTitle, sameSeriesPosition } from '../../../common/text-match/series-position-match';
 import { normalizeTitleText, significantTokens, symmetricTitleSimilarity, tokenizeTitleText } from '../../../common/text-match/title-match';
 import type { ReleaseCandidate } from './indexer-adapter';
 
@@ -74,14 +71,6 @@ const MEGABYTE = 1024 * 1024;
 const SIZE_RANGES: Record<BookRequestMediaKind, { min: number; max: number }> = {
   ebook: { min: 20 * 1024, max: 400 * MEGABYTE },
   audiobook: { min: 20 * MEGABYTE, max: 8 * 1024 * MEGABYTE },
-  comic: { min: 1 * MEGABYTE, max: 4 * 1024 * MEGABYTE },
-};
-
-/** Whether a format is a usable one for the requested medium. */
-const FORMATS_BY_MEDIA_KIND: Record<BookRequestMediaKind, (format: string) => boolean> = {
-  ebook: (format) => (EBOOK_FORMAT_LIST as readonly string[]).includes(format),
-  audiobook: (format) => isAudioFormat(format),
-  comic: (format) => isComicFormat(format) || format === 'pdf',
 };
 
 /**
@@ -89,7 +78,7 @@ const FORMATS_BY_MEDIA_KIND: Record<BookRequestMediaKind, (format: string) => bo
  * from the three shared lists rather than restated: written out by hand it had already lost `cbx`,
  * so a comic release naming that format read as having no format at all.
  */
-const FORMAT_TOKENS: readonly string[] = [...EBOOK_FORMAT_LIST, ...AUDIO_FORMAT_LIST, ...COMIC_FORMAT_LIST];
+const FORMAT_TOKENS: readonly string[] = Object.values(BOOK_REQUEST_FORMATS_BY_MEDIA_KIND).flat();
 
 const SCENE_LANGUAGE_NAMES: ReadonlyMap<string, string> = new Map([
   ['chinese', 'zh'],
@@ -147,6 +136,8 @@ export interface ScoringRequest {
    */
   subtitle?: string | null;
   authors: string[];
+  seriesName: string | null;
+  seriesIndex: number | null;
   isbn13: string | null;
   isbn10: string | null;
   isbns: string[];
@@ -171,7 +162,7 @@ export function rejectRelease(candidate: ReleaseCandidate, request: Pick<Scoring
 
   // A release may state several, as MyAnonaMouse does with "m4a mp3". One usable format is enough.
   const formats = resolveFormats(candidate);
-  if (formats.length > 0 && !formats.some((format) => FORMATS_BY_MEDIA_KIND[request.mediaKind](format))) {
+  if (formats.length > 0 && !formats.some((format) => BOOK_REQUEST_FORMATS_BY_MEDIA_KIND[request.mediaKind].includes(format))) {
     return `${formats.join('/')} is not a ${request.mediaKind} format`;
   }
 
@@ -241,6 +232,7 @@ export function toReleaseItem(scored: ScoredRelease, indexerName: string, reques
     indexerName,
     guid: candidate.guid,
     title: candidate.title,
+    infoUrl: candidate.infoUrl ?? null,
     sizeBytes: candidate.sizeBytes,
     seeders: candidate.seeders,
     leechers: candidate.leechers,
@@ -284,6 +276,12 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
   const authors = request.authors.filter(Boolean);
   const authorScore = authors.length > 0 ? authorSimilarity(candidate, authors) : null;
   const titleScore = Math.max(...requestedTitles(request, authorScore).map((title) => titleSimilarity(candidate, title, request.authors)));
+  const candidateSeriesIndex = [candidate.bookTitle, candidate.title]
+    .filter((title): title is string => Boolean(title?.trim()))
+    .map((title) => inferSeriesPositionFromTitle(title, request.seriesName))
+    .find((position) => position !== null);
+  const seriesMismatch =
+    request.seriesIndex !== null && candidateSeriesIndex !== undefined && !sameSeriesPosition(request.seriesIndex, candidateSeriesIndex);
 
   const requestedIsbns = [...request.isbns, normalizeMetadataIsbn(request.isbn13), normalizeMetadataIsbn(request.isbn10)].filter(Boolean);
   if (requestedIsbns.length > 0 && (titleScore > 0 || (authorScore ?? 0) > 0)) {
@@ -295,6 +293,10 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
       return { code: 'isbnMatch', points: WEIGHTS.match };
     }
   }
+
+  // A known different volume must stay below the minimum auto-grab floor even when every other
+  // signal is perfect. It remains visible in the picker for a person who deliberately wants it.
+  if (seriesMismatch) return { code: 'titleMatch', points: 0 };
 
   const workScore = volumeAdjustedTitleScore(candidate, request.title, titleScore);
   const combined = authorScore === null ? workScore : workScore * TITLE_WEIGHT + authorScore * AUTHOR_WEIGHT;

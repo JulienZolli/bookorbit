@@ -1,13 +1,17 @@
 import { randomUUID } from 'crypto';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { expect, vi } from 'vitest';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { count, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { DEFAULT_FORMAT_PRIORITY, type LibraryType } from '@bookorbit/types';
+import { DEFAULT_FORMAT_PRIORITY } from '@bookorbit/types';
 
 import { AppModule } from '../../src/app.module';
 import { GlobalExceptionFilter } from '../../src/common/filters/http-exception.filter';
@@ -15,6 +19,8 @@ import { DB } from '../../src/db';
 import * as schema from '../../src/db/schema';
 import { books, bookFiles, libraries, libraryFolders, scanJobs } from '../../src/db/schema';
 import { MetadataService } from '../../src/modules/metadata/metadata.service';
+import { allowAppAttest } from './allow-app-attest';
+import { APP_ATTEST_POLICY, appAttestPolicy } from '../../src/modules/app-attest/app-attest.policy';
 
 export type Db = NodePgDatabase<typeof schema>;
 type OrganizationMode = 'book_per_file' | 'book_per_folder';
@@ -22,6 +28,7 @@ export type MetadataNoopMock = {
   extractAndSave: ReturnType<typeof vi.fn>;
   refreshCoverForBook: ReturnType<typeof vi.fn>;
   extractAudioFileDuration: ReturnType<typeof vi.fn>;
+  measureAudioFile: ReturnType<typeof vi.fn>;
   aggregateAudioDuration: ReturnType<typeof vi.fn>;
   extractAudioChaptersAndNarrators: ReturnType<typeof vi.fn>;
 };
@@ -42,6 +49,7 @@ export function makeMetadataNoopMock(): MetadataNoopMock {
     extractAndSave: vi.fn().mockResolvedValue(undefined),
     refreshCoverForBook: vi.fn().mockResolvedValue(false),
     extractAudioFileDuration: vi.fn().mockResolvedValue(undefined),
+    measureAudioFile: vi.fn().mockResolvedValue(null),
     aggregateAudioDuration: vi.fn().mockResolvedValue(undefined),
     extractAudioChaptersAndNarrators: vi.fn().mockResolvedValue(undefined),
   };
@@ -104,15 +112,36 @@ export interface E2EContext {
   app: NestFastifyApplication;
   db: Db;
   adminToken: string;
+  /** Set when the context owns a throwaway data folder, which close removes again. */
+  isolatedAppData: { path: string; previous: string | undefined } | null;
 }
 
-export async function createE2EContext(): Promise<E2EContext> {
-  const moduleFixture = await Test.createTestingModule({
+/**
+ * Scans write and prune covers under APP_DATA_PATH, which `.env` points at the developer's own
+ * data folder. Suites that scan and do not set their own path pass `isolateAppData`. Suites that
+ * upload files pass `multipart`, which `main.ts` registers for the real server.
+ */
+export async function createE2EContext(
+  options: {
+    isolateAppData?: boolean;
+    multipart?: boolean;
+    realAppAttest?: boolean;
+    /** With `realAppAttest`: the App Attest policy of a server in this environment, such as `production`. */
+    appAttestNodeEnv?: string;
+  } = {},
+): Promise<E2EContext> {
+  let isolatedAppData: E2EContext['isolatedAppData'] = null;
+  if (options.isolateAppData) {
+    isolatedAppData = { path: await mkdtemp(join(tmpdir(), 'bookorbit-e2e-data-')), previous: process.env.APP_DATA_PATH };
+    process.env.APP_DATA_PATH = isolatedAppData.path;
+  }
+  const builder = Test.createTestingModule({
     imports: [AppModule],
   })
     .overrideProvider(MetadataService)
-    .useValue(makeMetadataNoopMock())
-    .compile();
+    .useValue(makeMetadataNoopMock());
+  if (options.appAttestNodeEnv) builder.overrideProvider(APP_ATTEST_POLICY).useValue(appAttestPolicy(options.appAttestNodeEnv));
+  const moduleFixture = await (options.realAppAttest ? builder : allowAppAttest(builder)).compile();
 
   const app = moduleFixture.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
   app.setGlobalPrefix('api/v1');
@@ -125,22 +154,26 @@ export async function createE2EContext(): Promise<E2EContext> {
   );
   app.useGlobalFilters(new GlobalExceptionFilter());
   await app.register(fastifyCookie as never);
+  if (options.multipart) await app.register(fastifyMultipart as never);
   await app.init();
   await app.getHttpAdapter().getInstance().ready();
 
   const db = app.get<Db>(DB);
   const adminToken = await getAdminToken(app);
-  return { app, db, adminToken };
+  return { app, db, adminToken, isolatedAppData };
 }
 
 export async function closeE2EContext(ctx: E2EContext): Promise<void> {
   await ctx.app.close();
+  if (!ctx.isolatedAppData) return;
+  if (ctx.isolatedAppData.previous === undefined) delete process.env.APP_DATA_PATH;
+  else process.env.APP_DATA_PATH = ctx.isolatedAppData.previous;
+  await rm(ctx.isolatedAppData.path, { recursive: true, force: true });
 }
 
 export interface SeedLibraryInput {
   rootPath: string;
   mode: OrganizationMode;
-  type?: LibraryType;
   allowedFormats?: string[];
   excludePatterns?: string[];
   watch?: boolean;
@@ -151,7 +184,6 @@ export async function seedLibrary(db: Db, input: SeedLibraryInput): Promise<{ li
   const [library] = await db
     .insert(libraries)
     .values({
-      type: input.type ?? 'books',
       name: input.name ?? `e2e-${input.mode}-${randomUUID()}`,
       watch: input.watch ?? false,
       organizationMode: input.mode,

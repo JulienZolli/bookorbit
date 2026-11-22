@@ -1,12 +1,19 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'crypto';
-import { and, asc, count, desc, eq, ilike, inArray, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, ilike, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { hash } from 'bcryptjs';
 
 import { Permission, withRequiredPermissions } from '@bookorbit/types';
-import type { UserAttentionReason, UserListSortDirection, UserListSortField, UserListState, UserListSummary } from '@bookorbit/types';
+import type {
+  UserAttentionReason,
+  UserLibraryGrant,
+  UserListSortDirection,
+  UserListSortField,
+  UserListState,
+  UserListSummary,
+} from '@bookorbit/types';
 import { RequestUser } from '../../common/types/request-user';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
@@ -671,17 +678,34 @@ export class UserRepository {
     return rows.map((r) => r.libraryId);
   }
 
+  findLibraryGrantsByUserId(userId: number): Promise<UserLibraryGrant[]> {
+    return this.db
+      .select({ libraryId: schema.userLibraryAccess.libraryId, accessLevel: schema.userLibraryAccess.accessLevel })
+      .from(schema.userLibraryAccess)
+      .where(eq(schema.userLibraryAccess.userId, userId));
+  }
+
   async findExistingLibraryIds(libraryIds: number[]): Promise<number[]> {
     if (libraryIds.length === 0) return [];
     const rows = await this.db.select({ id: schema.libraries.id }).from(schema.libraries).where(inArray(schema.libraries.id, libraryIds));
     return rows.map((r) => r.id);
   }
 
-  async replaceViewerLibraries(userId: number, libraryIds: number[]): Promise<void> {
+  /**
+   * Libraries that stay assigned keep their access level: it is set per library from the library's
+   * access settings, and resetting it here would silently revoke editing on every user save.
+   */
+  async replaceLibraries(userId: number, libraryIds: number[]): Promise<void> {
     await this.db.transaction(async (tx) => {
-      await tx.delete(schema.userLibraryAccess).where(eq(schema.userLibraryAccess.userId, userId));
+      const ownedByUser = eq(schema.userLibraryAccess.userId, userId);
+      await tx
+        .delete(schema.userLibraryAccess)
+        .where(libraryIds.length > 0 ? and(ownedByUser, notInArray(schema.userLibraryAccess.libraryId, libraryIds)) : ownedByUser);
       if (libraryIds.length > 0) {
-        await tx.insert(schema.userLibraryAccess).values(libraryIds.map((libraryId) => ({ userId, libraryId, accessLevel: 'viewer' as const })));
+        await tx
+          .insert(schema.userLibraryAccess)
+          .values(libraryIds.map((libraryId) => ({ userId, libraryId, accessLevel: 'viewer' as const })))
+          .onConflictDoNothing();
       }
     });
   }

@@ -26,7 +26,7 @@ import { RouterLink } from 'vue-router'
 import { ANNOTATION_HIGHLIGHT_COLORS, type AnnotationHubItem, type AnnotationItem } from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { PILL_CLASS, sourcePill, statusPill } from '@/features/annotations/lib/pill-styles'
-import { getFormatColor } from '@/features/book/lib/format-colors'
+import { formatChipStyle } from '@/features/book/lib/format-colors'
 import HighlightNoteEditor from '@/features/book/components/detail/tabs/HighlightNoteEditor.vue'
 import AnnotationBookThumb from './AnnotationBookThumb.vue'
 import AnnotationSyncDetailPanel from './AnnotationSyncDetailPanel.vue'
@@ -95,10 +95,7 @@ const jumpFileFormat = computed(() => {
   const format = props.annotation.jumpFileFormat?.trim()
   return format ? format.toUpperCase() : null
 })
-const jumpFileFormatStyle = computed(() => {
-  const color = getFormatColor(jumpFileFormat.value)
-  return { color, borderColor: `${color}66`, backgroundColor: `${color}1a` }
-})
+const jumpFileFormatStyle = computed(() => formatChipStyle(jumpFileFormat.value))
 const canJump = computed(() => props.annotation.jumpFileId != null && (props.mode !== 'hub' || jumpFileFormat.value != null) && !props.trashed)
 const isLong = computed(() => props.annotation.text.length > (props.density === 'compact' ? 180 : 260))
 const isApproximate = computed(() => props.annotation.cfi == null && props.annotation.origin !== 'web')
@@ -256,7 +253,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
     <Tooltip v-else>
       <TooltipTrigger as-child>
         <span
-          class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border bg-muted"
+          class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-xs border border-border bg-muted"
           :style="{ color: annotation.color }"
         >
           <component :is="styleIcon" :size="16" />
@@ -266,9 +263,8 @@ function shouldSeparateMetadataItem(index: number): boolean {
     </Tooltip>
 
     <div class="flex flex-1 min-w-0 flex-col self-stretch">
-      <p class="text-sm leading-relaxed text-foreground" :class="quoteClampClass">
-        {{ annotation.text }}
-      </p>
+      <p v-if="annotation.text" class="whitespace-pre-line text-sm leading-relaxed text-foreground" :class="quoteClampClass">{{ annotation.text }}</p>
+      <p v-else class="text-sm italic leading-relaxed text-muted-foreground">{{ t('annotations.textUnavailable') }}</p>
 
       <button
         v-if="isLong"
@@ -311,7 +307,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="flex h-7 w-7 items-center justify-center rounded border text-xs transition-colors"
+                class="flex h-7 w-7 items-center justify-center rounded-xs border text-xs transition-colors"
                 :class="
                   annotation.style === s.value
                     ? 'border-primary bg-primary/10 text-primary'
@@ -381,7 +377,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
             <TooltipTrigger as-child>
               <RouterLink
                 :to="{ name: 'book-detail', params: { bookId: annotation.bookId }, query: { tab: 'details' } }"
-                class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
               >
                 <Info :size="15" />
               </RouterLink>
@@ -393,7 +389,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
                 @click="handleJump"
               >
                 <BookOpen :size="15" />
@@ -407,7 +403,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
                   @click="handleRestore"
                 >
                   <ArchiveRestore :size="15" />
@@ -419,7 +415,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
                   @click="handlePurge"
                 >
                   <Trash2 :size="15" />
@@ -434,7 +430,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   @click="toggleNoteEditor"
                 >
                   <FileEdit :size="14" />
@@ -447,7 +443,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded transition-colors hover:bg-muted hover:text-foreground"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs transition-colors hover:bg-muted hover:text-foreground"
                   :class="showStylePanel ? 'bg-muted text-foreground' : 'text-muted-foreground'"
                   @click="toggleStylePanel"
                 >
@@ -457,11 +453,11 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipContent>{{ t('annotations.listItem.colorAndStyle') }}</TooltipContent>
             </Tooltip>
 
-            <Tooltip>
+            <Tooltip v-if="annotation.text">
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   @click="handleCopy"
                 >
                   <Check v-if="copied" :size="14" class="text-primary" />
@@ -474,7 +470,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
             <template v-if="confirmTrash && mode === 'book'">
               <button
                 type="button"
-                class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 :title="t('common.cancel')"
                 @click="handleCancelTrash"
               >
@@ -482,7 +478,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               </button>
               <button
                 type="button"
-                class="h-7 rounded bg-destructive/15 px-2 text-[10px] font-medium uppercase text-destructive ring-1 ring-destructive/40"
+                class="h-7 rounded-xs bg-destructive/15 px-2 text-[10px] font-medium uppercase text-destructive ring-1 ring-destructive/40"
                 @click="handleTrash"
               >
                 {{ t('annotations.listItem.trash') }}
@@ -492,7 +488,7 @@ function shouldSeparateMetadataItem(index: number): boolean {
               <TooltipTrigger as-child>
                 <button
                   type="button"
-                  class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                  class="flex h-7 w-7 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
                   @click="handleTrash"
                 >
                   <Trash2 :size="14" />

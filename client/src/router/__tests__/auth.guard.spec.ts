@@ -4,10 +4,15 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { registerAuthGuard } from '../guards/auth.guard'
 
-const { authState, statusState, openChangePasswordMock } = vi.hoisted(() => ({
+const { authState, statusState, sessionGate, openChangePasswordMock } = vi.hoisted(() => ({
   authState: { user: null as Record<string, unknown> | null },
   statusState: { needsSetup: false, allowRegistration: false, passwordLoginEnabled: true },
+  sessionGate: { resolved: Promise.resolve() },
   openChangePasswordMock: vi.fn<(force: boolean) => void>(),
+}))
+
+vi.mock('@/features/auth/composables/useSessionBootstrap', () => ({
+  whenSessionResolved: () => sessionGate.resolved,
 }))
 
 vi.mock('@/features/auth/composables/useAuth', () => ({
@@ -51,6 +56,10 @@ function makeRouter() {
       { path: '/setup', name: 'setup', component: blank, meta: { public: true } },
       { path: '/forgot-password', name: 'forgot-password', component: blank, meta: { public: true } },
       { path: '/reset-password', name: 'reset-password', component: blank, meta: { public: true } },
+      { path: '/requests', name: 'book-requests', component: blank },
+      { path: '/requests/:id', name: 'book-request-detail', component: blank },
+      { path: '/settings/admin/requests', name: 'settings-admin-requests', component: blank },
+      { path: '/settings/appearance/behavior', name: 'settings-appearance-behavior', component: blank },
     ],
   })
   registerAuthGuard(router)
@@ -63,6 +72,43 @@ beforeEach(() => {
   statusState.needsSetup = false
   statusState.allowRegistration = false
   statusState.passwordLoginEnabled = true
+  sessionGate.resolved = Promise.resolve()
+})
+
+describe('auth guard: unreachable server at boot', () => {
+  it('waits for the session instead of reading "no answer yet" as signed out', async () => {
+    let release!: () => void
+    sessionGate.resolved = new Promise((resolve) => {
+      release = resolve
+    })
+    const router = makeRouter()
+
+    const navigation = router.push('/requests')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(router.currentRoute.value.name).toBeUndefined()
+
+    authState.user = { id: 1, isDefaultPassword: false, permissions: [], settings: {} }
+    release()
+    await navigation
+
+    expect(router.currentRoute.value.name).toBe('book-requests')
+  })
+})
+
+describe('auth guard: hidden book requests', () => {
+  it.each(['/requests', '/requests/42', '/settings/admin/requests'])('redirects %s to the visibility setting', async (path) => {
+    authState.user = { id: 1, isDefaultPassword: false, permissions: [], settings: { showBookRequests: false } }
+    const router = makeRouter()
+    await router.push(path)
+    expect(router.currentRoute.value.name).toBe('settings-appearance-behavior')
+  })
+
+  it('preserves existing request links when the preference is absent', async () => {
+    authState.user = { id: 1, isDefaultPassword: false, permissions: [], settings: {} }
+    const router = makeRouter()
+    await router.push('/requests')
+    expect(router.currentRoute.value.name).toBe('book-requests')
+  })
 })
 
 describe('auth guard: /register', () => {

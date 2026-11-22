@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { sqlChunkText } from '../../common/test-utils/sql-chunk-text';
 import { KoreaderPluginRepository } from './koreader-plugin.repository';
+import { Test } from '@nestjs/testing';
+import { DB } from '../../db';
+import { createCapturingDb } from '../../common/test-utils/capture-sql-db';
 
 function makeQueryChain(result: unknown) {
   const chain: Record<string, unknown> = {
@@ -9,7 +12,11 @@ function makeQueryChain(result: unknown) {
     },
   };
   chain.from = vi.fn().mockReturnValue(chain);
+  chain.innerJoin = vi.fn().mockReturnValue(chain);
   chain.where = vi.fn().mockReturnValue(chain);
+  chain.groupBy = vi.fn().mockReturnValue(chain);
+  chain.having = vi.fn().mockReturnValue(chain);
+  chain.orderBy = vi.fn().mockReturnValue(chain);
   chain.limit = vi.fn().mockReturnValue(chain);
   return chain;
 }
@@ -38,9 +45,10 @@ describe('KoreaderPluginRepository', () => {
   let db: ReturnType<typeof makeDb>;
   let repo: KoreaderPluginRepository;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db = makeDb();
-    repo = new KoreaderPluginRepository(db as never);
+    const module = await Test.createTestingModule({ providers: [KoreaderPluginRepository, { provide: DB, useValue: db }] }).compile();
+    repo = module.get(KoreaderPluginRepository);
   });
 
   describe('getPluginTotals', () => {
@@ -87,6 +95,47 @@ describe('KoreaderPluginRepository', () => {
         failedPositions: 0,
         unmatchedBooks: 0,
       });
+    });
+  });
+
+  describe('getHashHistoryVersion', () => {
+    it('avoids querying for a user without library access', async () => {
+      await expect(repo.getHashHistoryVersion([])).resolves.toBe('');
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it('preserves full bigint precision in the revision token', async () => {
+      db.select.mockReturnValue(
+        makeQueryChain([
+          { id: 31, revision: '9007199254740993' },
+          { id: 32, revision: '2' },
+        ]),
+      );
+      await expect(repo.getHashHistoryVersion([31, 32])).resolves.toBe('31:9007199254740993,32:2');
+    });
+
+    it.each([null, [31, 32]])('reads library revisions without scanning files or history for access %s', async (libraries) => {
+      const captured = createCapturingDb();
+      const module = await Test.createTestingModule({ providers: [KoreaderPluginRepository, { provide: DB, useValue: captured.db }] }).compile();
+      await module.get(KoreaderPluginRepository).getHashHistoryVersion(libraries);
+      expect(captured.queries).toHaveLength(1);
+      const query = captured.queries[0]!;
+      expect(query.sql).toContain('"koreader_hash_revision"::text');
+      expect(query.sql).toContain('order by "libraries"."id"');
+      expect(query.sql).not.toMatch(/count|join|book_files|book_file_hash_history/);
+      expect(query.params).toEqual(libraries ?? []);
+    });
+  });
+
+  describe('getGlobalMaxFileTimestamp', () => {
+    it('uses an indexed, bounded expression lookup without a library join', async () => {
+      const captured = createCapturingDb();
+      const module = await Test.createTestingModule({ providers: [KoreaderPluginRepository, { provide: DB, useValue: captured.db }] }).compile();
+      await module.get(KoreaderPluginRepository).getGlobalMaxFileTimestamp();
+      expect(captured.queries[0]!.sql).toContain('order by greatest(');
+      expect(captured.queries[0]!.sql).toContain('desc limit');
+      expect(captured.queries[0]!.sql).not.toMatch(/max\(|join|books/);
+      expect(captured.queries[0]!.params).toEqual([1]);
     });
   });
 
@@ -168,6 +217,46 @@ describe('KoreaderPluginRepository', () => {
     it('issues no statement for an empty entry list', async () => {
       await repo.upsertRatings(7, [], new Date());
       expect(db.insert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('repairCopiedStatsBatch', () => {
+    it('reports no work and opens no transaction when no event reached two devices', async () => {
+      db.select.mockReturnValue(makeQueryChain([]));
+      db.transaction = vi.fn();
+
+      await expect(repo.repairCopiedStatsBatch(null, 200)).resolves.toEqual({ bookFiles: 0, removedSessions: 0, nextCursor: null });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    it('repairs each book file of a full batch once and resumes after its last group', async () => {
+      const groups = makeQueryChain([
+        { userId: 7, bookFileId: 42 },
+        { userId: 7, bookFileId: 42 },
+        { userId: 9, bookFileId: 11 },
+      ]);
+      // Book files whose row has gone leave nothing to derive, so the pass stops before the lock.
+      db.select.mockReturnValueOnce(groups).mockReturnValue(makeQueryChain([]));
+      db.transaction = vi.fn();
+
+      await expect(repo.repairCopiedStatsBatch(null, 3)).resolves.toEqual({
+        bookFiles: 2,
+        removedSessions: 0,
+        nextCursor: { userId: 9, bookFileId: 11 },
+      });
+      expect(groups.having).toHaveBeenCalledTimes(1);
+      expect(sqlChunkText(groups.having.mock.calls[0]![0])).toContain('count(*) > 1');
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    it('resumes from a cursor by group order rather than an offset', async () => {
+      const groups = makeQueryChain([]);
+      db.select.mockReturnValue(groups);
+
+      await repo.repairCopiedStatsBatch({ userId: 7, bookFileId: 42 }, 200);
+
+      expect(sqlChunkText(groups.where.mock.calls[0]![0])).toContain(') > (');
+      expect(groups.limit).toHaveBeenCalledWith(200);
     });
   });
 

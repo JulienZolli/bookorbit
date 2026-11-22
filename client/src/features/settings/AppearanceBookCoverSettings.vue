@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { Image } from '@lucide/vue'
@@ -12,12 +12,25 @@ import {
   type BookShadowStrength,
   type BookSpineOverlay,
   type CardOverlayKey,
+  type FormatBadgeStyle,
+  type PlaceholderCoverStyle,
 } from '@/composables/useDisplaySettings'
+import BookCardFormatBadges from '@/features/book/components/BookCardFormatBadges.vue'
+import BookCoverPlaceholder from '@/features/book/components/BookCoverPlaceholder.vue'
 import { useCoverSearchPreferences } from '@/features/book/composables/useCoverSearchPreferences'
 
 const { t } = useI18n()
 
-const { cardOverlays, bookSpineOverlay, showSpineOnComics, bookShadowStrength, bookCoverDisplayMode, bookDetailCoverTint } = useDisplaySettings()
+const {
+  cardOverlays,
+  formatBadgeStyle,
+  bookSpineOverlay,
+  showSpineOnComics,
+  bookShadowStrength,
+  bookCoverDisplayMode,
+  bookDetailCoverTint,
+  placeholderCoverStyle,
+} = useDisplaySettings()
 const {
   defaultProvider: defaultCoverSearchProvider,
   isLoading: isCoverSearchPreferenceLoading,
@@ -25,6 +38,90 @@ const {
   load: loadCoverSearchPreferences,
   update: updateCoverSearchPreferences,
 } = useCoverSearchPreferences()
+
+// Bibliographic sample data, so it stays untranslated like any other book in the library. The set
+// spans short and long titles, a series, and several genres, since each style colours by genre.
+interface PlaceholderSample {
+  title: string
+  subtitle: string | null
+  authors: string[]
+  seriesName: string | null
+  seriesIndex: string | null
+  genres: string[]
+  seed: string
+}
+
+const PLACEHOLDER_SAMPLES: PlaceholderSample[] = [
+  {
+    title: 'Emma',
+    subtitle: null,
+    authors: ['Jane Austen'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Romance', 'Classics'],
+    seed: 'sample-emma',
+  },
+  {
+    title: 'The Hound of the Baskervilles',
+    subtitle: null,
+    authors: ['Arthur Conan Doyle'],
+    seriesName: 'Sherlock Holmes',
+    seriesIndex: '3',
+    genres: ['Mystery'],
+    seed: 'sample-hound',
+  },
+  {
+    title: 'Frankenstein',
+    subtitle: 'The Modern Prometheus',
+    authors: ['Mary Shelley'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Horror', 'Classics'],
+    seed: 'sample-frankenstein',
+  },
+  {
+    title: 'Twenty Thousand Leagues Under the Seas',
+    subtitle: null,
+    authors: ['Jules Verne'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Science Fiction'],
+    seed: 'sample-leagues',
+  },
+  {
+    title: "Alice's Adventures in Wonderland",
+    subtitle: null,
+    authors: ['Lewis Carroll'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Fantasy'],
+    seed: 'sample-alice',
+  },
+  {
+    title: 'Meditations',
+    subtitle: null,
+    authors: ['Marcus Aurelius'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Philosophy'],
+    seed: 'sample-meditations',
+  },
+]
+
+const hoveredPlaceholderStyle = ref<PlaceholderCoverStyle | null>(null)
+const shownPlaceholderStyle = computed(() => hoveredPlaceholderStyle.value ?? placeholderCoverStyle.value)
+
+const placeholderStyleOptions = computed<{ id: PlaceholderCoverStyle; label: string }[]>(() => [
+  { id: 'bauhaus', label: t('settings.appearance.bookCovers.placeholderStyle.options.bauhaus') },
+  { id: 'constructivist', label: t('settings.appearance.bookCovers.placeholderStyle.options.constructivist') },
+  { id: 'memphis', label: t('settings.appearance.bookCovers.placeholderStyle.options.memphis') },
+  { id: 'clothbound', label: t('settings.appearance.bookCovers.placeholderStyle.options.clothbound') },
+  { id: 'poster', label: t('settings.appearance.bookCovers.placeholderStyle.options.poster') },
+  { id: 'aurora', label: t('settings.appearance.bookCovers.placeholderStyle.options.aurora') },
+  { id: 'vista', label: t('settings.appearance.bookCovers.placeholderStyle.options.vista') },
+  { id: 'marbled', label: t('settings.appearance.bookCovers.placeholderStyle.options.marbled') },
+  { id: 'paperback', label: t('settings.appearance.bookCovers.placeholderStyle.options.paperback') },
+])
 
 const coverSearchProviderOptions = computed<{ id: CoverSearchDefaultProvider; label: string }[]>(() => [
   { id: 'duckduckgo', label: 'DuckDuckGo' },
@@ -62,6 +159,48 @@ const overlayOptions = computed<{ key: CardOverlayKey; label: string; hint: stri
     key: 'lock-status',
     label: t('settings.appearance.bookCovers.overlays.lockStatus.label'),
     hint: t('settings.appearance.bookCovers.overlays.lockStatus.hint'),
+  },
+])
+
+// One book in three formats, so every style has something to fold; sample data like the placeholder books.
+const FORMAT_BADGE_PREVIEW_KEYS = ['epub', 'm4b', 'pdf']
+const formatBadgePreviewBook = PLACEHOLDER_SAMPLES[0]!
+
+const formatBadgeStyleOptions = computed<{ id: FormatBadgeStyle; label: string; hint: string }[]>(() => [
+  {
+    id: 'primary',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.primary.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.primary.hint'),
+  },
+  {
+    id: 'bubble',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.bubble.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.bubble.hint'),
+  },
+  {
+    id: 'underline',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.underline.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.underline.hint'),
+  },
+  {
+    id: 'pips',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.pips.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.pips.hint'),
+  },
+  {
+    id: 'seal',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.seal.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.seal.hint'),
+  },
+  {
+    id: 'dots',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.dots.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.dots.hint'),
+  },
+  {
+    id: 'kinds',
+    label: t('settings.appearance.bookCovers.formatBadgeStyle.options.kinds.label'),
+    hint: t('settings.appearance.bookCovers.formatBadgeStyle.options.kinds.hint'),
   },
 ])
 
@@ -138,12 +277,28 @@ function toggleOverlay(key: CardOverlayKey) {
   else cardOverlays.value = cardOverlays.value.filter((k) => k !== key)
 }
 
+function setFormatBadgeStyle(style: FormatBadgeStyle) {
+  formatBadgeStyle.value = style
+}
+
 function setBookSpineOverlay(mode: BookSpineOverlay) {
   bookSpineOverlay.value = mode
 }
 
 function setBookShadowStrength(mode: BookShadowStrength) {
   bookShadowStrength.value = mode
+}
+
+function setPlaceholderCoverStyle(style: PlaceholderCoverStyle) {
+  placeholderCoverStyle.value = style
+}
+
+function previewPlaceholderStyle(style: PlaceholderCoverStyle) {
+  hoveredPlaceholderStyle.value = style
+}
+
+function endPlaceholderPreview() {
+  hoveredPlaceholderStyle.value = null
 }
 
 function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
@@ -194,6 +349,51 @@ onMounted(async () => {
             {{ provider.label }}
           </option>
         </select>
+      </div>
+      <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div>
+          <p id="placeholder-style-label" class="settings-label">
+            {{ t('settings.appearance.bookCovers.placeholderStyle.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.placeholderStyle.hint') }}
+          </p>
+        </div>
+        <div
+          class="mt-3 inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/50 p-1"
+          role="group"
+          aria-labelledby="placeholder-style-label"
+          @mouseleave="endPlaceholderPreview"
+          @focusout="endPlaceholderPreview"
+        >
+          <button
+            v-for="opt in placeholderStyleOptions"
+            :key="opt.id"
+            type="button"
+            class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="placeholderCoverStyle === opt.id ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+            :aria-pressed="placeholderCoverStyle === opt.id"
+            @click="setPlaceholderCoverStyle(opt.id)"
+            @mouseenter="previewPlaceholderStyle(opt.id)"
+            @focus="previewPlaceholderStyle(opt.id)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+        <div class="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-6" data-testid="placeholder-style-preview">
+          <span v-for="sample in PLACEHOLDER_SAMPLES" :key="sample.seed" class="relative block aspect-[2/3] overflow-hidden rounded-sm shadow-sm">
+            <BookCoverPlaceholder
+              :title="sample.title"
+              :subtitle="sample.subtitle"
+              :authors="sample.authors"
+              :series-name="sample.seriesName"
+              :series-index="sample.seriesIndex"
+              :genres="sample.genres"
+              :seed="sample.seed"
+              :variant="shownPlaceholderStyle"
+            />
+          </span>
+        </div>
       </div>
       <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
         <div>
@@ -323,15 +523,57 @@ onMounted(async () => {
           {{ t('settings.appearance.bookCovers.overlays.hint') }}
         </p>
       </div>
-      <div v-for="opt in overlayOptions" :key="opt.key" class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
-        <div class="min-w-0">
-          <p class="settings-label">{{ opt.label }}</p>
-          <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
-            {{ opt.hint }}
-          </p>
+      <template v-for="opt in overlayOptions" :key="opt.key">
+        <div class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
+          <div class="min-w-0">
+            <p class="settings-label">{{ opt.label }}</p>
+            <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
+              {{ opt.hint }}
+            </p>
+          </div>
+          <ToggleSwitch :model-value="cardOverlays.includes(opt.key)" @update:model-value="toggleOverlay(opt.key)" />
         </div>
-        <ToggleSwitch :model-value="cardOverlays.includes(opt.key)" @update:model-value="toggleOverlay(opt.key)" />
-      </div>
+        <div v-if="opt.key === 'format' && cardOverlays.includes('format')" class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
+          <div>
+            <p id="format-badge-style-label" class="settings-label">
+              {{ t('settings.appearance.bookCovers.formatBadgeStyle.title') }}
+            </p>
+            <p class="settings-hint">
+              {{ t('settings.appearance.bookCovers.formatBadgeStyle.hint') }}
+            </p>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4" role="group" aria-labelledby="format-badge-style-label">
+            <button
+              v-for="style in formatBadgeStyleOptions"
+              :key="style.id"
+              type="button"
+              class="flex flex-col rounded-md border p-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :class="formatBadgeStyle === style.id ? 'border-primary bg-primary/8' : 'border-border hover:border-muted-foreground/40'"
+              :aria-pressed="formatBadgeStyle === style.id"
+              :data-testid="`format-badge-style-${style.id}`"
+              @click="setFormatBadgeStyle(style.id)"
+            >
+              <span class="relative block aspect-[2/3] w-full overflow-hidden rounded-sm" aria-hidden="true">
+                <BookCoverPlaceholder
+                  :title="formatBadgePreviewBook.title"
+                  :subtitle="formatBadgePreviewBook.subtitle"
+                  :authors="formatBadgePreviewBook.authors"
+                  :series-name="formatBadgePreviewBook.seriesName"
+                  :series-index="formatBadgePreviewBook.seriesIndex"
+                  :genres="formatBadgePreviewBook.genres"
+                  :seed="formatBadgePreviewBook.seed"
+                  :variant="placeholderCoverStyle"
+                />
+                <BookCardFormatBadges :own-keys="FORMAT_BADGE_PREVIEW_KEYS" :badge-style="style.id" />
+              </span>
+              <span class="mt-2 block text-xs font-semibold" :class="formatBadgeStyle === style.id ? 'text-primary' : 'text-foreground'">{{
+                style.label
+              }}</span>
+              <span class="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{{ style.hint }}</span>
+            </button>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
 </template>

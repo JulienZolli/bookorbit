@@ -35,6 +35,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2025-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2025-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -131,6 +132,15 @@ describe('useTableCellHelpers', () => {
       helpers = useTableCellHelpers(locks, () => false)
       const book = makeBook()
       expect(helpers.isCellReadOnly(book, { id: 'title', isEditable: true })).toBe(true)
+    })
+
+    it('locks metadata columns on rows whose library the user can only read, but keeps personal reading state editable', () => {
+      const canEdit = vi.fn<(book: BookCard) => boolean>((book) => book.libraryId === 1)
+      helpers = useTableCellHelpers(locks, () => false, undefined, canEdit)
+
+      expect(helpers.isCellReadOnly(makeBook({ libraryId: 2 }), { id: 'title', isEditable: true })).toBe(true)
+      expect(helpers.isCellReadOnly(makeBook({ libraryId: 2 }), { id: 'readStatus', isEditable: true })).toBe(false)
+      expect(helpers.isCellReadOnly(makeBook({ libraryId: 1 }), { id: 'title', isEditable: true })).toBe(false)
     })
 
     it('returns true when isReadOnly global flag is set', () => {

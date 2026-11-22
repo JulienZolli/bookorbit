@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import { ValidationPipe } from '@nestjs/common';
 
 import { BulkEditBookDockDto, BulkSetTargetDto, FinalizeBookDockDto, UpdateBookDockFileDto } from './dto';
+import { toBookDockFilter } from './dto/book-dock-filter';
 import { ListBookDockFilesDto } from './dto/list-book-dock-files.dto';
 import { normalizeBookDockMetadata } from './book-dock-metadata.utils';
 
@@ -32,10 +33,60 @@ describe('BookDock DTO validation', () => {
     expect((await errorsFor(ListBookDockFilesDto, { limit: 200 })).length).toBeGreaterThan(0);
   });
 
+  it('takes a dock filter of unsorted or a dock id, on the list and on bulk actions', async () => {
+    for (const dock of ['unsorted', '7', '999999999']) {
+      expect(await errorsFor(ListBookDockFilesDto, { dock })).toEqual([]);
+      expect(await errorsFor(BulkSetTargetDto, { dock, selectAll: true })).toEqual([]);
+    }
+    for (const dock of ['Unsorted', '0', '07', '-1', '1234567890', 'all', 7]) {
+      expect((await errorsFor(ListBookDockFilesDto, { dock })).length).toBeGreaterThan(0);
+      expect((await errorsFor(FinalizeBookDockDto, { dock })).length).toBeGreaterThan(0);
+    }
+    expect(toBookDockFilter({ dock: 'unsorted' })).toEqual({ dock: 'unsorted' });
+    expect(toBookDockFilter({ dock: '7' })).toEqual({ dock: 7 });
+    expect(toBookDockFilter({})).toBeUndefined();
+  });
+
+  it('takes a hold filter of held, clear or one hold reason, on the list and on bulk actions', async () => {
+    for (const hold of ['held', 'clear', 'duplicate', 'waiting_for_manager']) {
+      expect(await errorsFor(ListBookDockFilesDto, { hold })).toEqual([]);
+      expect(await errorsFor(FinalizeBookDockDto, { hold, selectAll: true })).toEqual([]);
+    }
+    for (const hold of ['Held', 'any', 'unknown_reason', 1]) {
+      expect((await errorsFor(ListBookDockFilesDto, { hold })).length).toBeGreaterThan(0);
+      expect((await errorsFor(BulkSetTargetDto, { hold })).length).toBeGreaterThan(0);
+    }
+    expect(toBookDockFilter({ hold: 'held' })).toEqual({ hold: 'held' });
+    expect(toBookDockFilter({ dock: '7', hold: 'duplicate' })).toEqual({ dock: 7, hold: 'duplicate' });
+  });
+
   it('FinalizeBookDockDto requires default destination values to be complete pair', async () => {
     expect((await errorsFor(FinalizeBookDockDto, { defaultLibraryId: 1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(FinalizeBookDockDto, { defaultFolderId: 2 })).length).toBeGreaterThan(0);
     expect((await errorsFor(FinalizeBookDockDto, { defaultLibraryId: 1, defaultFolderId: 2, fileIds: [1, 2] })).length).toBe(0);
+  });
+
+  it('FinalizeBookDockDto rejects a request that selects nothing to finalize', async () => {
+    for (const body of [{}, { fileIds: [] }, { selectAll: false, fileIds: [] }, { readyToFile: true }, { status: 'ready' }]) {
+      expect((await errorsFor(FinalizeBookDockDto, body)).length).toBeGreaterThan(0);
+    }
+    const [error] = await errorsFor(FinalizeBookDockDto, {});
+    expect(error?.constraints?.hasFinalizeSelection).toContain('selectAll');
+
+    expect(await errorsFor(FinalizeBookDockDto, { fileIds: [996, 997] })).toEqual([]);
+    expect(await errorsFor(FinalizeBookDockDto, { selectAll: true, readyToFile: true })).toEqual([]);
+  });
+
+  it('FinalizeBookDockDto accepts an optional existing book to join per override and nothing else in it', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+    const check = (overrides: unknown[]) => pipe.transform({ fileIds: [1], overrides }, { type: 'body', metatype: FinalizeBookDockDto });
+
+    await expect(check([{ fileId: 1 }])).resolves.toBeDefined();
+    await expect(check([{ fileId: 1, joinBook: { bookId: 42 } }])).resolves.toMatchObject({ overrides: [{ fileId: 1, joinBook: { bookId: 42 } }] });
+    await expect(check([{ fileId: 1, joinBook: { bookId: 0 } }])).rejects.toThrow();
+    await expect(check([{ fileId: 1, joinBook: { bookId: '42x' } }])).rejects.toThrow();
+    await expect(check([{ fileId: 1, joinBook: 42 }])).rejects.toThrow();
+    await expect(check([{ fileId: 1, joinBook: { bookId: 42, folderPath: '/elsewhere' } }])).rejects.toThrow();
   });
 
   it('UpdateBookDockFileDto allows null destination values but rejects non-integers', async () => {
@@ -64,12 +115,12 @@ describe('BookDock DTO validation', () => {
       communityRatings: [{ provider: 'hardcover', rating: 4.5, ratingCount: 1000 }],
       googleBooksId: 'google-id',
       goodreadsId: 'goodreads-id',
-      amazonId: 'amazon-id',
+      amazonId: 'B00X47ZVXM',
       hardcoverId: 'hardcover-id',
       hardcoverEditionId: 'hardcover-edition-id',
       openLibraryId: 'OL1W',
       itunesId: 'itunes-id',
-      audibleId: 'audible-id',
+      audibleId: 'B002V0QK4C',
       librofmId: 'librofm-id',
       koboId: 'kobo-id',
       comicvineId: 'comicvine-id',
@@ -153,5 +204,40 @@ describe('BookDock DTO validation', () => {
     expect(
       (await errorsFor(BulkEditBookDockDto, { fields: { seriesIndex: 5.1 }, enabledFields: ['seriesIndex'], mergeArrays: false })).length,
     ).toBeGreaterThan(0);
+  });
+
+  // Issue #1624: a hyphenated ISBN used to fail @MaxLength(13) instead of being saved.
+  it('UpdateBookDockFileDto cleans pasted identifiers through the production validation path', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+
+    await expect(
+      pipe.transform(
+        {
+          selectedMetadata: {
+            isbn13: 'ISBN-13 : 978-3426226223',
+            isbn10: '0 8044 2957 x',
+            amazonId: '\u200BB00X47ZVXM',
+            goodreadsId: ' 12345.The_Book\u200E',
+          },
+        },
+        { type: 'body', metatype: UpdateBookDockFileDto, data: undefined },
+      ),
+    ).resolves.toMatchObject({
+      selectedMetadata: { isbn13: '9783426226223', isbn10: '080442957X', amazonId: 'B00X47ZVXM', goodreadsId: '12345.The_Book' },
+    });
+  });
+
+  it('BulkEditBookDockDto cleans pasted ISBNs and still rejects ones too long to be an ISBN', async () => {
+    const valid = plainToInstance(BulkEditBookDockDto, {
+      fields: { isbn13: '978-3-426-22622-3', isbn10: '\uFEFF0-306-40615-2' },
+      enabledFields: ['isbn13', 'isbn10'],
+      mergeArrays: false,
+    });
+    expect(await validate(valid)).toHaveLength(0);
+    expect(valid.fields).toMatchObject({ isbn13: '9783426226223', isbn10: '0306406152' });
+
+    const tooLong = plainToInstance(BulkEditBookDockDto, { fields: { isbn13: '978-3426226223-9' }, enabledFields: ['isbn13'], mergeArrays: false });
+    expect(tooLong.fields.isbn13).toBe('97834262262239');
+    expect(await validate(tooLong)).toHaveLength(1);
   });
 });

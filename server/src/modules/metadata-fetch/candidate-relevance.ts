@@ -1,7 +1,8 @@
-import { MetadataCandidate } from '@bookorbit/types';
+import { MetadataProviderKey, type MetadataCandidate } from '@bookorbit/types';
 
 import { candidateHasNormalizedIsbn, normalizeMetadataIsbn } from './isbn-match';
 import { MetadataSearchParams } from './providers/metadata-search-params';
+import { scoreComicVineIssue } from './providers/comicvine/comicvine.matching';
 import { normalizeTitleText, scoreTitleMatch, shareSignificantToken } from '../../common/text-match/title-match';
 
 const DEFAULT_LIMIT = 5;
@@ -9,6 +10,13 @@ const DEFAULT_LIMIT = 5;
 export const ISBN_MATCH_SCORE = 100;
 export const AUTHOR_MATCH_SCORE = 3;
 export const AUTHOR_TOKEN_MATCH_SCORE = 1;
+/**
+ * What a candidate of another medium than the book loses in ranking. Enough to put "The Faraway
+ * Paladin: The Boy in the City of the Dead" (the novel) above "The Faraway Paladin (Manga) Volume 1"
+ * for an EPUB searched as "The Faraway Paladin Volume 1", not enough to outrank a query that names
+ * the manga outright.
+ */
+export const MEDIUM_MISMATCH_PENALTY = 3;
 
 /**
  * The weakest title signal a candidate may rest on. Anything below this is a coincidence rather
@@ -42,7 +50,8 @@ export function filterAndRank(candidates: MetadataCandidate[], params: MetadataS
     })
     .map((c) => ({ candidate: c, score: scoreCandidate(c, params) }))
     .filter(({ score }) => score >= MIN_RELEVANCE_SCORE)
-    .sort((a, b) => b.score - a.score)
+    .map((ranked) => ({ ...ranked, rank: ranked.score - mediumPenalty(ranked.candidate, params) }))
+    .sort((a, b) => b.rank - a.rank)
     .slice(0, limit)
     .map(({ candidate }) => candidate);
 }
@@ -56,9 +65,9 @@ export function scoreCandidate(candidate: MetadataCandidate, params: MetadataSea
   let score = 0;
 
   const matchable = matchableTitle(candidate);
-  if (params.title && matchable) {
-    score += scoreTitleMatch(params.title, matchable);
-  }
+  const comicScore = candidate.provider === MetadataProviderKey.COMICVINE ? scoreComicVineIssue(candidate, params) : null;
+  if (comicScore !== null) score = comicScore;
+  else if (params.title && matchable) score = scoreTitleMatch(params.title, matchable);
 
   // When a title was supplied, author remains a boost and cannot rescue an unrelated title.
   // Without a title, an exact or containing author match is strong enough to stand on its own.
@@ -67,6 +76,21 @@ export function scoreCandidate(candidate: MetadataCandidate, params: MetadataSea
   }
 
   return score;
+}
+
+/**
+ * `scoreCandidate` adjusted for the book's medium: what orders candidates. A candidate whose provider
+ * says it is another medium than the book drops below an equally relevant one, but the relevance
+ * floor is applied to the unadjusted score, so a mislabelled record is never lost over it.
+ */
+export function rankCandidate(candidate: MetadataCandidate, params: MetadataSearchParams): number {
+  return scoreCandidate(candidate, params) - mediumPenalty(candidate, params);
+}
+
+function mediumPenalty(candidate: MetadataCandidate, params: MetadataSearchParams): number {
+  // An ISBN match is the edition itself, whatever its record says.
+  if (params.isbn && candidateHasNormalizedIsbn(candidate, normalizeMetadataIsbn(params.isbn))) return 0;
+  return params.mediaKind && candidate.mediaKind && candidate.mediaKind !== params.mediaKind ? MEDIUM_MISMATCH_PENALTY : 0;
 }
 
 /**

@@ -1,17 +1,20 @@
+import { isTransientRegexFailure, RegexMetadataService } from '../metadata/regex/regex-metadata.service';
+import type { RegexMetadataConfig, RegexMetadataPreview } from '@bookorbit/types';
 import { ConflictException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { createHash } from 'crypto';
-import { mapWithConcurrency } from '../../common/utils/batch.utils';
+import { mapWithConcurrency, pipelineWithConcurrency } from '../../common/utils/batch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import { naturalCompare } from '../../common/utils/natural-sort.utils';
+import { audioBookPercentageAt, compareBookFilePaths, remapAudioBookPosition, type AudioTrackSpan } from '../../common/utils/audio-track-order.utils';
+import { compareAudioTracks } from '../../common/utils/book-media.utils';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
-import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
+import { selectPrimaryFileKeepingCurrent } from '../../common/utils/primary-file-selection.utils';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
+import { LibraryOperationGate, type LibraryOperationRelease } from '../../common/services/library-operation-gate.service';
 
 import type {
   AddedAtSource,
   BookMissingEvent,
   BookTransferredEvent,
-  CoverRefreshedEvent,
   CoverRefreshProgressEvent,
   LibraryLastScan,
   LibraryScanHistoryEntry,
@@ -20,11 +23,17 @@ import type {
   ScanProgressEvent,
   ScanTriggeredBy,
 } from '@bookorbit/types';
-import { NotificationType } from '@bookorbit/types';
+import { NotificationType, resolveRegexMetadataConfig } from '@bookorbit/types';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { BookMetadataFetchOrchestratorService } from '../book-metadata-fetch/book-metadata-fetch-orchestrator.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
+import { selectEmbeddedCoverSources } from '../book-cover-store/cover-sources';
+import { JobChangesService } from '../jobs/job-changes.service';
+import { CoverSlotReconciler } from '../metadata/cover-slot-reconciler.service';
+import type { AudioChapterProbe } from '../metadata/extractors/audio.extractor';
 import { MetadataService } from '../metadata/metadata.service';
 import { NotificationService } from '../notification/notification.service';
+import type { BookFile } from '../../db/schema';
 import { ScanGateway } from './scan.gateway';
 import { ScanJobStore } from './scan-job-store.service';
 import { basename, dirname, relative, sep } from 'path';
@@ -40,8 +49,10 @@ import {
   findBookCandidates,
   findLooseFileCandidates,
   buildSingleBookCandidate,
+  isDiscDirectory,
   type WalkResult,
 } from './lib/walk';
+import { directoriesOwnedElsewhere, foldersYieldingTo, owningRoot, type LibraryRoot } from './lib/library-roots';
 import { ScannerRepository } from './scanner.repository';
 import { assembleBookCards } from '../book/utils/assemble-book-cards';
 import { LIBRARY_METADATA_PRECEDENCE_DEFAULT } from '../library/library.constants';
@@ -66,6 +77,8 @@ interface FileByPathEntry {
   sortOrder: number | null;
   mediaOverlayAvailable: boolean;
   mediaOverlayCheckedAt: Date | null;
+  /** Absent when the caller did not load it, which leaves the stored role alone. */
+  role?: string | null;
 }
 
 interface FileByInoEntry {
@@ -84,7 +97,21 @@ interface ScanLookupMaps {
   fileIdsByBookId: Map<number, Set<number>>;
 }
 
+interface RegexScanContext {
+  config: RegexMetadataConfig | null;
+  disabled: boolean;
+  /** Books whose rules could not run even after a retry; past the limit the rest of the scan skips regex. */
+  failures: number;
+}
+
+const REGEX_SCAN_FAILURE_LIMIT = 3;
+
+function createRegexScanContext(config: RegexMetadataConfig | null | undefined): RegexScanContext {
+  return { config: resolveRegexMetadataConfig(config), disabled: false, failures: 0 };
+}
+
 interface LibraryScanSettings {
+  regexContext: RegexScanContext;
   allowedFormats: string[];
   formatPriority: string[];
   metadataPrecedence: string[];
@@ -106,6 +133,7 @@ const METADATA_FORMATS = new Set([
   'cb7',
   'fb2',
   'pdf',
+  'djvu',
   'm4b',
   'mp3',
   'm4a',
@@ -115,16 +143,28 @@ const METADATA_FORMATS = new Set([
   'opf',
 ]);
 const SCANNER_METADATA_SOURCES = ['embedded', 'opfFile'] as const;
+const COVER_RECONCILE_BATCH_SIZE = 500;
 const COVER_REFRESH_BATCH_SIZE = 5;
 const BOOK_EMIT_BUFFER_SIZE = 20;
 const BOOK_EMIT_FLUSH_INTERVAL_MS = 1000;
 const BOOK_STATUS_NOTIFY_DEBOUNCE_MS = 1000;
 const BOOK_MISSING_NOTIFY_DEBOUNCE_MS = 5000;
 const WATCHER_NOTIFY_DEBOUNCE_MS = 30_000;
+const LIBRARY_ROOTS_CACHE_MS = 5_000;
 const TARGETED_BOOK_SCAN_MAX_CONCURRENCY = 8;
+// Books a full scan reads at once; each reads up to AUDIO_DURATION_PROBE_CONCURRENCY files itself.
+const FULL_SCAN_BOOK_READ_CONCURRENCY = 4;
 const MISSING_FILE_STAT_BATCH_SIZE = 50;
 const AUDIO_DURATION_PROBE_CONCURRENCY = 4;
+const MEDIA_OVERLAY_REPAIR_CONCURRENCY = 4;
 type OrganizationMode = 'book_per_file' | 'book_per_folder';
+
+function isUnderAnyDir(absolutePath: string, dirs: Set<string>): boolean {
+  for (const dir of dirs) {
+    if (absolutePath === dir || absolutePath.startsWith(dir + sep)) return true;
+  }
+  return false;
+}
 
 interface ScanCounts {
   addedCount: number;
@@ -144,7 +184,32 @@ interface RegisteredFile {
   isNew: boolean;
   wasReassigned: boolean;
   wasChanged: boolean;
+  wasPathChanged: boolean;
   mediaOverlayAvailable: boolean;
+  /** This book's stored sort order for the file before this scan; null when the file is new to it. */
+  previousSortOrder: number | null;
+}
+
+type StoredBookFile = Awaited<ReturnType<ScannerRepository['findBookFilesByBookIds']>>[number];
+
+export type LibraryRulesOutcome = 'updated' | 'unchanged' | 'skipped' | 'file_unavailable' | 'rules_unavailable' | 'rules_invalid';
+
+/** Files read back from the database, shaped like a scan that found nothing new about them. */
+function storedFilesAsRegistered(files: StoredBookFile[]): RegisteredFile[] {
+  return files.map((file) => ({
+    fileId: file.id,
+    format: file.format,
+    role: file.role as FileRole,
+    absolutePath: file.absolutePath,
+    sizeBytes: file.sizeBytes ?? 0,
+    durationSeconds: file.durationSeconds,
+    isNew: false,
+    wasReassigned: false,
+    wasChanged: false,
+    wasPathChanged: false,
+    mediaOverlayAvailable: file.mediaOverlayAvailable,
+    previousSortOrder: file.sortOrder,
+  }));
 }
 
 interface MetadataExtractionSource {
@@ -157,11 +222,29 @@ interface ProcessedFileResult {
   isNew: boolean;
   reassigned: boolean;
   changed: boolean;
+  pathChanged?: boolean;
   fileId: number | null;
+  /** The book that owned the file before this scan moved it here. */
+  previousBookId?: number;
+  /** An unchanged EPUB whose read-along audio was detected for the first time. */
+  mediaOverlayChanged?: boolean;
 }
 
 interface UpsertBookResult extends BookEntry {
   created: boolean;
+}
+
+/** A candidate whose book and files are registered, waiting for its files to be read. */
+interface RegisteredCandidate {
+  candidate: BookCandidate;
+  book: UpsertBookResult;
+  counts: { added: number; updated: number };
+  retainedFileIds: Set<number>;
+  registeredFiles: RegisteredFile[];
+  contentFiles: RegisteredFile[];
+  winner: RegisteredFile | null;
+  formerOwnerBookIds: Set<number>;
+  mediaOverlayChanged: boolean;
 }
 
 interface ProcessCandidateResult {
@@ -171,6 +254,8 @@ interface ProcessCandidateResult {
   retainedFileIds: Set<number>;
   becameVisible: boolean;
   created: boolean;
+  /** Books whose file set changed here: this one, and any book a file was taken from. */
+  coverBookIds: number[];
 }
 
 function normalizeOrganizationMode(mode: string | null | undefined): OrganizationMode {
@@ -229,8 +314,13 @@ export class ScannerService implements OnApplicationBootstrap {
     private readonly scanGateway: ScanGateway,
     private readonly notificationService: NotificationService,
     private readonly selfWriteRegistry: SelfWriteRegistry,
+    private readonly coverStore: BookCoverStore,
+    private readonly regexMetadata: RegexMetadataService,
+    private readonly libraryGate: LibraryOperationGate,
+    private readonly jobChanges: JobChangesService,
     @Optional() private readonly autoFetchOrchestrator?: BookMetadataFetchOrchestratorService,
     @Optional() private readonly achievementEvents?: AchievementEventsService,
+    @Optional() private readonly coverReconciler?: CoverSlotReconciler,
   ) {}
 
   /**
@@ -298,6 +388,12 @@ export class ScannerService implements OnApplicationBootstrap {
   // ── Targeted watcher scans ─────────────────────────────────────────────────
   private readonly targetedBookScanQueue: TargetedScanJob[] = [];
   private activeTargetedBookScans = 0;
+  private readonly scanGateReleases = new Map<number, LibraryOperationRelease>();
+  /** Targeted scans held back while another operation rewrites the library, keyed by library then path. */
+  private readonly deferredTargetedScans = new Map<number, Map<string, TargetedScanJob>>();
+  private readonly deferredFullScans = new Set<number>();
+  private libraryRootsCache: { roots: readonly LibraryRoot[]; loadedAt: number } | null = null;
+  private libraryRootsReload: Promise<readonly LibraryRoot[]> | null = null;
 
   private static computeSettingsHash(
     allowedFormats: string[],
@@ -330,6 +426,7 @@ export class ScannerService implements OnApplicationBootstrap {
       sortOrder?: number | null;
       mediaOverlayAvailable?: boolean | null;
       mediaOverlayCheckedAt?: Date | null;
+      role?: string | null;
     }>,
   ): ScanLookupMaps {
     const bookByFolderPath = new Map<string, BookEntry>(
@@ -375,6 +472,7 @@ export class ScannerService implements OnApplicationBootstrap {
           sortOrder: f.sortOrder ?? null,
           mediaOverlayAvailable: f.mediaOverlayAvailable === true,
           mediaOverlayCheckedAt: f.mediaOverlayCheckedAt ?? null,
+          role: f.role,
         },
       ]),
     );
@@ -447,6 +545,7 @@ export class ScannerService implements OnApplicationBootstrap {
   private async buildAndEmitBookCards(libraryId: number, bookIds: number[]): Promise<void> {
     const { rows, authorRows, fileRows, genreRows } = await this.scannerRepo.findBookCardData(bookIds);
     const cards = assembleBookCards(rows, authorRows, fileRows, genreRows, []);
+    await this.coverStore.enrichCardFaces(cards);
     if (cards.length > 0) {
       this.scanGateway.emitBooksAdded({ libraryId, books: cards } satisfies ScanBooksAddedEvent);
     }
@@ -666,10 +765,17 @@ export class ScannerService implements OnApplicationBootstrap {
     if (!this.scanJobStore.acquireStartLock(libraryId)) {
       throw new ConflictException(`A scan is already starting for library ${libraryId}`);
     }
+    let gateAcquiredHere = false;
     try {
       if (this.scanJobStore.isRunning(libraryId)) {
         throw new ConflictException(`A scan is already running for library ${libraryId}`);
       }
+      const releaseGate = this.libraryGate.tryAcquire(libraryId, 'scan');
+      if (!releaseGate) {
+        throw new ConflictException(`Another operation is running for library ${libraryId}. Try the scan again when it finishes.`);
+      }
+      this.scanGateReleases.set(libraryId, releaseGate);
+      gateAcquiredHere = true;
 
       const [folders, settings] = await Promise.all([
         this.scannerRepo.findLibraryFolders(libraryId),
@@ -680,6 +786,7 @@ export class ScannerService implements OnApplicationBootstrap {
       const allowedFormats = settings?.allowedFormats ?? [];
       const formatPriority = settings?.formatPriority ?? DEFAULT_FORMAT_PRIORITY;
       const metadataPrecedence = settings?.metadataPrecedence ?? [...LIBRARY_METADATA_PRECEDENCE_DEFAULT];
+      const regexContext = createRegexScanContext(settings?.regexMetadata);
       const excludePatterns = settings?.excludePatterns ?? [];
       const organizationMode = normalizeOrganizationMode(settings?.organizationMode);
       const addedAtSource = normalizeAddedAtSource(settings?.addedAtSource);
@@ -713,6 +820,7 @@ export class ScannerService implements OnApplicationBootstrap {
         organizationMode,
         addedAtSource,
         forceFullScan,
+        regexContext,
       ).catch((err) => {
         const errorClass = err instanceof Error ? err.name : 'Error';
         const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
@@ -731,6 +839,7 @@ export class ScannerService implements OnApplicationBootstrap {
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} triggeredBy=${triggeredBy} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - scan start failed`,
       );
+      if (gateAcquiredHere) this.releaseScanGate(libraryId);
       throw err;
     } finally {
       this.scanJobStore.releaseStartLock(libraryId);
@@ -745,6 +854,7 @@ export class ScannerService implements OnApplicationBootstrap {
       const rows = await this.scannerRepo.findPrimaryBookFilesByLibrary(libraryId);
       const candidates = rows.filter((r) => r.format && METADATA_FORMATS.has(r.format));
       const total = candidates.length;
+      const formatPriority = (await this.scannerRepo.findLibrarySettings(libraryId))?.formatPriority ?? DEFAULT_FORMAT_PRIORITY;
       const backgroundStartedAt = Date.now();
 
       this.scanGateway.emitCoverRefreshProgress({ libraryId, processed: 0, total, status: 'running' });
@@ -754,17 +864,21 @@ export class ScannerService implements OnApplicationBootstrap {
         let refreshedCount = 0;
         for (let i = 0; i < candidates.length; i += COVER_REFRESH_BATCH_SIZE) {
           const batch = candidates.slice(i, i + COVER_REFRESH_BATCH_SIZE);
+          const files = await this.scannerRepo.findBookFilesByBookIds(batch.map((row) => row.bookId));
           const results = await Promise.allSettled(
-            batch.map(async (row) => {
-              const refreshed = await this.metadataService.refreshCoverForBook(row.bookId, row.absolutePath, row.format!);
-              return { bookId: row.bookId, refreshed };
-            }),
+            batch.map(async (row) => ({
+              bookId: row.bookId,
+              refreshed: await this.refreshBookCovers(
+                row,
+                files.filter((file) => file.bookId === row.bookId),
+                formatPriority,
+              ),
+            })),
           );
           for (const result of results) {
             processed++;
             if (result.status === 'fulfilled' && result.value.refreshed) {
               refreshedCount++;
-              this.scanGateway.emitCoverRefreshed({ bookId: result.value.bookId, libraryId } satisfies CoverRefreshedEvent);
             }
           }
           this.scanGateway.emitCoverRefreshProgress({
@@ -797,9 +911,67 @@ export class ScannerService implements OnApplicationBootstrap {
     }
   }
 
+  /**
+   * Re-extracts every slot the book's files can fill, then lets reconcile fill what is still empty,
+   * which is also how a book the upgrade could not finish gets retried.
+   */
+  private async refreshBookCovers(
+    primary: { bookId: number; absolutePath: string; format: string | null },
+    files: BookFile[],
+    formatPriority: readonly string[],
+  ): Promise<boolean> {
+    const sources = selectEmbeddedCoverSources(files, formatPriority);
+    const targets = (['ebook', 'audio'] as const).flatMap((medium) => {
+      const file = sources[medium];
+      return file?.format ? [{ medium, absolutePath: file.absolutePath, format: file.format }] : [];
+    });
+    let refreshed = false;
+    if (targets.length === 0) {
+      refreshed = await this.metadataService.refreshCoverForBook(primary.bookId, primary.absolutePath, primary.format!);
+    }
+    for (const target of targets) {
+      refreshed = (await this.metadataService.refreshCoverForBook(primary.bookId, target.absolutePath, target.format, target.medium)) || refreshed;
+    }
+    await this.coverReconciler?.enqueue([primary.bookId]);
+    return refreshed;
+  }
+
+  reconcileCoverSlotsAsync(bookIds: readonly number[]): void {
+    if (bookIds.length === 0) return;
+    void this.coverReconciler?.enqueue(bookIds, { filesChanged: true });
+  }
+
+  /** Runs after the deferred prune, so a medium whose last file left is already gone. */
+  private async reconcileCoverSlots(bookIds: Iterable<number>): Promise<void> {
+    if (!this.coverReconciler) return;
+    const ids = [...new Set(bookIds)];
+    for (let offset = 0; offset < ids.length; offset += COVER_RECONCILE_BATCH_SIZE) {
+      await this.coverReconciler.enqueue(ids.slice(offset, offset + COVER_RECONCILE_BATCH_SIZE), { filesChanged: true });
+    }
+  }
+
+  private async pruneExpiredDormantCovers(libraryId: number, jobId: number): Promise<void> {
+    try {
+      await this.coverReconciler?.enqueueExpiredDormant(libraryId);
+    } catch (err) {
+      this.logger.warn(
+        `[scanner.prune_dormant_covers] [fail] libraryId=${libraryId} jobId=${jobId} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - dormant cover pruning failed`,
+      );
+    }
+  }
+
   startScanAsync(libraryId: number): void {
     if (this.scanJobStore.isRunning(libraryId) || this.scanJobStore.isStartLocked(libraryId)) {
       this.scanJobStore.markPendingRescan(libraryId);
+      return;
+    }
+    if (this.libraryGate.isHeld(libraryId)) {
+      if (this.deferredFullScans.has(libraryId)) return;
+      this.deferredFullScans.add(libraryId);
+      void this.libraryGate.whenReleased(libraryId).then(() => {
+        this.deferredFullScans.delete(libraryId);
+        this.startScanAsync(libraryId);
+      });
       return;
     }
     this.startScan(libraryId, 'watcher').catch((err) =>
@@ -813,6 +985,40 @@ export class ScannerService implements OnApplicationBootstrap {
     return this.scanJobStore.isRunning(libraryId);
   }
 
+  /**
+   * False only when a folder of another library, nested inside this one, owns the path. Folders
+   * change rarely, so a watcher event burst shares one read of them; a folder can still be added
+   * without going through the library service, so a foreign owner is checked against a fresh read
+   * before the event is dropped. A path under no known folder keeps going to the watching library.
+   */
+  async ownsPath(libraryId: number, path: string): Promise<boolean> {
+    const cached = this.libraryRootsCache;
+    const fresh = cached !== null && Date.now() - cached.loadedAt < LIBRARY_ROOTS_CACHE_MS;
+    const owner = owningRoot(path, fresh ? cached.roots : await this.reloadLibraryRoots());
+    if (!owner || owner.libraryId === libraryId) return true;
+    if (!fresh) return false;
+    const recheckedOwner = owningRoot(path, await this.reloadLibraryRoots());
+    return !recheckedOwner || recheckedOwner.libraryId === libraryId;
+  }
+
+  /** Called when a library's folders change, so the next ownership check reads them again. */
+  forgetLibraryRoots(): void {
+    this.libraryRootsCache = null;
+  }
+
+  private reloadLibraryRoots(): Promise<readonly LibraryRoot[]> {
+    this.libraryRootsReload ??= this.scannerRepo
+      .findAllLibraryRoots()
+      .then((roots) => {
+        this.libraryRootsCache = { roots, loadedAt: Date.now() };
+        return roots;
+      })
+      .finally(() => {
+        this.libraryRootsReload = null;
+      });
+    return this.libraryRootsReload;
+  }
+
   scanBookFolderAsync(filePath: string, libraryId: number): void {
     this.targetedBookScanQueue.push({ type: 'book', path: filePath, libraryId });
     this.drainTargetedBookScanQueue();
@@ -823,9 +1029,44 @@ export class ScannerService implements OnApplicationBootstrap {
     this.drainTargetedBookScanQueue();
   }
 
+  private releaseScanGate(libraryId: number): void {
+    const release = this.scanGateReleases.get(libraryId);
+    if (!release) return;
+    this.scanGateReleases.delete(libraryId);
+    release();
+  }
+
+  /**
+   * A move, rename or merge rewrites folders the targeted scan would read half-done, and unlike a
+   * full scan it does not cover them afterwards, so the scan waits for the operation instead of
+   * being dropped. Repeated events for one path collapse into a single deferred scan.
+   */
+  private deferTargetedScan(job: TargetedScanJob): void {
+    let pending = this.deferredTargetedScans.get(job.libraryId);
+    if (!pending) {
+      pending = new Map();
+      this.deferredTargetedScans.set(job.libraryId, pending);
+      void this.libraryGate.whenReleased(job.libraryId).then(() => this.requeueDeferredTargetedScans(job.libraryId));
+    }
+    pending.set(`${job.type}:${job.path}`, job);
+  }
+
+  private requeueDeferredTargetedScans(libraryId: number): void {
+    const pending = this.deferredTargetedScans.get(libraryId);
+    this.deferredTargetedScans.delete(libraryId);
+    if (!pending) return;
+    this.targetedBookScanQueue.push(...pending.values());
+    this.drainTargetedBookScanQueue();
+  }
+
   private drainTargetedBookScanQueue(): void {
     while (this.activeTargetedBookScans < TARGETED_BOOK_SCAN_MAX_CONCURRENCY && this.targetedBookScanQueue.length > 0) {
       const job = this.targetedBookScanQueue.shift()!;
+      const holder = this.libraryGate.current(job.libraryId);
+      if (holder && holder !== 'scan') {
+        this.deferTargetedScan(job);
+        continue;
+      }
       this.activeTargetedBookScans += 1;
       const scan = job.type === 'directory' ? this.scanBookDirectory(job.path, job.libraryId) : this.scanBookFolder(job.path, job.libraryId);
       scan
@@ -863,17 +1104,18 @@ export class ScannerService implements OnApplicationBootstrap {
       );
       return;
     }
-    const allFolders = await this.scannerRepo.findLibraryFolders(libraryId);
-    const libraryFolder = allFolders.find((f) => filePath.startsWith(f.path + sep));
-    if (!libraryFolder) {
+    const roots = await this.scannerRepo.findAllLibraryRoots();
+    const libraryFolder = owningRoot(filePath, roots);
+    if (!libraryFolder || libraryFolder.libraryId !== libraryId) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted book scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false ownerLibraryId=${libraryFolder?.libraryId ?? 'none'} - targeted book scan completed`,
       );
       return;
     }
 
     const rawSettings = await this.scannerRepo.findLibrarySettings(libraryId);
     const settings: LibraryScanSettings = {
+      regexContext: createRegexScanContext(rawSettings?.regexMetadata),
       allowedFormats: rawSettings?.allowedFormats ?? [],
       formatPriority: rawSettings?.formatPriority ?? DEFAULT_FORMAT_PRIORITY,
       metadataPrecedence: rawSettings?.metadataPrecedence ?? [...LIBRARY_METADATA_PRECEDENCE_DEFAULT],
@@ -883,15 +1125,15 @@ export class ScannerService implements OnApplicationBootstrap {
     };
 
     if (settings.organizationMode === 'book_per_file') {
-      return this.handleScanBookPerFile(filePath, libraryId, libraryFolder, settings, event, startedAt);
+      return this.handleScanBookPerFile(filePath, libraryId, libraryFolder, settings, event, startedAt, roots);
     }
 
     const bookFolder = dirname(filePath);
     if (bookFolder === libraryFolder.path) {
-      return this.handleScanRootLevelFile(filePath, libraryId, libraryFolder, settings, event, startedAt);
+      return this.handleScanRootLevelFile(filePath, libraryId, libraryFolder, settings, event, startedAt, roots);
     }
 
-    return this.handleScanFolderNormal(filePath, libraryId, libraryFolder, settings, event, startedAt);
+    return this.handleScanFolderNormal(filePath, libraryId, libraryFolder, settings, event, startedAt, roots);
   }
 
   private async scanBookDirectory(dirPath: string, libraryId: number): Promise<void> {
@@ -906,17 +1148,19 @@ export class ScannerService implements OnApplicationBootstrap {
       return;
     }
 
-    const allFolders = await this.scannerRepo.findLibraryFolders(libraryId);
-    const libraryFolder = allFolders.find((f) => dirPath === f.path || dirPath.startsWith(f.path + sep));
-    if (!libraryFolder) {
+    const roots = await this.scannerRepo.findAllLibraryRoots();
+    const libraryFolder = owningRoot(dirPath, roots);
+    if (!libraryFolder || libraryFolder.libraryId !== libraryId) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted directory scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false ownerLibraryId=${libraryFolder?.libraryId ?? 'none'} - targeted directory scan completed`,
       );
       return;
     }
+    const ownedElsewhere = directoriesOwnedElsewhere(libraryFolder, roots);
 
     const rawSettings = await this.scannerRepo.findLibrarySettings(libraryId);
     const settings: LibraryScanSettings = {
+      regexContext: createRegexScanContext(rawSettings?.regexMetadata),
       allowedFormats: rawSettings?.allowedFormats ?? [],
       formatPriority: rawSettings?.formatPriority ?? DEFAULT_FORMAT_PRIORITY,
       metadataPrecedence: rawSettings?.metadataPrecedence ?? [...LIBRARY_METADATA_PRECEDENCE_DEFAULT],
@@ -934,13 +1178,13 @@ export class ScannerService implements OnApplicationBootstrap {
     let skippedDirs: Set<string>;
     try {
       if (settings.organizationMode === 'book_per_file') {
-        const walkResult = await findLooseFileCandidates(dirPath, settings.excludePatterns, walkLogger);
+        const walkResult = await findLooseFileCandidates(dirPath, settings.excludePatterns, walkLogger, undefined, ownedElsewhere);
         candidates = walkResult.candidates;
         skippedDirs = walkResult.skippedDirs;
       } else {
         const [singleCandidate, walkResult] = await Promise.all([
           buildSingleBookCandidate(dirPath, libraryFolder.path, settings.excludePatterns, walkLogger),
-          findBookCandidates(dirPath, settings.excludePatterns, walkLogger),
+          findBookCandidates(dirPath, settings.excludePatterns, walkLogger, undefined, ownedElsewhere),
         ]);
         const nestedCandidates = walkResult.candidates.filter(
           (candidate) =>
@@ -982,10 +1226,19 @@ export class ScannerService implements OnApplicationBootstrap {
         .filter((candidate) => candidate.files.some((file) => (file.role ?? classifyFile(file.absolutePath).role) === 'content'));
     }
 
+    const heldBack = await this.claimBooksFromOuterFolders(
+      libraryId,
+      libraryFolder,
+      roots,
+      candidates.map((candidate) => candidate.folderPath),
+    );
+    if (heldBack.size > 0) candidates = candidates.filter((candidate) => !heldBack.has(candidate.folderPath));
+
     const maps = await this.loadCandidateMaps(dirPath, libraryId);
     const totals = { added: 0, updated: 0 };
     const allRetainedFileIds = new Set<number>();
     const seenBookIds = new Set<number>();
+    const coverBookIds = new Set<number>();
     const importedBookIds: number[] = [];
     const candidateFolderPaths = new Set(candidates.map((candidate) => candidate.folderPath));
     for (const candidate of candidates) {
@@ -999,25 +1252,118 @@ export class ScannerService implements OnApplicationBootstrap {
         settings.addedAtSource,
         false,
         candidateFolderPaths,
+        settings.regexContext,
       );
       this.emitTargetedScanResult(libraryId, result);
       seenBookIds.add(result.bookId);
       if (result.created) importedBookIds.push(result.bookId);
       for (const fid of result.retainedFileIds) allRetainedFileIds.add(fid);
+      for (const coverBookId of result.coverBookIds) coverBookIds.add(coverBookId);
       totals.added += result.added;
       totals.updated += result.updated;
     }
 
     const pruneCounts = { added: 0, updated: 0 };
     for (const bookId of seenBookIds) {
-      await this.pruneMissingBookFiles(bookId, allRetainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, pruneCounts);
+      if (await this.pruneMissingBookFiles(bookId, allRetainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, pruneCounts)) {
+        coverBookIds.add(bookId);
+      }
     }
     totals.updated += pruneCounts.updated;
+    await this.reconcileCoverSlots(coverBookIds);
     await this.scheduleImportedBookMetadataFetch(libraryId, importedBookIds);
 
     this.logger.log(
       `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} candidateCount=${candidates.length} skippedDirCount=${skippedDirs.size} added=${totals.added} updated=${totals.updated} - targeted directory scan completed`,
     );
+  }
+
+  /**
+   * Books an enclosing library folder filed under this one before overlapping folders were refused.
+   * Each moves here whole, keeping every reader's data, instead of this scan importing a second copy
+   * and taking its files from under it. Answers the folder paths left alone because another
+   * operation holds the library they are in; the caller skips those until a later scan.
+   */
+  private async claimBooksFromOuterFolders(
+    libraryId: number,
+    folder: LibraryRoot,
+    roots: readonly LibraryRoot[],
+    folderPaths: readonly string[],
+  ): Promise<Set<string>> {
+    const heldBack = new Set<string>();
+    const yielding = foldersYieldingTo(folder, roots);
+    if (yielding.length === 0 || folderPaths.length === 0) return heldBack;
+
+    const event = 'scanner.claim_nested_books';
+    const startedAt = Date.now();
+    try {
+      const found = await this.scannerRepo.findBooksToClaim(
+        yielding.map((root) => root.id),
+        libraryId,
+        folderPaths,
+      );
+      if (found.length === 0) return heldBack;
+
+      const transferredFrom = new Map<number, number[]>();
+      let claimedCount = 0;
+      for (const book of found) {
+        // A scan of the other library leaves this folder alone; anything else there may be using the book.
+        const holder = book.libraryId === libraryId ? null : this.libraryGate.current(book.libraryId);
+        if (holder !== null && holder !== 'scan') {
+          heldBack.add(book.folderPath);
+          continue;
+        }
+        const moved = await this.scannerRepo.moveBookToLibrary(book.id, libraryId, folder.id, book.folderPath);
+        if (!moved) continue;
+        claimedCount++;
+        if (moved.libraryChanged) transferredFrom.set(book.libraryId, [...(transferredFrom.get(book.libraryId) ?? []), book.id]);
+      }
+      for (const [fromLibraryId, bookIds] of transferredFrom) {
+        this.cancelBooksUnavailableNotification(fromLibraryId, bookIds);
+        this.scanGateway.emitBookTransferred({ fromLibraryId, toLibraryId: libraryId, bookIds } satisfies BookTransferredEvent);
+      }
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} libraryFolderId=${folder.id} durationMs=${Date.now() - startedAt} claimedCount=${claimedCount} heldBackCount=${heldBack.size} - books filed by an enclosing library folder moved into the folder that owns them`,
+      );
+      return heldBack;
+    } catch (err) {
+      this.logger.warn(
+        `[${event}] [fail] libraryId=${libraryId} libraryFolderId=${folder.id} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - claiming books from an enclosing library folder failed`,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * A library folder named like a disc folder ("disk1", "CD 1") used to be flattened into the folder
+   * above it, so its loose files became one book filed there. Each is now its own book: the old book
+   * moves to its primary file, keeping its progress, notes and edits, and the scan that follows gives
+   * the other files books of their own.
+   */
+  private async repairFlattenedLibraryFolder(libraryId: number, folder: { id: number; path: string }): Promise<void> {
+    if (!isDiscDirectory(basename(folder.path))) return;
+    const event = 'scanner.repair_flattened_library_folder';
+    try {
+      const stranded = await this.scannerRepo.findBooksAtFolderPath(folder.id, dirname(folder.path));
+      for (const book of stranded) {
+        const inside = book.contentFiles.filter((file) => file.absolutePath.startsWith(folder.path + sep));
+        const target = inside.find((file) => file.id === book.primaryFileId) ?? inside[0];
+        if (!target || (await this.scannerRepo.bookExistsAtFolderPath(book.libraryId, target.absolutePath))) {
+          this.logger.warn(
+            `[${event}] [fail] libraryId=${libraryId} bookId=${book.id} fileCount=${book.contentFiles.length} - no free file left to move the book to`,
+          );
+          continue;
+        }
+        await this.scannerRepo.updateBookFolderPath(book.id, target.absolutePath);
+        this.logger.log(
+          `[${event}] [end] libraryId=${libraryId} bookId=${book.id} folder="${sanitizeLogValue(target.absolutePath)}" fileCount=${book.contentFiles.length} - book moved from above its library folder to its primary file`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[${event}] [fail] libraryId=${libraryId} libraryFolderId=${folder.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - flattened library folder repair failed`,
+      );
+    }
   }
 
   private async loadCandidateMaps(folderPath: string, libraryId: number): Promise<ScanLookupMaps> {
@@ -1043,6 +1389,7 @@ export class ScannerService implements OnApplicationBootstrap {
         sortOrder: f.sortOrder,
         mediaOverlayAvailable: f.mediaOverlayAvailable,
         mediaOverlayCheckedAt: f.mediaOverlayCheckedAt,
+        role: f.role,
       })),
     );
   }
@@ -1060,10 +1407,11 @@ export class ScannerService implements OnApplicationBootstrap {
   private async handleScanBookPerFile(
     filePath: string,
     libraryId: number,
-    libraryFolder: { id: number; path: string },
+    libraryFolder: LibraryRoot,
     settings: LibraryScanSettings,
     event: string,
     startedAt: number,
+    roots: readonly LibraryRoot[],
   ): Promise<void> {
     const { role, format } = classifyFile(filePath);
     if (role !== 'content') {
@@ -1105,6 +1453,12 @@ export class ScannerService implements OnApplicationBootstrap {
       ],
     };
 
+    if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
+      );
+      return;
+    }
     const maps = await this.loadCandidateMaps(filePath, libraryId);
     const result = await this.processCandidate(
       candidate,
@@ -1116,11 +1470,13 @@ export class ScannerService implements OnApplicationBootstrap {
       settings.addedAtSource,
       false,
       new Set([candidate.folderPath]),
+      settings.regexContext,
     );
-    await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
+    const pruned = await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
       added: 0,
       updated: 0,
     });
+    await this.reconcileCoverSlots([...result.coverBookIds, ...(pruned ? [result.bookId] : [])]);
     this.emitTargetedScanResult(libraryId, result);
     await this.scheduleImportedBookMetadataFetch(libraryId, result.created ? [result.bookId] : []);
     this.logger.log(
@@ -1131,10 +1487,11 @@ export class ScannerService implements OnApplicationBootstrap {
   private async handleScanRootLevelFile(
     filePath: string,
     libraryId: number,
-    libraryFolder: { id: number; path: string },
+    libraryFolder: LibraryRoot,
     settings: LibraryScanSettings,
     event: string,
     startedAt: number,
+    roots: readonly LibraryRoot[],
   ): Promise<void> {
     const fileStat = await stat(filePath, { bigint: true }).catch(() => null);
     if (!fileStat || !fileStat.isFile()) {
@@ -1176,6 +1533,12 @@ export class ScannerService implements OnApplicationBootstrap {
       ],
     };
 
+    if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
+      );
+      return;
+    }
     const maps = await this.loadCandidateMaps(filePath, libraryId);
     const result = await this.processCandidate(
       candidate,
@@ -1187,11 +1550,13 @@ export class ScannerService implements OnApplicationBootstrap {
       settings.addedAtSource,
       false,
       new Set([candidate.folderPath]),
+      settings.regexContext,
     );
-    await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
+    const pruned = await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
       added: 0,
       updated: 0,
     });
+    await this.reconcileCoverSlots([...result.coverBookIds, ...(pruned ? [result.bookId] : [])]);
     this.emitTargetedScanResult(libraryId, result);
     await this.scheduleImportedBookMetadataFetch(libraryId, result.created ? [result.bookId] : []);
     this.logger.log(
@@ -1202,10 +1567,11 @@ export class ScannerService implements OnApplicationBootstrap {
   private async handleScanFolderNormal(
     filePath: string,
     libraryId: number,
-    libraryFolder: { id: number; path: string },
+    libraryFolder: LibraryRoot,
     settings: LibraryScanSettings,
     event: string,
     startedAt: number,
+    roots: readonly LibraryRoot[],
   ): Promise<void> {
     const bookFolder = dirname(filePath);
 
@@ -1266,6 +1632,12 @@ export class ScannerService implements OnApplicationBootstrap {
       candidate = { ...candidate, files: filtered };
     }
 
+    if ((await this.claimBooksFromOuterFolders(libraryId, libraryFolder, roots, [candidate.folderPath])).size > 0) {
+      this.logger.log(
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} heldBackForBusyLibrary=true - targeted book scan completed`,
+      );
+      return;
+    }
     const maps = await this.loadCandidateMaps(resolvedBookFolder, libraryId);
     const result = await this.processCandidate(
       candidate,
@@ -1277,11 +1649,13 @@ export class ScannerService implements OnApplicationBootstrap {
       settings.addedAtSource,
       false,
       new Set([candidate.folderPath]),
+      settings.regexContext,
     );
-    await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
+    const pruned = await this.pruneMissingBookFiles(result.bookId, result.retainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, {
       added: 0,
       updated: 0,
     });
+    await this.reconcileCoverSlots([...result.coverBookIds, ...(pruned ? [result.bookId] : [])]);
     this.emitTargetedScanResult(libraryId, result);
     await this.scheduleImportedBookMetadataFetch(libraryId, result.created ? [result.bookId] : []);
     this.logger.log(
@@ -1300,6 +1674,7 @@ export class ScannerService implements OnApplicationBootstrap {
     organizationMode: OrganizationMode,
     addedAtSource: AddedAtSource,
     forceFullScan = false,
+    regexContext?: RegexScanContext,
   ): Promise<void> {
     const event = 'scanner.run_scan';
     const startedAt = Date.now();
@@ -1316,8 +1691,17 @@ export class ScannerService implements OnApplicationBootstrap {
     try {
       this.scanJobStore.setTotal(libraryId, 0);
       this.emitFromStore(libraryId, jobId, 'running');
+      const roots = await this.scannerRepo.findAllLibraryRoots();
 
       for (const folder of folders) {
+        await this.repairFlattenedLibraryFolder(libraryId, folder);
+        const folderRoot: LibraryRoot = { id: folder.id, libraryId, path: folder.path };
+        const ownedElsewhere = directoriesOwnedElsewhere(folderRoot, roots);
+        if (ownedElsewhere.size > 0) {
+          this.logger.warn(
+            `[scanner.walk_candidates] [end] libraryId=${libraryId} jobId=${jobId} libraryFolderId=${folder.id} ownedElsewhereCount=${ownedElsewhere.size} - folders inside this one belong to another library folder and are left to it`,
+          );
+        }
         let candidates: BookCandidate[] = [];
         let skippedDirs = new Set<string>();
         let unchangedDirs = new Set<string>();
@@ -1347,8 +1731,8 @@ export class ScannerService implements OnApplicationBootstrap {
             );
           const walkResult: WalkResult =
             organizationMode === 'book_per_file'
-              ? await findLooseFileCandidates(folder.path, excludePatterns, walkLogger, knownDirMtimes)
-              : await findBookCandidates(folder.path, excludePatterns, walkLogger, knownDirMtimes);
+              ? await findLooseFileCandidates(folder.path, excludePatterns, walkLogger, knownDirMtimes, ownedElsewhere)
+              : await findBookCandidates(folder.path, excludePatterns, walkLogger, knownDirMtimes, ownedElsewhere);
           candidates = walkResult.candidates;
           skippedDirs = walkResult.skippedDirs;
           unchangedDirs = walkResult.unchangedDirs;
@@ -1372,6 +1756,14 @@ export class ScannerService implements OnApplicationBootstrap {
             .filter((c) => c.files.some((f) => (f.role ?? classifyFile(f.absolutePath).role) === 'content'));
         }
 
+        const heldBack = await this.claimBooksFromOuterFolders(
+          libraryId,
+          folderRoot,
+          roots,
+          candidates.map((candidate) => candidate.folderPath),
+        );
+        if (heldBack.size > 0) candidates = candidates.filter((candidate) => !heldBack.has(candidate.folderPath));
+
         totalCandidates += candidates.length;
         this.scanJobStore.setTotal(libraryId, totalCandidates);
 
@@ -1385,6 +1777,7 @@ export class ScannerService implements OnApplicationBootstrap {
           addedAtSource,
           skippedDirs,
           unchangedDirs,
+          regexContext,
         );
         totals.addedCount += counts.addedCount;
         totals.updatedCount += counts.updatedCount;
@@ -1403,6 +1796,7 @@ export class ScannerService implements OnApplicationBootstrap {
         }
       }
 
+      await this.pruneExpiredDormantCovers(libraryId, jobId);
       await this.scannerRepo.completeScanJob(jobId, totals);
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} jobId=${jobId} durationMs=${Date.now() - startedAt} addedCount=${totals.addedCount} updatedCount=${totals.updatedCount} missingCount=${totals.missingCount} - scan job completed`,
@@ -1438,7 +1832,7 @@ export class ScannerService implements OnApplicationBootstrap {
       this.logger.error(
         `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(message)}" - scan job failed`,
       );
-      this.emitFromStore(libraryId, jobId, 'failed', message);
+      this.emitFromStore(libraryId, jobId, 'failed', { errorMessage: message });
 
       this.notificationService
         .notify({
@@ -1454,6 +1848,7 @@ export class ScannerService implements OnApplicationBootstrap {
       this.flushBooksUnavailableNotification(libraryId);
       this.flushBooksRestoredNotification(libraryId);
       this.scanJobStore.delete(libraryId);
+      this.releaseScanGate(libraryId);
 
       if (this.scanJobStore.consumePendingRescan(libraryId)) {
         this.startScanAsync(libraryId);
@@ -1471,6 +1866,7 @@ export class ScannerService implements OnApplicationBootstrap {
     addedAtSource: AddedAtSource,
     skippedDirs: Set<string> = new Set(),
     unchangedDirs: Set<string> = new Set(),
+    regexContext?: RegexScanContext,
   ): Promise<ScanCounts> {
     const event = 'scanner.scan_folder_candidates';
     const startedAt = Date.now();
@@ -1489,47 +1885,51 @@ export class ScannerService implements OnApplicationBootstrap {
 
       const seenBookIds = new Set<number>();
       const allRetainedFileIds = new Set<number>();
-      const importedBookIds: number[] = [];
+      const coverBookIds = new Set<number>();
+      // Indexed by candidate so metadata fetches queue in discovery order, whichever read finished first.
+      const importedBookIdByCandidate: Array<number | undefined> = [];
       const candidateFolderPaths = new Set(candidates.map((candidate) => candidate.folderPath));
 
-      for (const candidate of candidates) {
-        const result = await this.processCandidate(
-          candidate,
-          libraryId,
-          libraryFolderId,
-          maps,
-          formatPriority,
-          metadataPrecedence,
-          addedAtSource,
-          isFirstScan,
-          candidateFolderPaths,
-        );
-        seenBookIds.add(result.bookId);
-        if (result.created) importedBookIds.push(result.bookId);
-        for (const fid of result.retainedFileIds) allRetainedFileIds.add(fid);
-        counts.addedCount += result.added;
-        counts.updatedCount += result.updated;
-        if (result.becameVisible) {
-          this.bufferBookForEmit(libraryId, result.bookId);
-          this.flushBookEmitBuffer(libraryId);
-        }
+      await pipelineWithConcurrency(
+        candidates,
+        FULL_SCAN_BOOK_READ_CONCURRENCY,
+        (candidate) =>
+          this.registerCandidate(candidate, libraryId, libraryFolderId, maps, formatPriority, addedAtSource, isFirstScan, candidateFolderPaths),
+        async (registered, _candidate, index) => {
+          const result = await this.readCandidateFiles(registered, libraryId, metadataPrecedence, regexContext);
+          seenBookIds.add(result.bookId);
+          if (result.created) importedBookIdByCandidate[index] = result.bookId;
+          for (const fid of result.retainedFileIds) allRetainedFileIds.add(fid);
+          for (const coverBookId of result.coverBookIds) coverBookIds.add(coverBookId);
+          counts.addedCount += result.added;
+          counts.updatedCount += result.updated;
+          if (result.becameVisible) {
+            this.bufferBookForEmit(libraryId, result.bookId);
+            this.flushBookEmitBuffer(libraryId);
+          }
 
-        const entry = this.scanJobStore.increment(libraryId, { processed: 1 });
-        if (entry && this.scanJobStore.shouldEmit(entry)) {
-          this.emitFromStore(libraryId, jobId, 'running');
-          this.scanJobStore.markEmitted(entry);
-        }
-      }
+          const entry = this.scanJobStore.increment(libraryId, { processed: 1 });
+          if (entry && this.scanJobStore.shouldEmit(entry)) {
+            this.emitFromStore(libraryId, jobId, 'running', { progressOnly: true });
+            this.scanJobStore.markEmitted(entry);
+          }
+        },
+      );
+      const importedBookIds = importedBookIdByCandidate.filter((bookId): bookId is number => bookId !== undefined);
 
       await this.repairMissingAudioDurations(knownFiles, unchangedDirs, seenBookIds);
+      await this.repairUncheckedMediaOverlays(knownFiles, unchangedDirs, seenBookIds);
 
       // Deferred prune: delete book files not retained by any candidate.
       // Must happen after ALL batches so cross-book file moves are visible.
       const pruneCounts = { added: 0, updated: 0 };
       for (const bookId of seenBookIds) {
-        await this.pruneMissingBookFiles(bookId, allRetainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, pruneCounts);
+        if (await this.pruneMissingBookFiles(bookId, allRetainedFileIds, maps.fileIdsByBookId, maps.fileByPath, maps.fileByIno, pruneCounts)) {
+          coverBookIds.add(bookId);
+        }
       }
       counts.updatedCount += pruneCounts.updated;
+      await this.reconcileCoverSlots(coverBookIds);
 
       // Don't mark books as missing if their folder was skipped due to permission errors
       const isUnderSkippedDir = (folderPath: string) => {
@@ -1587,19 +1987,13 @@ export class ScannerService implements OnApplicationBootstrap {
   ): Promise<void> {
     if (unchangedDirs.size === 0) return;
 
-    const isUnderUnchangedDir = (absolutePath: string) => {
-      for (const dir of unchangedDirs) {
-        if (absolutePath === dir || absolutePath.startsWith(dir + sep)) return true;
-      }
-      return false;
-    };
     const filesToRepair = knownFiles.filter(
       (file) =>
         !processedBookIds.has(file.bookId) &&
         file.format !== null &&
         isAudioFormat(file.format) &&
         (file.durationSeconds === null || file.durationSeconds <= 0) &&
-        isUnderUnchangedDir(file.absolutePath) &&
+        isUnderAnyDir(file.absolutePath, unchangedDirs) &&
         !this.selfWriteRegistry.isSuppressed(file.absolutePath),
     );
     const repairedBookIds = new Set<number>();
@@ -1626,6 +2020,114 @@ export class ScannerService implements OnApplicationBootstrap {
     });
   }
 
+  /**
+   * Measures read-along EPUBs whose media-overlay check was cleared so a fixed parser reads them
+   * again. An incremental scan never opens a file in an unchanged folder, so they are inspected
+   * here. A failed read does not demote the file; the next scan or its detail page tries again.
+   */
+  private async repairUncheckedMediaOverlays(
+    knownFiles: Array<{
+      id: number;
+      bookId: number;
+      absolutePath: string;
+      format: string | null;
+      mediaOverlayAvailable: boolean;
+      mediaOverlayCheckedAt: Date | null;
+    }>,
+    unchangedDirs: Set<string>,
+    processedBookIds: Set<number>,
+  ): Promise<void> {
+    if (unchangedDirs.size === 0) return;
+
+    const filesToRepair = knownFiles.filter(
+      (file) =>
+        !processedBookIds.has(file.bookId) &&
+        file.format?.toLowerCase() === 'epub' &&
+        file.mediaOverlayAvailable &&
+        file.mediaOverlayCheckedAt == null &&
+        isUnderAnyDir(file.absolutePath, unchangedDirs) &&
+        !this.selfWriteRegistry.isSuppressed(file.absolutePath),
+    );
+
+    await mapWithConcurrency(filesToRepair, MEDIA_OVERLAY_REPAIR_CONCURRENCY, async (file) => {
+      try {
+        const fields = await this.inspectMediaOverlayFields(file.absolutePath, file.format);
+        if (fields.mediaOverlayAvailable) await this.scannerRepo.updateBookFile(file.id, fields);
+      } catch (err) {
+        this.logger.warn(
+          `[scanner.media_overlay_repair] [fail] fileId=${file.id} path="${sanitizeLogValue(file.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - unchecked media overlay repair failed`,
+        );
+      }
+    });
+  }
+
+  /**
+   * Keeps audio bookmarks and progress on the same moment of the same track when a rescan only
+   * reorders a book's existing tracks, such as the disc folders that used to interleave. Positions
+   * are left alone when tracks were also added or removed, because they cannot then be placed.
+   * `audioFiles` is in the new playback order. Returns whether the order changed.
+   */
+  private async remapAudioPositionsIfReordered(bookId: number, audioFiles: RegisteredFile[]): Promise<boolean> {
+    if (audioFiles.length < 2 || audioFiles.some((file) => file.isNew || file.wasReassigned || file.previousSortOrder === null)) {
+      return false;
+    }
+    const previous = [...audioFiles].sort((left, right) =>
+      compareAudioTracks(
+        { sortOrder: left.previousSortOrder, absolutePath: left.absolutePath },
+        { sortOrder: right.previousSortOrder, absolutePath: right.absolutePath },
+      ),
+    );
+    if (previous.every((file, index) => file.fileId === audioFiles[index]!.fileId)) return false;
+
+    const event = 'scanner.remap_audio_positions';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] bookId=${bookId} tracks=${audioFiles.length} - audio track order changed`);
+    try {
+      const storedAudioIds = (await this.scannerRepo.findBookFileFormats(bookId))
+        .filter((file) => file.format !== null && isAudioFormat(file.format))
+        .map((file) => file.id);
+      const currentIds = new Set(audioFiles.map((file) => file.fileId));
+      if (storedAudioIds.length !== currentIds.size || storedAudioIds.some((id) => !currentIds.has(id))) {
+        this.logger.log(`[${event}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} skipped=tracks_changed - positions left unchanged`);
+        return true;
+      }
+      const span = (file: RegisteredFile): AudioTrackSpan => ({ fileId: file.fileId, durationSeconds: file.durationSeconds });
+      const previousSpans = previous.map(span);
+      const nextSpans = audioFiles.map(span);
+      const updated = await this.scannerRepo.remapAudioPositions(
+        bookId,
+        (positionSeconds) => remapAudioBookPosition(positionSeconds, previousSpans, nextSpans),
+        (fileId, offsetSeconds) => audioBookPercentageAt(nextSpans, fileId, offsetSeconds),
+      );
+      this.logger.log(
+        `[${event}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} bookmarks=${updated.bookmarks} progress=${updated.progress} - audio positions remapped`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[${event}] [fail] bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio position remap failed`,
+      );
+    }
+    return true;
+  }
+
+  /** Never throws: the files are registered either way, and the next scan of the book realigns them. */
+  private async realignAudioTrackOrder(bookId: number): Promise<void> {
+    const event = 'scanner.realign_track_order';
+    const startedAt = Date.now();
+    try {
+      const renumbered = await this.scannerRepo.realignAudioTrackOrder(bookId);
+      if (renumbered > 0) {
+        this.logger.log(
+          `[${event}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} renumbered=${renumbered} - track order realigned with file paths`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[${event}] [fail] bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - track order realignment failed`,
+      );
+    }
+  }
+
   private async processCandidate(
     candidate: BookCandidate,
     libraryId: number,
@@ -1636,7 +2138,36 @@ export class ScannerService implements OnApplicationBootstrap {
     addedAtSource: AddedAtSource,
     isFirstScan: boolean,
     candidateFolderPaths: Set<string>,
+    regexContext?: RegexScanContext,
   ): Promise<ProcessCandidateResult> {
+    const registered = await this.registerCandidate(
+      candidate,
+      libraryId,
+      libraryFolderId,
+      maps,
+      formatPriority,
+      addedAtSource,
+      isFirstScan,
+      candidateFolderPaths,
+    );
+    return this.readCandidateFiles(registered, libraryId, metadataPrecedence, regexContext);
+  }
+
+  /**
+   * Phases 1 and 2 of a candidate: its book row, every file registered against it, and its primary
+   * file. These resolve identity (moves, merges, transfers) through the scan's shared lookup maps,
+   * so a full scan runs them for one candidate at a time, in discovery order.
+   */
+  private async registerCandidate(
+    candidate: BookCandidate,
+    libraryId: number,
+    libraryFolderId: number,
+    maps: ScanLookupMaps,
+    formatPriority: string[],
+    addedAtSource: AddedAtSource,
+    isFirstScan: boolean,
+    candidateFolderPaths: Set<string>,
+  ): Promise<RegisteredCandidate> {
     const { bookByFolderPath, booksByParentDir, fileByPath, fileByIno } = maps;
     const counts = { added: 0, updated: 0 };
     const fileCounts: ScanCounts = { addedCount: 0, updatedCount: 0, missingCount: 0 };
@@ -1662,6 +2193,9 @@ export class ScannerService implements OnApplicationBootstrap {
 
     // Phase 1: Register every file in bookFiles. No metadata extraction yet.
     const registeredFiles: RegisteredFile[] = [];
+    const formerOwnerBookIds = new Set<number>();
+    let mediaOverlayChanged = false;
+    let numberedTracks = false;
 
     for (let sortOrder = 0; sortOrder < candidate.files.length; sortOrder++) {
       const fileStat = candidate.files[sortOrder];
@@ -1677,7 +2211,9 @@ export class ScannerService implements OnApplicationBootstrap {
 
       const fileCount: ScanCounts = { addedCount: 0, updatedCount: 0, missingCount: 0 };
       let processResult: ProcessedFileResult;
-      const knownDurationSeconds = fileByPath.get(fileStat.absolutePath)?.durationSeconds ?? null;
+      const knownEntry = fileByPath.get(fileStat.absolutePath);
+      const knownDurationSeconds = knownEntry?.durationSeconds ?? null;
+      const previousSortOrder = knownEntry?.bookId === book.id ? knownEntry.sortOrder : null;
 
       try {
         processResult = await this.processFile(
@@ -1700,8 +2236,14 @@ export class ScannerService implements OnApplicationBootstrap {
       }
 
       counts.updated += fileCount.addedCount + fileCount.updatedCount;
+      if (processResult.previousBookId !== undefined && processResult.previousBookId !== book.id)
+        formerOwnerBookIds.add(processResult.previousBookId);
+      if (processResult.mediaOverlayChanged) mediaOverlayChanged = true;
 
       if (processResult.fileId !== null) {
+        if (format !== null && isAudioFormat(format) && (processResult.isNew || processResult.reassigned || previousSortOrder !== sortOrder)) {
+          numberedTracks = true;
+        }
         registeredFiles.push({
           fileId: processResult.fileId,
           format,
@@ -1712,21 +2254,46 @@ export class ScannerService implements OnApplicationBootstrap {
           isNew: processResult.isNew,
           wasReassigned: processResult.reassigned,
           wasChanged: processResult.changed,
+          wasPathChanged: processResult.pathChanged === true,
           mediaOverlayAvailable: fileByPath.get(fileStat.absolutePath)?.mediaOverlayAvailable === true,
+          previousSortOrder,
         });
         retainedFileIds.add(processResult.fileId);
       }
     }
 
+    // Each track above was numbered from this scan's own listing of the folder. A scan that listed
+    // the folder before newer files arrived can finish after one that saw them, mixing the two.
+    if (numberedTracks) await this.realignAudioTrackOrder(book.id);
+
     // Phase 2: Pick winner (primary file) from all registered content files.
     const contentFiles = registeredFiles.filter((f) => f.role === 'content');
 
-    const winner = selectPrimaryFile(
+    // A current primary that is still here keeps its place against files that only tie with it:
+    // non-audio files are not sorted, so a fresh pick would follow directory order (B32).
+    const winner = selectPrimaryFileKeepingCurrent(
       contentFiles.map((file) => ({ ...file, id: file.fileId })),
+      book.primaryFileId ?? null,
       formatPriority,
     );
 
     await this.scannerRepo.updateBookPrimaryFile(book.id, winner?.fileId ?? null);
+
+    return { candidate, book, counts, retainedFileIds, registeredFiles, contentFiles, winner, formerOwnerBookIds, mediaOverlayChanged };
+  }
+
+  /**
+   * Phase 3 of a candidate: reads its files (tags, cover, lengths, chapters) into the book it was
+   * registered as. It writes that book's own rows and name tables that take concurrent inserts, so a
+   * full scan reads several candidates at once.
+   */
+  private async readCandidateFiles(
+    registered: RegisteredCandidate,
+    libraryId: number,
+    metadataPrecedence: string[],
+    regexContext?: RegexScanContext,
+  ): Promise<ProcessCandidateResult> {
+    const { candidate, book, counts, retainedFileIds, registeredFiles, contentFiles, winner, formerOwnerBookIds, mediaOverlayChanged } = registered;
 
     // Phase 3: Metadata extraction, source-precedence driven, triggered by new/reassigned/changed metadata sources.
     //
@@ -1743,13 +2310,18 @@ export class ScannerService implements OnApplicationBootstrap {
 
     const metadataSources = this.buildMetadataExtractionSources(registeredFiles, winner, metadataPrecedence);
     const shouldExtractMetadata =
-      metadataSources.some((source) => hasMetadataSourceChanged(source.file)) || (book.primaryFileId === null && winner !== null);
+      metadataSources.some((source) => hasMetadataSourceChanged(source.file)) ||
+      (regexContext?.config != null &&
+        winner !== null &&
+        (hasMetadataSourceChanged(winner) || winner.wasPathChanged || winner.fileId !== book.primaryFileId)) ||
+      (book.primaryFileId === null && winner !== null);
     const audioContentFiles = contentFiles.filter((f) => f.format !== null && isAudioFormat(f.format!));
     const changedAudioFiles = audioContentFiles.filter(hasMetadataSourceChanged);
     const audioFilesNeedingDuration = audioContentFiles.filter(
       (file) => hasMetadataSourceChanged(file) || file.durationSeconds === null || file.durationSeconds <= 0,
     );
     const winnerIsAudio = winner !== null && winner.format !== null && isAudioFormat(winner.format);
+    const audioOrderChanged = await this.remapAudioPositionsIfReordered(book.id, audioContentFiles);
 
     // 3a: Extract audio-specific fields (chapters, narrators) from the first audio file if any audio
     //     file is new, reassigned, or changed. Skipped when the audio winner is itself the leading
@@ -1765,9 +2337,7 @@ export class ScannerService implements OnApplicationBootstrap {
     }
 
     if (!audioWinnerLeadsMetadata && changedAudioFiles.length > 0 && !selfWriteInProgress) {
-      const sortedAudio = [...audioContentFiles].sort((a, b) =>
-        basename(a.absolutePath).localeCompare(basename(b.absolutePath), undefined, { numeric: true }),
-      );
+      const sortedAudio = [...audioContentFiles].sort((a, b) => compareBookFilePaths(a.absolutePath, b.absolutePath));
       const firstAudio = sortedAudio[0];
       try {
         await this.metadataService.extractAudioChaptersAndNarrators(book.id, firstAudio.absolutePath, firstAudio.format!);
@@ -1780,15 +2350,27 @@ export class ScannerService implements OnApplicationBootstrap {
 
     // 3b: Extract shared metadata from the first available configured source.
     if (shouldExtractMetadata && !selfWriteInProgress) {
-      await this.extractFirstAvailableMetadataSource(book.id, metadataSources);
+      const relativePath = winner ? candidate.files.find((file) => file.absolutePath === winner.absolutePath)?.relPath : undefined;
+      const startedAt = Date.now();
+      try {
+        const regexApplied = await this.extractRegexMetadata(book.id, libraryId, relativePath, metadataSources, metadataPrecedence, regexContext);
+        if (!regexApplied) await this.extractFirstAvailableMetadataSource(book.id, metadataSources);
+      } catch (error) {
+        this.logger.warn(
+          `[scanner.extract_metadata] [fail] libraryId=${libraryId} bookId=${book.id} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - metadata extraction failed; continuing scan without retry`,
+        );
+      }
     }
 
     // 3c: Write per-file duration for new, changed, or historically unprobed audio files.
     //     Including the winner ensures aggregateAudioDuration has accurate data for the total.
+    //     Each probe also read the file's chapters, which 3e reuses instead of probing again.
+    const audioProbes = new Map<string, AudioChapterProbe>();
     if (audioFilesNeedingDuration.length > 0) {
       await mapWithConcurrency(audioFilesNeedingDuration, AUDIO_DURATION_PROBE_CONCURRENCY, async (audioFile) => {
         try {
-          await this.metadataService.extractAudioFileDuration(book.id, audioFile.absolutePath);
+          const probe = await this.metadataService.measureAudioFile(book.id, audioFile.absolutePath);
+          if (probe) audioProbes.set(audioFile.absolutePath, probe);
         } catch (err) {
           this.logger.warn(
             `[scanner.extract_audio_duration] [fail] bookId=${book.id} path="${sanitizeLogValue(audioFile.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration extraction failed`,
@@ -1815,11 +2397,12 @@ export class ScannerService implements OnApplicationBootstrap {
     //     what repairs the ones scanned before chapters were merged; it settles after one pass.
     if (audioContentFiles.length > 1) {
       const orderedAudioPaths = [...audioContentFiles]
-        .sort((a, b) => naturalCompare(basename(a.absolutePath), basename(b.absolutePath)))
+        .sort((a, b) => compareBookFilePaths(a.absolutePath, b.absolutePath))
         .map((file) => file.absolutePath);
-      const filesChanged = shouldExtractMetadata || changedAudioFiles.length > 0;
+      // A reorder keeps the total length, so stored chapters still look complete; rebuild them anyway.
+      const filesChanged = shouldExtractMetadata || changedAudioFiles.length > 0 || audioOrderChanged;
       try {
-        await this.metadataService.extractMergedAudioChapters(book.id, orderedAudioPaths, { filesChanged });
+        await this.metadataService.extractMergedAudioChapters(book.id, orderedAudioPaths, { filesChanged, probes: audioProbes });
       } catch (err) {
         this.logger.warn(
           `[scanner.merge_audio_chapters] [fail] bookId=${book.id} files=${orderedAudioPaths.length} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio chapter merge failed`,
@@ -1828,7 +2411,121 @@ export class ScannerService implements OnApplicationBootstrap {
     }
 
     const becameVisible = await this.scannerRepo.promoteProcessingBookToPresent(book.id);
-    return { bookId: book.id, ...counts, retainedFileIds, becameVisible, created: book.created };
+    const fileSetChanged = mediaOverlayChanged || registeredFiles.some(hasMetadataSourceChanged);
+    const coverBookIds = [...(fileSetChanged ? [book.id] : []), ...formerOwnerBookIds];
+    return { bookId: book.id, ...counts, retainedFileIds, becameVisible, created: book.created, coverBookIds };
+  }
+
+  /**
+   * Shared metadata extraction for one book outside a scan, honouring its library's regex rules.
+   * An upload registers its own file and the watcher records a move's new path itself, so no later
+   * scan sees anything to re-read. Resolves false when the library has no rules, leaving the
+   * caller's plain file extraction in charge.
+   */
+  async extractMetadataWithLibraryRules(bookId: number): Promise<boolean> {
+    const book = await this.scannerRepo.findBookById(bookId);
+    if (!book) return false;
+    const settings = await this.scannerRepo.findLibrarySettings(book.libraryId);
+    if (!settings?.regexMetadata) return false;
+    const files = await this.scannerRepo.findBookFilesByBookId(bookId);
+    if (files.some((file) => this.selfWriteRegistry.isSuppressed(file.absolutePath))) return true;
+
+    const registered = storedFilesAsRegistered(files);
+    const winner = registered.find((file) => file.fileId === book.primaryFileId) ?? null;
+    const relativePath = files.find((file) => file.id === book.primaryFileId)?.relPath ?? undefined;
+    const precedence = settings.metadataPrecedence ?? [...LIBRARY_METADATA_PRECEDENCE_DEFAULT];
+    const sources = this.buildMetadataExtractionSources(registered, winner, precedence);
+    const context = createRegexScanContext(settings.regexMetadata);
+    const regexApplied = await this.extractRegexMetadata(book.id, book.libraryId, relativePath, sources, precedence, context);
+    if (!regexApplied) await this.extractFirstAvailableMetadataSource(book.id, sources);
+    return true;
+  }
+
+  /**
+   * Applies a library's current path rules to a book already in it, writing only the fields the
+   * rules decide. A scan still re-reads everything for files that changed; this is for rules that
+   * changed while the files did not.
+   */
+  async applyLibraryRulesToBook(
+    book: { id: number; primaryFileId: number | null },
+    files: StoredBookFile[],
+    rules: { config: RegexMetadataConfig; precedence: string[] },
+  ): Promise<LibraryRulesOutcome> {
+    const relativePath = files.find((file) => file.id === book.primaryFileId)?.relPath;
+    if (!relativePath || files.some((file) => this.selfWriteRegistry.isSuppressed(file.absolutePath))) return 'skipped';
+
+    const result = await this.regexMetadata.evaluate(rules.config, relativePath);
+    const failure = result.diagnostics.find((entry) => entry.code !== 'invalid_value');
+    if (failure) return isTransientRegexFailure(failure.code) ? 'rules_unavailable' : 'rules_invalid';
+    if (!result.matched) return 'skipped';
+
+    const registered = storedFilesAsRegistered(files);
+    const winner = registered.find((file) => file.fileId === book.primaryFileId) ?? null;
+    const sources = this.buildMetadataExtractionSources(registered, winner, rules.precedence);
+    const written = await this.metadataService.applyRegexMetadataRules(
+      book.id,
+      sources.map((source) => ({ key: source.key, absolutePath: source.file.absolutePath, format: source.format })),
+      result.metadata,
+      rules.precedence,
+    );
+    return written === 'unreadable' ? 'file_unavailable' : written;
+  }
+
+  /** Re-applies regex rules after the watcher moved these books' files; books in libraries without rules are left alone. */
+  refreshRegexMetadataAfterMoveAsync(bookIds: number[]): void {
+    void (async () => {
+      for (const bookId of bookIds) {
+        const startedAt = Date.now();
+        try {
+          await this.extractMetadataWithLibraryRules(bookId);
+        } catch (error) {
+          this.logger.warn(
+            `[scanner.regex_metadata_after_move] [fail] bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - regex metadata refresh after move failed`,
+          );
+        }
+      }
+    })();
+  }
+
+  private async extractRegexMetadata(
+    bookId: number,
+    libraryId: number,
+    relativePath: string | undefined,
+    sources: MetadataExtractionSource[],
+    precedence: string[],
+    context?: RegexScanContext,
+  ): Promise<boolean> {
+    if (!context?.config || context.disabled || !relativePath) return false;
+    const startedAt = Date.now();
+    let result: RegexMetadataPreview;
+    try {
+      result = await this.regexMetadata.evaluate(context.config, relativePath);
+      const failure = result.diagnostics.find((entry) => entry.code !== 'invalid_value');
+      if (failure) {
+        // Rules that cannot compile fail every book at once; a pool failure that outlived a retry may be this book alone.
+        const transient = isTransientRegexFailure(failure.code);
+        if (transient) context.failures++;
+        if (!transient || context.failures >= REGEX_SCAN_FAILURE_LIMIT) context.disabled = true;
+        this.logger.warn(
+          `[scanner.regex_metadata] [fail] libraryId=${libraryId} bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=RegexEvaluationError error="${sanitizeLogValue(failure.code)}" regexDisabled=${context.disabled} - regex skipped; file metadata used`,
+        );
+        return false;
+      }
+      if (!result.matched) return false;
+    } catch (error) {
+      this.logger.warn(
+        `[scanner.regex_metadata] [fail] libraryId=${libraryId} bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - regex evaluation failed`,
+      );
+      return false;
+    }
+    // Persistence may already have written metadata before failing; never retry with different precedence.
+    await this.metadataService.extractAndSaveWithRegex(
+      bookId,
+      sources.map((source) => ({ key: source.key, absolutePath: source.file.absolutePath, format: source.format })),
+      result.metadata,
+      precedence,
+    );
+    return true;
   }
 
   private buildMetadataExtractionSources(
@@ -2149,6 +2846,29 @@ export class ScannerService implements OnApplicationBootstrap {
     return !(await pathsReferToSameEntry(existingPath, candidatePath));
   }
 
+  private async isBookMissingOnDisk(bookId: number): Promise<boolean> {
+    const files = (await this.scannerRepo.findBookFilesByBookId(bookId)).filter((file) => file.role === 'content');
+    if (files.length === 0) return false;
+
+    for (let i = 0; i < files.length; i += MISSING_FILE_STAT_BATCH_SIZE) {
+      const batch = files.slice(i, i + MISSING_FILE_STAT_BATCH_SIZE);
+      const missing = await Promise.all(
+        batch.map(async (file) => {
+          try {
+            const fileStat = await stat(file.absolutePath);
+            return !fileStat.isFile();
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            return code === 'ENOENT' || code === 'ENOTDIR';
+          }
+        }),
+      );
+      if (missing.some((value) => !value)) return false;
+    }
+
+    return true;
+  }
+
   private async filterBookIdsMissingOnDisk(bookIds: number[]): Promise<number[]> {
     if (bookIds.length === 0) return [];
 
@@ -2236,7 +2956,7 @@ export class ScannerService implements OnApplicationBootstrap {
       }
     }
 
-    if (sourceBookId == null) return null;
+    if (sourceBookId == null || !(await this.isBookMissingOnDisk(sourceBookId))) return null;
 
     const moved = await this.scannerRepo.moveBookToLibrary(sourceBookId, libraryId, libraryFolderId, candidate.folderPath);
     if (!moved) return null;
@@ -2324,17 +3044,23 @@ export class ScannerService implements OnApplicationBootstrap {
     const inoUnchanged = fileStat.ino === byPath.ino;
     const relPathUnchanged = fileStat.relPath === byPath.relPath;
     const reassigned = byPath.bookId !== bookId;
+    const previousBookId = reassigned ? byPath.bookId : undefined;
     const sortOrderUnchanged = sortOrder === byPath.sortOrder;
+    // A file stored under an older classification, such as DjVu before it was a content format,
+    // is promoted even though the file itself is unchanged.
+    const roleUnchanged = byPath.role == null || byPath.role === role;
     let mediaOverlayAvailable = byPath.mediaOverlayAvailable;
     let mediaOverlayCheckedAt = byPath.mediaOverlayCheckedAt;
 
-    if (sizeUnchanged && mtimeUnchanged && inoUnchanged && relPathUnchanged && !reassigned && sortOrderUnchanged) {
+    if (sizeUnchanged && mtimeUnchanged && inoUnchanged && relPathUnchanged && !reassigned && sortOrderUnchanged && roleUnchanged) {
       if (format?.toLowerCase() === 'epub' && byPath.mediaOverlayCheckedAt == null) {
         const mediaOverlayFields = await this.inspectMediaOverlayFields(fileStat.absolutePath, format);
         await this.scannerRepo.updateBookFile(byPath.id, mediaOverlayFields);
+        const mediaOverlayChanged = byPath.mediaOverlayAvailable !== mediaOverlayFields.mediaOverlayAvailable;
         byPath.mediaOverlayAvailable = mediaOverlayFields.mediaOverlayAvailable;
         byPath.mediaOverlayCheckedAt = mediaOverlayFields.mediaOverlayCheckedAt;
         counts.updatedCount++;
+        return { isNew: false, reassigned: false, changed: false, fileId: byPath.id, mediaOverlayChanged };
       }
       return { isNew: false, reassigned: false, changed: false, fileId: byPath.id };
     }
@@ -2348,8 +3074,10 @@ export class ScannerService implements OnApplicationBootstrap {
       mediaOverlayCheckedAt = mediaOverlayFields.mediaOverlayCheckedAt ?? null;
     }
 
-    if (!sizeUnchanged || !mtimeUnchanged || !inoUnchanged || !relPathUnchanged || reassigned) {
+    const fileHash = !sizeUnchanged || !mtimeUnchanged ? await computeFileHash(fileStat.absolutePath) : byPath.fileHash;
+    if (!sizeUnchanged || !mtimeUnchanged || !inoUnchanged || !relPathUnchanged || reassigned || !roleUnchanged) {
       await this.scannerRepo.updateBookFile(byPath.id, {
+        fileHash,
         ...(reassigned && { bookId }),
         libraryFolderId,
         relPath: fileStat.relPath,
@@ -2378,10 +3106,11 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      fileHash: byPath.fileHash,
+      fileHash,
       sortOrder,
       mediaOverlayAvailable,
       mediaOverlayCheckedAt,
+      role,
     });
     if (fileStat.ino !== 0n) {
       fileByIno.set(fileStat.ino, {
@@ -2392,7 +3121,14 @@ export class ScannerService implements OnApplicationBootstrap {
         mtime: fileStat.mtime,
       });
     }
-    return { isNew: false, reassigned, changed: !sizeUnchanged || !mtimeUnchanged, fileId: byPath.id };
+    return {
+      isNew: false,
+      reassigned,
+      changed: !sizeUnchanged || !mtimeUnchanged || !roleUnchanged,
+      pathChanged: !relPathUnchanged,
+      fileId: byPath.id,
+      previousBookId,
+    };
   }
 
   private async resolveByLocalIno(
@@ -2444,7 +3180,14 @@ export class ScannerService implements OnApplicationBootstrap {
       mediaOverlayCheckedAt: mediaOverlayFields.mediaOverlayCheckedAt,
     });
     fileByIno.set(fileStat.ino, { id: byIno.id, bookId, absolutePath: fileStat.absolutePath, sizeBytes: fileStat.sizeBytes, mtime: fileStat.mtime });
-    return { isNew: false, reassigned: byIno.bookId !== bookId, changed: !sizeUnchanged || !mtimeUnchanged, fileId: byIno.id };
+    return {
+      isNew: false,
+      reassigned: byIno.bookId !== bookId,
+      changed: !sizeUnchanged || !mtimeUnchanged,
+      pathChanged: oldPathEntry?.relPath !== fileStat.relPath,
+      fileId: byIno.id,
+      previousBookId: byIno.bookId !== bookId ? byIno.bookId : undefined,
+    };
   }
 
   private async resolveByGlobalIno(
@@ -2525,7 +3268,9 @@ export class ScannerService implements OnApplicationBootstrap {
       isNew: false,
       reassigned: globalByIno.file.bookId !== bookId,
       changed: !sizeUnchanged || !mtimeUnchanged,
+      pathChanged: globalByIno.file.relPath !== fileStat.relPath,
       fileId: globalByIno.file.id,
+      previousBookId: globalByIno.file.bookId !== bookId ? globalByIno.file.bookId : undefined,
     };
   }
 
@@ -2603,7 +3348,14 @@ export class ScannerService implements OnApplicationBootstrap {
             mtime: fileStat.mtime,
           });
         }
-        return { isNew: false, reassigned: byHash.bookId !== bookId, changed: false, fileId: byHash.id };
+        return {
+          isNew: false,
+          reassigned: byHash.bookId !== bookId,
+          changed: false,
+          pathChanged: byHash.relPath !== fileStat.relPath,
+          fileId: byHash.id,
+          previousBookId: byHash.bookId !== bookId ? byHash.bookId : undefined,
+        };
       }
 
       let globalByHash = await this.scannerRepo.findBookFileWithContextByHash(fileHash);
@@ -2668,7 +3420,14 @@ export class ScannerService implements OnApplicationBootstrap {
             mtime: fileStat.mtime,
           });
         }
-        return { isNew: false, reassigned: globalByHash.file.bookId !== bookId, changed: false, fileId: globalByHash.file.id };
+        return {
+          isNew: false,
+          reassigned: globalByHash.file.bookId !== bookId,
+          changed: false,
+          pathChanged: globalByHash.file.relPath !== fileStat.relPath,
+          fileId: globalByHash.file.id,
+          previousBookId: globalByHash.file.bookId !== bookId ? globalByHash.file.bookId : undefined,
+        };
       }
     }
 
@@ -2749,10 +3508,10 @@ export class ScannerService implements OnApplicationBootstrap {
     fileByPath: Map<string, FileByPathEntry>,
     fileByIno: Map<bigint, FileByInoEntry>,
     counts: { added: number; updated: number },
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Use in-memory index instead of DB query per book
     const knownFileIds = fileIdsByBookId.get(bookId);
-    if (!knownFileIds) return;
+    if (!knownFileIds) return false;
 
     const missingIds: number[] = [];
     for (const fileId of knownFileIds) {
@@ -2760,7 +3519,7 @@ export class ScannerService implements OnApplicationBootstrap {
         missingIds.push(fileId);
       }
     }
-    if (missingIds.length === 0) return;
+    if (missingIds.length === 0) return false;
 
     for (const fileId of missingIds) {
       await this.scannerRepo.deleteBookFile(fileId);
@@ -2780,9 +3539,16 @@ export class ScannerService implements OnApplicationBootstrap {
         }
       }
     }
+    return true;
   }
 
-  private emitFromStore(libraryId: number, jobId: number, status: 'running' | 'completed' | 'failed', errorMessage?: string): void {
+  /** Pushes the scan to the library page and tells the Jobs area; `progressOnly` when the scan only moved along. */
+  private emitFromStore(
+    libraryId: number,
+    jobId: number,
+    status: 'running' | 'completed' | 'failed',
+    { errorMessage, progressOnly = false }: { errorMessage?: string; progressOnly?: boolean } = {},
+  ): void {
     const entry = this.scanJobStore.get(libraryId);
     const event: ScanProgressEvent = {
       jobId,
@@ -2796,5 +3562,6 @@ export class ScannerService implements OnApplicationBootstrap {
       errorMessage,
     };
     this.scanGateway.emitProgress(event);
+    this.jobChanges.notify({ type: 'library-scan', ownerId: null, state: !progressOnly });
   }
 }

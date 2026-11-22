@@ -18,8 +18,9 @@ import {
 } from '@lucide/vue'
 import type { AnnotationHubItem, AnnotationItem } from '@bookorbit/types'
 import { formatDate } from '@/i18n/formatters'
-import { getFormatColor } from '@/features/book/lib/format-colors'
+import { formatChipStyle } from '@/features/book/lib/format-colors'
 import AnnotationBookThumb from '../AnnotationBookThumb.vue'
+import { annotationSourceKey } from '@/features/annotations/lib/source-label'
 
 type EntryAnnotation = AnnotationItem | AnnotationHubItem
 
@@ -71,18 +72,17 @@ const hub = computed(() => ('bookTitle' in props.annotation ? props.annotation :
 const bookTitle = computed(() => hub.value?.bookTitle ?? t('annotations.unknownBook'))
 const author = computed(() => hub.value?.author ?? null)
 const format = computed(() => hub.value?.jumpFileFormat?.trim().toUpperCase() ?? null)
-const formatStyle = computed(() => {
-  const color = getFormatColor(format.value)
-  return { color, borderColor: `${color}66`, backgroundColor: `${color}1a` }
-})
+const formatStyle = computed(() => formatChipStyle(format.value))
 // A book page's rows carry no jumpFileFormat, so there it only needs a file to jump to.
 const canJump = computed(() => props.annotation.jumpFileId != null && (hub.value == null || format.value != null) && !props.trashed)
 const needsReview = computed(() => props.annotation.positionStatus != null && props.annotation.positionStatus !== 'exact')
 const styleIcon = computed(() => STYLE_ICONS[props.annotation.style as keyof typeof STYLE_ICONS] ?? Highlighter)
 const bookLink = computed(() => ({ name: 'book-detail', params: { bookId: props.annotation.bookId }, query: { tab: 'highlights' } }))
 
+const quoteSizeClass = computed(() => (props.compact ? 'text-sm leading-relaxed' : 'text-base leading-[1.6]'))
+
 const quoteClass = computed(() => {
-  const base = props.compact ? 'text-sm leading-relaxed' : 'text-base leading-[1.6]'
+  const base = quoteSizeClass.value
   if (props.annotation.style === 'underline') return `${base} underline decoration-[1.5px] underline-offset-[3px]`
   if (props.annotation.style === 'strikethrough') return `${base} line-through decoration-[1.5px]`
   return base
@@ -137,7 +137,7 @@ function handlePurge() {
       <button
         v-if="selecting"
         type="button"
-        class="ml-auto grid size-[15px] place-items-center rounded border-[1.5px] transition-colors"
+        class="ml-auto grid size-[15px] place-items-center rounded-xs border-[1.5px] transition-colors"
         :class="selected ? 'border-primary bg-primary text-primary-foreground' : 'border-border hover:border-primary'"
         :aria-pressed="selected"
         :aria-label="t('annotations.listItem.selectAnnotation')"
@@ -157,7 +157,8 @@ function handlePurge() {
 
     <!-- WHAT -->
     <div class="col-start-3 min-w-0" :class="stacked ? 'row-start-2' : 'row-start-1'">
-      <p class="text-foreground" :class="quoteClass">{{ annotation.text }}</p>
+      <p v-if="annotation.text" class="whitespace-pre-line text-foreground" :class="quoteClass">{{ annotation.text }}</p>
+      <p v-else class="italic text-muted-foreground" :class="quoteSizeClass">{{ t('annotations.textUnavailable') }}</p>
       <div v-if="annotation.note" class="mt-2 border-l-2 border-primary pl-2.5">
         <span class="mb-0.5 block text-[8.5px] font-bold uppercase tracking-[0.13em] text-primary">{{ t('annotations.hub.noteLabel') }}</span>
         <p class="text-[11.5px] leading-relaxed text-foreground">{{ annotation.note }}</p>
@@ -271,7 +272,7 @@ function handlePurge() {
           </span>
           <span v-if="locationLabel" class="shrink-0 text-[10px] font-semibold leading-[14px] text-muted-foreground">{{ locationLabel }}</span>
           <span class="inline-flex shrink-0 items-center gap-1 text-[10px] leading-[14px]" :style="{ color: `var(--pill-${annotation.origin})` }">
-            {{ t(`annotations.sources.${annotation.origin}`) }}
+            {{ t(annotationSourceKey(annotation.origin)) }}
           </span>
           <span
             v-if="format"

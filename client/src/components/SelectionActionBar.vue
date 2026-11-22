@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, ref, useSlots, watch } from 'vue'
+import { computed, nextTick, ref, useSlots, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   BookOpen,
+  Combine,
   Download,
   FileSpreadsheet,
   FolderInput,
+  Link2,
   FolderMinus,
   FolderPlus,
   ImageDown,
+  ImageUp,
   Lock,
   Loader2,
   Mail,
+  Minimize2,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -23,6 +27,8 @@ import {
   X,
 } from '@lucide/vue'
 import InputWithSuggestions from '@/components/ui/InputWithSuggestions.vue'
+import IgnoreCacheCheckbox from '@/features/metadata-cache/components/IgnoreCacheCheckbox.vue'
+import type { IgnoreCacheOptions } from '@/features/metadata-cache/lib/metadata-cache'
 import { usePublisherSearch, useSeriesNameSearch, useLanguageSearch } from '@/features/book/composables/useMetadataFieldSearch'
 import {
   DropdownMenu,
@@ -36,15 +42,20 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
-import { STATUS_ICONS, STATUS_OPTIONS } from '@/features/book/composables/useBookStatus'
-import type { ReadStatus } from '@bookorbit/types'
+import BulkReadingStateDialog from '@/features/book/components/BulkReadingStateDialog.vue'
+import type { BulkReadingStatePatch } from '@/features/book/composables/useBookStatus'
 import {
   BULK_EDITABLE_ARRAY_FIELDS,
   BULK_EDITABLE_FIELD_OPTIONS,
   type BulkEditableField,
   type BulkEditableValue,
-  type InFlightOp,
 } from '@/features/book/composables/useBookBulkActions'
+import type { BulkRunInFlight } from '@/features/jobs/composables/useBulkRunTracker'
+import { bulkRunLabel } from '@/features/jobs/lib/bulk-runs'
+import { formatNumber } from '@/i18n/formatters'
+import type { MergeSelectionState } from '@/features/book/lib/book-merge'
+import type { LinkSelectionState } from '@/features/book/lib/book-link'
+import { BOOK_LINK_MAX_MEMBERS, BOOK_MERGE_MAX_BOOKS } from '@bookorbit/types'
 
 export type ExportScope = 'primary' | 'all' | 'audio'
 
@@ -61,15 +72,26 @@ const BTN_TEXT_CANCEL = 'h-8 px-3 rounded-full text-sm font-medium text-muted-fo
 const BTN_TEXT_DESTRUCTIVE =
   'h-8 px-3 rounded-full text-sm font-medium text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors'
 const DIVIDER = 'w-px h-5 bg-border mx-1 shrink-0'
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
-const props = defineProps<{
-  count: number
-  visible: boolean
-  inCollection?: boolean
-  inFlight?: InFlightOp | null
-  // Selection is query-scoped (all matching across pages), so individual ids aren't enumerable.
-  queryScoped?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    count: number
+    visible: boolean
+    inCollection?: boolean
+    inFlight?: BulkRunInFlight | null
+    // Selection is query-scoped (all matching across pages), so individual ids aren't enumerable.
+    queryScoped?: boolean
+    metadataEditable?: boolean
+    /** Present when the user may merge books here; its reason says why this selection cannot be merged. */
+    merge?: MergeSelectionState | null
+    /** Present when the user may link books here; its reason says why this selection cannot be linked. */
+    link?: LinkSelectionState | null
+    /** The selection holds books linked with others, which a delete leaves alone (G6). */
+    linkedSelected?: boolean
+  }>(),
+  { metadataEditable: true, merge: null, link: null, linkedSelected: false },
+)
 
 const emit = defineEmits<{
   'add-to-collection': []
@@ -79,15 +101,22 @@ const emit = defineEmits<{
   send: []
   download: [scope: ExportScope]
   'export-metadata': []
-  'refresh-metadata': []
+  'refresh-metadata': [options: IgnoreCacheOptions]
   're-extract-cover': []
-  'set-status': [status: ReadStatus]
+  'embed-audio-cover': []
+  'set-status': [patch: BulkReadingStatePatch]
   'set-rating': [rating: number | null]
   'set-field': [field: BulkEditableField, value: BulkEditableValue]
   'lock-metadata': [locked: boolean]
   'move-to-library': []
+  merge: []
+  link: []
   delete: []
   exit: []
+  /** Ask the bulk run in progress to stop. */
+  'cancel-in-flight': []
+  /** Stop following the bulk run in progress; it goes on in the background. */
+  'hide-in-flight': []
 }>()
 
 const { t } = useI18n()
@@ -100,15 +129,52 @@ const deleteInput = ref('')
 const exportMenuOpen = ref(false)
 const ratingMenuOpen = ref(false)
 const fieldMenuOpen = ref(false)
+const refreshConfirmOpen = ref(false)
+const refreshIgnoreCache = ref(false)
+const refreshConfirmButton = ref<HTMLButtonElement | null>(null)
+const embedConfirmOpen = ref(false)
+const embedConfirmButton = ref<HTMLButtonElement | null>(null)
+const readingStateOpen = ref(false)
 const bulkField = ref<BulkEditableField>('publisher')
 const fieldValue = ref('')
 const slots = useSlots()
 const hasCustomContent = computed(() => Boolean(slots.content))
 const canBulkActions = computed(() => !isDemoRestrictedAccount.value)
 const canDownload = computed(() => hasPermission('library_download') && canBulkActions.value)
-const canEditMetadata = computed(() => hasPermission('library_edit_metadata') && canBulkActions.value)
-const canMoveToLibrary = computed(() => hasPermission('library_edit_metadata') && canBulkActions.value)
-const canShowMoreMenu = computed(() => canDownload.value || canEditMetadata.value || canMoveToLibrary.value)
+const canSetRating = computed(() => hasPermission('library_edit_metadata') && canBulkActions.value)
+const canEditMetadata = computed(() => hasPermission('library_edit_metadata') && canBulkActions.value && props.metadataEditable !== false)
+const canMoveToLibrary = computed(() => hasPermission('library_edit_metadata') && canBulkActions.value && props.metadataEditable !== false)
+const canMerge = computed(() => props.merge !== null && canBulkActions.value)
+const canLink = computed(() => props.link !== null && canBulkActions.value)
+const mergeDisabledText = computed(() => {
+  switch (props.merge?.disabledReason) {
+    case 'queryScoped':
+      return t('book.merge.disabled.queryScoped')
+    case 'tooFew':
+      return t('book.merge.disabled.tooFew')
+    case 'tooMany':
+      return t('book.merge.disabled.tooMany', { max: BOOK_MERGE_MAX_BOOKS })
+    case 'notEditable':
+      return t('book.merge.disabled.notEditable')
+    default:
+      return null
+  }
+})
+const linkDisabledText = computed(() => {
+  switch (props.link?.disabledReason) {
+    case 'queryScoped':
+      return t('book.link.disabled.queryScoped')
+    case 'tooFew':
+      return t('book.link.disabled.tooFew')
+    case 'tooMany':
+      return t('book.link.disabled.tooMany', { max: BOOK_LINK_MAX_MEMBERS })
+    case 'notEditable':
+      return t('book.link.disabled.notEditable')
+    default:
+      return null
+  }
+})
+const canShowMoreMenu = computed(() => canDownload.value || canEditMetadata.value || canMoveToLibrary.value || canMerge.value || canLink.value)
 const canShare = computed(() => hasPermission('email_send') || canDownload.value)
 const numericFieldSelected = computed(() => bulkField.value === 'publishedYear')
 const arrayFieldSelected = computed(() => (BULK_EDITABLE_ARRAY_FIELDS as readonly string[]).includes(bulkField.value))
@@ -121,6 +187,30 @@ const typeaheadSearchFn = computed<((q: string) => Promise<string[]>) | null>(()
   if (bulkField.value === 'language') return searchLanguage
   return null
 })
+
+const inFlightLabel = computed(() => (props.inFlight ? bulkRunLabel(props.inFlight.kind) : ''))
+const inFlightStatus = computed(() => {
+  const run = props.inFlight
+  if (!run) return ''
+  if (run.cancelling) return t('jobsArea.bulk.cancelling')
+  if (run.waiting) return t('jobsArea.bulk.waiting')
+  return t('jobsArea.bulk.count', { processed: formatNumber(run.processed), total: formatNumber(run.total) })
+})
+/** Announced when the run changes state, not on every item, which would talk over everything else. */
+const inFlightAnnouncement = computed(() => {
+  const run = props.inFlight
+  if (!run) return ''
+  if (run.cancelling) return t('jobsArea.bulk.cancelling')
+  return run.waiting ? t('jobsArea.bulk.waiting') : inFlightLabel.value
+})
+
+function handleCancelInFlight() {
+  emit('cancel-in-flight')
+}
+
+function handleHideInFlight() {
+  emit('hide-in-flight')
+}
 
 const canConfirmDelete = computed(() => props.count <= 50 || deleteInput.value === 'DELETE')
 const canApplyFieldValue = computed(() => {
@@ -141,8 +231,17 @@ function onConfirmDelete() {
   deleteInput.value = ''
 }
 
-function onSetStatus(status: ReadStatus) {
-  emit('set-status', status)
+function openReadingStateEditor() {
+  readingStateOpen.value = true
+}
+
+function handleReadingStateOpenChange(open: boolean) {
+  readingStateOpen.value = open
+}
+
+function handleReadingStateConfirm(patch: BulkReadingStatePatch) {
+  emit('set-status', patch)
+  readingStateOpen.value = false
 }
 
 function onSetRating(rating: number | null) {
@@ -172,9 +271,22 @@ function openFieldEditor() {
   fieldMenuOpen.value = true
 }
 
-function onRefreshMetadata() {
+async function onRefreshMetadata() {
   if (props.count === 0) return
-  emit('refresh-metadata')
+  refreshIgnoreCache.value = false
+  refreshConfirmOpen.value = true
+  // The menu item that opened this is gone, so focus would otherwise fall back to the page.
+  await nextTick()
+  refreshConfirmButton.value?.focus()
+}
+
+function confirmRefreshMetadata() {
+  emit('refresh-metadata', { ignoreCache: refreshIgnoreCache.value })
+  refreshConfirmOpen.value = false
+}
+
+function cancelRefreshMetadata() {
+  refreshConfirmOpen.value = false
 }
 
 function onReExtractCover() {
@@ -182,9 +294,42 @@ function onReExtractCover() {
   emit('re-extract-cover')
 }
 
+async function onEmbedAudioCover() {
+  if (props.count === 0) return
+  embedConfirmOpen.value = true
+  await nextTick()
+  embedConfirmButton.value?.focus()
+}
+
+function confirmEmbedAudioCover() {
+  emit('embed-audio-cover')
+  embedConfirmOpen.value = false
+}
+
+function cancelEmbedAudioCover() {
+  embedConfirmOpen.value = false
+}
+
 function onMoveToLibrary() {
   if (props.count === 0) return
   emit('move-to-library')
+}
+
+// The item stays focusable while unavailable so its reason can be read; selecting it does nothing.
+function onMergeSelect(event: Event) {
+  if (mergeDisabledText.value !== null) {
+    event.preventDefault()
+    return
+  }
+  emit('merge')
+}
+
+function onLinkSelect(event: Event) {
+  if (linkDisabledText.value !== null) {
+    event.preventDefault()
+    return
+  }
+  emit('link')
 }
 
 function resetFieldEditor() {
@@ -224,6 +369,9 @@ watch(
       confirmingDelete.value = false
       exportMenuOpen.value = false
       ratingMenuOpen.value = false
+      refreshConfirmOpen.value = false
+      embedConfirmOpen.value = false
+      readingStateOpen.value = false
       deleteInput.value = ''
       resetFieldEditor()
     }
@@ -242,23 +390,55 @@ watch(
   >
     <div
       v-if="visible"
-      class="fixed bottom-[max(1.5rem,var(--podcast-mini-player-clearance,0px))] left-1/2 -translate-x-1/2 z-50 max-w-[calc(100svw-24px)] rounded-full bg-card/90 backdrop-blur-xl border border-primary/40 shadow-[0_8px_32px_rgba(0,0,0,0.35)] overflow-hidden"
+      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100svw-24px)] rounded-full bg-card/90 backdrop-blur-xl border border-primary/40 shadow-[0_8px_32px_rgba(0,0,0,0.35)] overflow-hidden"
     >
       <div class="flex items-center gap-1 px-2.5 py-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <TooltipProvider :delay-duration="0">
           <!-- In-flight SSE progress -->
           <template v-if="inFlight">
-            <Loader2 :size="15" class="animate-spin text-primary shrink-0" />
-            <span class="px-2 text-sm font-medium text-foreground whitespace-nowrap">
-              {{ inFlight.label }} {{ inFlight.processed }} / {{ inFlight.total }}
-            </span>
+            <Loader2 :size="15" class="animate-spin motion-reduce:animate-none text-primary shrink-0" aria-hidden="true" />
+            <span class="ps-2 text-sm font-medium text-foreground whitespace-nowrap" data-testid="bulk-run-label">{{ inFlightLabel }}</span>
+            <span
+              class="ps-1.5 pe-2 text-sm tabular-nums whitespace-nowrap"
+              :class="inFlight.waiting || inFlight.cancelling ? 'text-muted-foreground' : 'text-foreground'"
+              data-testid="bulk-run-status"
+              >{{ inFlightStatus }}</span
+            >
+            <span class="sr-only" role="status" aria-live="polite">{{ inFlightAnnouncement }}</span>
+            <template v-if="inFlight.runId">
+              <div :class="DIVIDER" />
+              <button
+                type="button"
+                data-testid="bulk-run-cancel"
+                :disabled="inFlight.cancelling"
+                :aria-label="t('jobsArea.bulk.cancel')"
+                :class="[BTN_TEXT_CANCEL, FOCUS_RING, 'shrink-0 whitespace-nowrap disabled:cursor-not-allowed disabled:hover:bg-transparent']"
+                @click="handleCancelInFlight"
+              >
+                {{ t('common.cancel') }}
+              </button>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <button
+                    type="button"
+                    data-testid="bulk-run-hide"
+                    :aria-label="t('jobsArea.bulk.hide')"
+                    :class="[BTN_ICON, BTN_MUTED, FOCUS_RING]"
+                    @click="handleHideInFlight"
+                  >
+                    <Minimize2 :size="ICON_SIZE" aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top">{{ t('jobsArea.bulk.hide') }}</TooltipContent>
+              </Tooltip>
+            </template>
           </template>
 
           <template v-else-if="hasCustomContent">
             <slot name="content" :count="count" />
           </template>
 
-          <template v-else-if="!confirmingDelete && !exportMenuOpen && !ratingMenuOpen && !fieldMenuOpen">
+          <template v-else-if="!confirmingDelete && !exportMenuOpen && !ratingMenuOpen && !fieldMenuOpen && !refreshConfirmOpen && !embedConfirmOpen">
             <span class="px-2.5 py-0.5 text-sm font-semibold tabular-nums whitespace-nowrap rounded-full bg-primary/10 text-primary">{{
               count
             }}</span>
@@ -268,30 +448,21 @@ watch(
             <Tooltip v-if="canBulkActions">
               <TooltipTrigger as-child>
                 <span class="inline-flex shrink-0">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger as-child>
-                      <button
-                        data-testid="action-bulk-set-status"
-                        :disabled="count === 0"
-                        :class="[BTN_ICON, count > 0 ? BTN_PRIMARY : BTN_DISABLED]"
-                        :aria-label="t('components.selectionActionBar.setReadingStatus')"
-                      >
-                        <BookOpen :size="ICON_SIZE" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent side="top" align="center" class="w-48">
-                      <DropdownMenuItem v-for="opt in STATUS_OPTIONS" :key="opt.value" @click="onSetStatus(opt.value)">
-                        <component :is="STATUS_ICONS[opt.value]" :size="14" />
-                        <span>{{ opt.label }}</span>
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <button
+                    data-testid="action-bulk-set-status"
+                    :disabled="count === 0"
+                    :class="[BTN_ICON, count > 0 ? BTN_PRIMARY : BTN_DISABLED]"
+                    :aria-label="t('components.selectionActionBar.setReadingStatus')"
+                    @click="openReadingStateEditor"
+                  >
+                    <BookOpen :size="ICON_SIZE" />
+                  </button>
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top">{{ t('components.selectionActionBar.setReadingStatus') }}</TooltipContent>
             </Tooltip>
 
-            <Tooltip v-if="canEditMetadata">
+            <Tooltip v-if="canSetRating">
               <TooltipTrigger as-child>
                 <button
                   data-testid="action-bulk-set-rating"
@@ -425,6 +596,10 @@ watch(
                           <ImageDown :size="14" />
                           <span>{{ t('components.selectionActionBar.reExtractCover') }}</span>
                         </DropdownMenuItem>
+                        <DropdownMenuItem data-testid="action-bulk-embed-audio-cover" @click="onEmbedAudioCover">
+                          <ImageUp :size="14" />
+                          <span>{{ t('components.selectionActionBar.embedAudioCover') }}</span>
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuSub>
                           <DropdownMenuSubTrigger data-testid="action-bulk-metadata-lock">
@@ -455,6 +630,40 @@ watch(
                         <DropdownMenuItem data-testid="action-move-to-library" @click="onMoveToLibrary">
                           <FolderInput :size="14" />
                           <span>{{ t('book.move.action') }}</span>
+                        </DropdownMenuItem>
+                      </template>
+                      <template v-if="canMerge">
+                        <DropdownMenuSeparator v-if="!canMoveToLibrary" />
+                        <DropdownMenuItem
+                          data-testid="action-merge-books"
+                          :aria-disabled="mergeDisabledText !== null ? 'true' : undefined"
+                          :class="mergeDisabledText !== null ? 'cursor-not-allowed items-start' : undefined"
+                          @select="onMergeSelect"
+                        >
+                          <Combine :size="14" :class="mergeDisabledText !== null ? 'mt-0.5' : undefined" />
+                          <span class="flex min-w-0 flex-col">
+                            <span :class="mergeDisabledText !== null ? 'text-muted-foreground' : undefined">{{ t('book.merge.action') }}</span>
+                            <span v-if="mergeDisabledText" class="text-xs text-muted-foreground" data-testid="action-merge-books-reason">{{
+                              mergeDisabledText
+                            }}</span>
+                          </span>
+                        </DropdownMenuItem>
+                      </template>
+                      <template v-if="canLink">
+                        <DropdownMenuSeparator v-if="!canMoveToLibrary && !canMerge" />
+                        <DropdownMenuItem
+                          data-testid="action-link-books"
+                          :aria-disabled="linkDisabledText !== null ? 'true' : undefined"
+                          :class="linkDisabledText !== null ? 'cursor-not-allowed items-start' : undefined"
+                          @select="onLinkSelect"
+                        >
+                          <Link2 :size="14" :class="linkDisabledText !== null ? 'mt-0.5' : undefined" />
+                          <span class="flex min-w-0 flex-col">
+                            <span :class="linkDisabledText !== null ? 'text-muted-foreground' : undefined">{{ t('book.link.action') }}</span>
+                            <span v-if="linkDisabledText" class="text-xs text-muted-foreground" data-testid="action-link-books-reason">{{
+                              linkDisabledText
+                            }}</span>
+                          </span>
                         </DropdownMenuItem>
                       </template>
                     </DropdownMenuContent>
@@ -521,6 +730,50 @@ watch(
             <button :class="BTN_TEXT_CANCEL" @click="ratingMenuOpen = false">{{ t('common.cancel') }}</button>
           </template>
 
+          <!-- Refresh metadata confirmation -->
+          <template v-else-if="refreshConfirmOpen">
+            <span class="px-3 text-sm font-semibold text-foreground whitespace-nowrap" data-testid="bulk-refresh-confirm">
+              {{ t('components.selectionActionBar.refreshConfirm', { count }) }}
+            </span>
+            <div :class="DIVIDER" />
+            <IgnoreCacheCheckbox v-model="refreshIgnoreCache" compact class="px-2" />
+            <div :class="DIVIDER" />
+            <button
+              ref="refreshConfirmButton"
+              type="button"
+              :class="BTN_TEXT_PRIMARY"
+              data-testid="bulk-refresh-confirm-action"
+              @click="confirmRefreshMetadata"
+            >
+              <RefreshCw :size="14" />
+              {{ t('components.selectionActionBar.refreshConfirmAction') }}
+            </button>
+            <button type="button" :class="BTN_TEXT_CANCEL" data-testid="bulk-refresh-cancel" @click="cancelRefreshMetadata">
+              {{ t('common.cancel') }}
+            </button>
+          </template>
+
+          <!-- Embed audiobook covers confirmation: every read-along EPUB is rewritten -->
+          <template v-else-if="embedConfirmOpen">
+            <span class="px-3 text-sm font-semibold text-foreground whitespace-nowrap" data-testid="bulk-embed-confirm">
+              {{ t('components.selectionActionBar.embedAudioCoverConfirm', { count }) }}
+            </span>
+            <div :class="DIVIDER" />
+            <button
+              ref="embedConfirmButton"
+              type="button"
+              :class="BTN_TEXT_PRIMARY"
+              data-testid="bulk-embed-confirm-action"
+              @click="confirmEmbedAudioCover"
+            >
+              <ImageUp :size="14" />
+              {{ t('components.selectionActionBar.embedAudioCoverConfirmAction') }}
+            </button>
+            <button type="button" :class="BTN_TEXT_CANCEL" data-testid="bulk-embed-cancel" @click="cancelEmbedAudioCover">
+              {{ t('common.cancel') }}
+            </button>
+          </template>
+
           <!-- Field editor -->
           <template v-else-if="fieldMenuOpen">
             <span class="hidden sm:inline px-3 text-sm font-semibold text-foreground whitespace-nowrap">{{
@@ -559,13 +812,16 @@ watch(
 
           <!-- Delete confirmation -->
           <template v-else>
-            <span class="px-3 text-sm font-semibold text-destructive whitespace-nowrap">
-              {{ t('components.selectionActionBar.deleteConfirm', { count }) }}
+            <span class="flex flex-col px-3 whitespace-nowrap">
+              <span class="text-sm font-semibold text-destructive">{{ t('components.selectionActionBar.deleteConfirm', { count }) }}</span>
+              <span v-if="linkedSelected" class="text-xs text-muted-foreground" data-testid="delete-linked-note">{{
+                t('book.link.selectionNotAffected')
+              }}</span>
             </span>
             <template v-if="count > 50">
               <input
                 v-model="deleteInput"
-                class="h-7 w-24 rounded border border-border bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-destructive"
+                class="h-7 w-24 rounded-xs border border-border bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-destructive"
                 :placeholder="t('components.selectionActionBar.typeDelete')"
               />
             </template>
@@ -583,4 +839,10 @@ watch(
       </div>
     </div>
   </Transition>
+  <BulkReadingStateDialog
+    :open="readingStateOpen"
+    :book-count="count"
+    @update:open="handleReadingStateOpenChange"
+    @confirm="handleReadingStateConfirm"
+  />
 </template>

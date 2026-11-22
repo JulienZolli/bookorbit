@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, NotFoundException, Param, ParseIntPipe, Post, Res } from '@nestjs/common';
+import { RouteConfig } from '@nestjs/platform-fastify';
 import { Permission } from '@bookorbit/types';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
@@ -7,8 +8,10 @@ import type { FastifyReply } from 'fastify';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { ResolvesMergedBook } from '../../common/decorators/resolves-merged-book.decorator';
 import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { BookService } from '../book/book.service';
 import { EpubService } from '../reader/epub/epub.service';
 import { CreateWatchDownloadDto } from './dto/create-watch-download.dto';
@@ -32,19 +35,24 @@ export class WatchDownloadController {
     private readonly epubService: EpubService,
   ) {}
 
+  @ResolvesMergedBook({ body: ['bookId'] })
   @Post()
+  @RequireAppAttest()
   @RequirePermission(Permission.LibraryDownload)
   create(@Body() dto: CreateWatchDownloadDto, @CurrentUser() user: RequestUser) {
     return this.watchDownloads.issue(dto.bookId, dto.fileIds, user);
   }
 
+  @ResolvesMergedBook({ body: ['bookId'] })
   @Post('media-overlay')
+  @RequireAppAttest()
   @RequirePermission(Permission.LibraryDownload)
   createMediaOverlay(@Body() dto: CreateWatchMediaOverlayDownloadDto, @CurrentUser() user: RequestUser) {
     return this.watchDownloads.issueMediaOverlay(dto.bookId, dto.fileId, dto.hrefs, user);
   }
 
   @Get('media-overlay/files/:index')
+  @RouteConfig({ compress: false })
   @Public()
   async downloadMediaOverlayFile(
     @Param('index', ParseIntPipe) index: number,
@@ -53,7 +61,7 @@ export class WatchDownloadController {
     @Res() reply: FastifyReply,
   ) {
     const resource = await this.watchDownloads.authorizeMediaOverlay(authorization, index);
-    const { data, contentType, size, status, contentRange } = await this.epubService.streamMediaOverlayFile(
+    const { body, length, contentType, size, status, contentRange } = await this.epubService.streamMediaOverlayFile(
       resource.bookId,
       resource.href,
       resource.fileId,
@@ -64,11 +72,11 @@ export class WatchDownloadController {
     reply.code(status);
     reply.header('Content-Type', contentType);
     reply.header('Accept-Ranges', 'bytes');
-    reply.header('Content-Length', data.length);
+    reply.header('Content-Length', length);
     if (contentRange) reply.header('Content-Range', contentRange);
     if (!contentRange && size > 0) reply.header('X-Content-Length-Full', size);
     reply.header('Cache-Control', 'private, no-store');
-    reply.send(data);
+    reply.send(body);
   }
 
   @Get('files/:fileId')
@@ -84,6 +92,7 @@ export class WatchDownloadController {
     this.sendRange(file.path, file.size, AUDIO_MIME_TYPES[file.format.toLowerCase()] ?? 'application/octet-stream', rangeHeader, reply);
   }
 
+  @ResolvesMergedBook({ params: ['bookId'] })
   @Get('books/:bookId/cover')
   @Public()
   async downloadCover(
@@ -92,7 +101,7 @@ export class WatchDownloadController {
     @Res() reply: FastifyReply,
   ) {
     const user = await this.watchDownloads.authorize(authorization, bookId);
-    const path = await this.bookService.getCoverPath(bookId, user);
+    const path = await this.bookService.getCoverPath(bookId, user, { medium: 'audio' });
     if (!path) throw new NotFoundException(`No cover for book ${bookId}`);
     const info = await stat(path);
     reply.header('Content-Length', info.size);

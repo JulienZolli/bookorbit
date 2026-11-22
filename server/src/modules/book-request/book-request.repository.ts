@@ -1,8 +1,34 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, desc, eq, exists, ilike, inArray, isNull, lt, notExists, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  not,
+  notExists,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { ACTIVE_BOOK_REQUEST_STATUSES, AUDIO_FORMAT_LIST, COMIC_FORMAT_LIST, EBOOK_FORMAT_LIST } from '@bookorbit/types';
+import { alias } from 'drizzle-orm/pg-core';
+import {
+  ACTIVE_BOOK_REQUEST_STATUSES,
+  BOOK_REQUEST_FORMATS_BY_MEDIA_KIND,
+  BOOK_REQUEST_MEDIA_KINDS,
+  WORKER_WRITABLE_BOOK_REQUEST_STATUSES,
+} from '@bookorbit/types';
 import type {
+  BookRequestHandbackCode,
   BookRequestMediaKind,
   BookRequestRequesterOption,
   BookRequestSortDirection,
@@ -74,6 +100,11 @@ async function countLiveSelfServe(executor: RequestReadExecutor, userId: number)
 
 const REQUESTER_OPTION_LIMIT = 100;
 
+/** A `%fragment%` ILIKE pattern in which the wildcards a person typed match only themselves. */
+function containsPattern(term: string): string {
+  return `%${term.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
 /**
  * The two states an untouched self-serve row can be sitting in. Anything further along has a
  * download behind it, and anything settled is nobody's problem.
@@ -86,16 +117,11 @@ const ABANDONABLE_SELF_SERVE_STATUSES: readonly BookRequestStatus[] = ['approved
  */
 const SELF_SERVE_CAP_LOCK_NAMESPACE = 248_001;
 
-const OWNED_FORMATS_BY_MEDIA_KIND: Record<BookRequestMediaKind, readonly string[]> = {
-  ebook: EBOOK_FORMAT_LIST,
-  audiobook: AUDIO_FORMAT_LIST,
-  comic: COMIC_FORMAT_LIST,
-};
-
-export interface ListRequestsOptions {
-  page: number;
-  limit: number;
+/** What narrows a list, as opposed to how it is paged and ordered. */
+export interface RequestListFilters {
   status?: BookRequestStatus;
+  /** Any of these statuses, which is what a list view asks for. Combines with `status`. */
+  statuses?: readonly BookRequestStatus[];
   mediaKind?: BookRequestMediaKind;
   /** Exact original requester. Unlike userId, this does not include subscribers. */
   requesterUserId?: number;
@@ -103,17 +129,73 @@ export interface ListRequestsOptions {
   userId?: number;
   /** Drops the rows this user has hidden. Applies to the approver queue too: dismissal is personal. */
   excludeDismissedFor?: number;
+  /** Keeps only the rows this user has hidden, which is the hidden view. */
+  onlyDismissedFor?: number;
   /** Narrows to self-served rows, or to the ones that went through approval. */
   selfServe?: boolean;
+  /** A fragment of the title or of any author, matched case-insensitively. */
+  search?: string;
+  /** Why automation handed the request back, for a count of the rows handed back for one reason. */
+  failureCode?: BookRequestHandbackCode;
+}
+
+export interface ListRequestsOptions extends RequestListFilters {
+  page: number;
+  limit: number;
   sortBy?: BookRequestSortField;
   sortDir?: BookRequestSortDirection;
+  /**
+   * One row per visible pair, led by its ebook half. The other half is folded away and named in
+   * `visibleCompanionId` instead, and the pair matches a filter when either half does.
+   */
+  groupPairs?: boolean;
 }
+
+/** One request as "select all matching" reports it: enough to decide which bulk actions reach it. */
+export interface BookRequestSelectionRequest {
+  id: number;
+  title: string;
+  mediaKind: string;
+  status: string;
+  userId: number;
+  fulfillerUserId: number | null;
+  /** Hidden by the viewer. */
+  dismissed: boolean;
+  /** The viewer is among the subscribers, which for the requester is not the same as following it. */
+  subscribed: boolean;
+}
+
+/** A row of the grouped list: the request that leads it and the companion folded into it, if any. */
+export interface BookRequestSelectionRow {
+  lead: BookRequestSelectionRequest;
+  companion: BookRequestSelectionRequest | null;
+}
+
+/** A list row, plus the companion folded into it when the list groups pairs. */
+export type BookRequestListRow = BookRequestJoinedRow & { visibleCompanionId: number | null };
+
+/** Where a book lives, which is everything filing a second format into it has to agree with. */
+export interface BookPlacement {
+  bookId: number;
+  libraryId: number;
+  libraryFolderId: number;
+  folderPath: string;
+  status: string;
+  organizationMode: string;
+}
+
+/** The other half of a pair, joined back onto the same table. */
+const companionRequests = alias(bookRequests, 'companion');
+
+/** The visibility and filter rules are asked of a request and of its companion alike. */
+type RequestTable = typeof bookRequests | typeof companionRequests;
 
 export interface BookRequestJoinedRow {
   request: BookRequestRow;
   requesterUsername: string;
   requesterName: string;
   decidedByUsername: string | null;
+  decidedByName: string | null;
   targetLibraryName: string | null;
 }
 
@@ -132,28 +214,95 @@ export interface OwnedMatchLookup {
 export class BookRequestRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  async findAll(opts: ListRequestsOptions): Promise<{ items: BookRequestJoinedRow[]; total: number }> {
+  /**
+   * Who may see a row on this list: the requester or a subscriber when the list is personal, and
+   * never a row this viewer hid (or, for the hidden view, only those). Built against a table rather
+   * than `bookRequests` itself, so the same rule can be asked of a pair's other half.
+   */
+  private visibilityConditions(table: RequestTable, opts: RequestListFilters): SQL[] {
     const conditions: SQL[] = [];
-    if (opts.status) conditions.push(eq(bookRequests.status, opts.status));
-    if (opts.mediaKind) conditions.push(eq(bookRequests.mediaKind, opts.mediaKind));
-    if (opts.requesterUserId !== undefined) conditions.push(eq(bookRequests.userId, opts.requesterUserId));
-    if (opts.selfServe !== undefined) conditions.push(eq(bookRequests.selfServe, opts.selfServe));
     if (opts.userId !== undefined) {
       const subscribed = this.db
         .select({ id: bookRequestSubscribers.requestId })
         .from(bookRequestSubscribers)
         .where(eq(bookRequestSubscribers.userId, opts.userId));
-      conditions.push(or(eq(bookRequests.userId, opts.userId), inArray(bookRequests.id, subscribed)) as SQL);
+      conditions.push(or(eq(table.userId, opts.userId), inArray(table.id, subscribed)) as SQL);
     }
     if (opts.excludeDismissedFor !== undefined) {
       const dismissed = this.db
         .select({ id: bookRequestDismissals.requestId })
         .from(bookRequestDismissals)
         .where(eq(bookRequestDismissals.userId, opts.excludeDismissedFor));
-      conditions.push(notInArray(bookRequests.id, dismissed));
+      conditions.push(notInArray(table.id, dismissed));
+    }
+    if (opts.onlyDismissedFor !== undefined) {
+      const dismissed = this.db
+        .select({ id: bookRequestDismissals.requestId })
+        .from(bookRequestDismissals)
+        .where(eq(bookRequestDismissals.userId, opts.onlyDismissedFor));
+      conditions.push(inArray(table.id, dismissed));
+    }
+    return conditions;
+  }
+
+  /** What the viewer narrowed the list to, as opposed to what they are allowed to see. */
+  private filterConditions(table: RequestTable, opts: RequestListFilters): SQL[] {
+    const conditions: SQL[] = [];
+    if (opts.status) conditions.push(eq(table.status, opts.status));
+    if (opts.statuses) conditions.push(inArray(table.status, [...opts.statuses]));
+    if (opts.mediaKind) conditions.push(eq(table.mediaKind, opts.mediaKind));
+    if (opts.requesterUserId !== undefined) conditions.push(eq(table.userId, opts.requesterUserId));
+    if (opts.selfServe !== undefined) conditions.push(eq(table.selfServe, opts.selfServe));
+    if (opts.failureCode) conditions.push(eq(table.failureCode, opts.failureCode));
+    if (opts.search) {
+      const pattern = containsPattern(opts.search);
+      // Element by element rather than over the array's JSON text, so a pattern cannot match the
+      // quotes and commas between two names.
+      const author = sql`exists (select 1 from jsonb_array_elements_text(${table.authors}) as author(value) where author.value ilike ${pattern})`;
+      conditions.push(or(ilike(table.title, pattern), author) as SQL);
+    }
+    return conditions;
+  }
+
+  /** Both pointers have to agree, so a half-written link can never fold a row away. */
+  private pairJoin(): SQL {
+    return and(
+      eq(companionRequests.id, bookRequests.companionRequestId),
+      eq(companionRequests.companionRequestId, bookRequests.id),
+      ne(companionRequests.mediaKind, bookRequests.mediaKind),
+    ) as SQL;
+  }
+
+  /**
+   * The where clause of a list. Shared by the page, its total, the view counts and "select all
+   * matching", so no figure the page shows can disagree with the rows it lists.
+   *
+   * Grouped, it also answers whether each row's companion is visible, which is what folds a pair
+   * into one row; the query it is used in must join the companion with `pairJoin`.
+   */
+  private listWhere(opts: RequestListFilters, groupPairs: boolean): { where: SQL | undefined; companionVisible: SQL | null } {
+    const visible = this.visibilityConditions(bookRequests, opts);
+    const filters = this.filterConditions(bookRequests, opts);
+
+    if (!groupPairs) {
+      const conditions = [...visible, ...filters];
+      return { where: conditions.length ? and(...conditions) : undefined, companionVisible: null };
     }
 
-    const where = conditions.length ? and(...conditions) : undefined;
+    const companion = companionRequests;
+    const companionVisible = and(isNotNull(companion.id), ...this.visibilityConditions(companion, opts)) as SQL;
+    const companionFilters = this.filterConditions(companion, opts);
+    const companionMatches = companionFilters.length ? (and(companionVisible, ...companionFilters) as SQL) : companionVisible;
+
+    const conditions: SQL[] = [...visible];
+    // The pair is one row, so it stays on the list when either half is what the viewer asked for.
+    if (filters.length) conditions.push(or(and(...filters), companionMatches) as SQL);
+    // The audiobook half folds into its ebook whenever the viewer can see both.
+    conditions.push(not(and(companionVisible, eq(bookRequests.mediaKind, 'audiobook')) as SQL));
+    return { where: and(...conditions), companionVisible };
+  }
+
+  private listOrder(opts: Pick<ListRequestsOptions, 'sortBy' | 'sortDir'>): SQL[] {
     const direction = opts.sortDir === 'asc' ? asc : desc;
     const SORT_COLUMNS = {
       createdAt: bookRequests.createdAt,
@@ -164,35 +313,184 @@ export class BookRequestRepository {
     } as const;
     // The id tie-break runs the same way as the sort, so a row cannot sit on both sides of a page
     // boundary when two requests share a title or a timestamp.
-    const orderBy = [direction(SORT_COLUMNS[opts.sortBy ?? 'createdAt']), direction(bookRequests.id)];
+    return [direction(SORT_COLUMNS[opts.sortBy ?? 'createdAt']), direction(bookRequests.id)];
+  }
 
-    const [rows, [totals]] = await Promise.all([
+  async findAll(opts: ListRequestsOptions): Promise<{ items: BookRequestListRow[]; total: number }> {
+    const groupPairs = opts.groupPairs === true;
+    const orderBy = this.listOrder(opts);
+    const { where, companionVisible } = this.listWhere(opts, groupPairs);
+
+    if (!companionVisible) {
+      const [rows, total] = await Promise.all([
+        this.db
+          .select({
+            request: bookRequests,
+            requesterUsername: users.username,
+            requesterName: users.name,
+            targetLibraryName: libraries.name,
+          })
+          .from(bookRequests)
+          .innerJoin(users, eq(users.id, bookRequests.userId))
+          .leftJoin(libraries, eq(libraries.id, bookRequests.targetLibraryId))
+          .where(where)
+          .orderBy(...orderBy)
+          .limit(opts.limit)
+          .offset((opts.page - 1) * opts.limit),
+        this.countRows(opts, false),
+      ]);
+      return { items: await this.withDecidedBy(rows.map((row) => ({ ...row, visibleCompanionId: null }))), total };
+    }
+
+    const companion = companionRequests;
+    const [rows, total] = await Promise.all([
       this.db
         .select({
           request: bookRequests,
           requesterUsername: users.username,
           requesterName: users.name,
           targetLibraryName: libraries.name,
+          visibleCompanionId: sql<number | null>`case when ${companionVisible} then ${companion.id} else null end`,
         })
         .from(bookRequests)
         .innerJoin(users, eq(users.id, bookRequests.userId))
         .leftJoin(libraries, eq(libraries.id, bookRequests.targetLibraryId))
+        .leftJoin(companion, this.pairJoin())
         .where(where)
         .orderBy(...orderBy)
         .limit(opts.limit)
         .offset((opts.page - 1) * opts.limit),
-      this.db.select({ total: count() }).from(bookRequests).where(where),
+      this.countRows(opts, true),
     ]);
 
-    const decidedByNames = await this.findUsernames(rows.map((r) => r.request.decidedByUserId));
+    return { items: await this.withDecidedBy(rows), total };
+  }
+
+  /**
+   * The rows a list would report as its total under these filters. Grouped by default, because
+   * every count the page shows is a count of the rows it would list.
+   */
+  async countRows(opts: RequestListFilters, groupPairs = true): Promise<number> {
+    const { where } = this.listWhere(opts, groupPairs);
+    const [row] = groupPairs
+      ? await this.db.select({ total: count() }).from(bookRequests).leftJoin(companionRequests, this.pairJoin()).where(where)
+      : await this.db.select({ total: count() }).from(bookRequests).where(where);
+    return row?.total ?? 0;
+  }
+
+  /**
+   * "Select all matching": the grouped list in its own order, up to `limit` rows, with only what a
+   * bulk action needs to know about each request. Whether the viewer hid or follows each one is
+   * answered in the same statement, so the batch costs two queries however many rows it holds.
+   */
+  async findSelection(
+    opts: RequestListFilters & Pick<ListRequestsOptions, 'sortBy' | 'sortDir'>,
+    viewerId: number,
+    limit: number,
+  ): Promise<{ rows: BookRequestSelectionRow[]; totalRows: number }> {
+    const { where, companionVisible } = this.listWhere(opts, true);
+    const companion = companionRequests;
+    const dismissedBy = (table: RequestTable) =>
+      sql<boolean>`${exists(
+        this.db
+          .select({ id: bookRequestDismissals.requestId })
+          .from(bookRequestDismissals)
+          .where(and(eq(bookRequestDismissals.requestId, table.id), eq(bookRequestDismissals.userId, viewerId))),
+      )}`;
+    const subscribedBy = (table: RequestTable) =>
+      sql<boolean>`${exists(
+        this.db
+          .select({ id: bookRequestSubscribers.requestId })
+          .from(bookRequestSubscribers)
+          .where(and(eq(bookRequestSubscribers.requestId, table.id), eq(bookRequestSubscribers.userId, viewerId))),
+      )}`;
+
+    const [rows, totalRows] = await Promise.all([
+      this.db
+        .select({
+          id: bookRequests.id,
+          title: bookRequests.title,
+          mediaKind: bookRequests.mediaKind,
+          status: bookRequests.status,
+          userId: bookRequests.userId,
+          fulfillerUserId: bookRequests.fulfillerUserId,
+          dismissed: dismissedBy(bookRequests),
+          subscribed: subscribedBy(bookRequests),
+          visibleCompanionId: sql<number | null>`case when ${companionVisible} then ${companion.id} else null end`,
+          companionTitle: companion.title,
+          companionMediaKind: companion.mediaKind,
+          companionStatus: companion.status,
+          companionUserId: companion.userId,
+          companionFulfillerUserId: companion.fulfillerUserId,
+          companionDismissed: dismissedBy(companion),
+          companionSubscribed: subscribedBy(companion),
+        })
+        .from(bookRequests)
+        .innerJoin(users, eq(users.id, bookRequests.userId))
+        .leftJoin(companion, this.pairJoin())
+        .where(where)
+        .orderBy(...this.listOrder(opts))
+        .limit(limit),
+      this.countRows(opts, true),
+    ]);
 
     return {
-      items: rows.map((row) => ({
-        ...row,
-        decidedByUsername: row.request.decidedByUserId != null ? (decidedByNames.get(row.request.decidedByUserId) ?? null) : null,
+      rows: rows.map((row) => ({
+        lead: {
+          id: row.id,
+          title: row.title,
+          mediaKind: row.mediaKind,
+          status: row.status,
+          userId: row.userId,
+          fulfillerUserId: row.fulfillerUserId,
+          dismissed: row.dismissed,
+          subscribed: row.subscribed,
+        },
+        companion:
+          row.visibleCompanionId === null
+            ? null
+            : {
+                // A visible companion is a joined row, so its required columns are present.
+                id: row.visibleCompanionId,
+                title: row.companionTitle!,
+                mediaKind: row.companionMediaKind!,
+                status: row.companionStatus!,
+                userId: row.companionUserId!,
+                fulfillerUserId: row.companionFulfillerUserId,
+                dismissed: row.companionDismissed,
+                subscribed: row.companionSubscribed,
+              },
       })),
-      total: totals?.total ?? 0,
+      totalRows,
     };
+  }
+
+  /** The joined form of a set of requests, in no particular order, for a pair's folded-away halves. */
+  async findByIds(ids: number[]): Promise<BookRequestJoinedRow[]> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return [];
+    const rows = await this.db
+      .select({
+        request: bookRequests,
+        requesterUsername: users.username,
+        requesterName: users.name,
+        targetLibraryName: libraries.name,
+      })
+      .from(bookRequests)
+      .innerJoin(users, eq(users.id, bookRequests.userId))
+      .leftJoin(libraries, eq(libraries.id, bookRequests.targetLibraryId))
+      .where(inArray(bookRequests.id, unique));
+    return this.withDecidedBy(rows);
+  }
+
+  private async withDecidedBy<T extends { request: BookRequestRow }>(
+    rows: T[],
+  ): Promise<Array<T & { decidedByUsername: string | null; decidedByName: string | null }>> {
+    const deciders = await this.findDeciders(rows.map((r) => r.request.decidedByUserId));
+    return rows.map((row) => {
+      const decider = row.request.decidedByUserId != null ? deciders.get(row.request.decidedByUserId) : undefined;
+      return { ...row, decidedByUsername: decider?.username ?? null, decidedByName: decider?.name ?? null };
+    });
   }
 
   /**
@@ -204,7 +502,7 @@ export class BookRequestRepository {
    */
   async findRequesterOptions(search: string | null): Promise<BookRequestRequesterOption[]> {
     const term = search?.trim();
-    const pattern = term ? `%${term.replace(/[\\%_]/g, '\\$&')}%` : null;
+    const pattern = term ? containsPattern(term) : null;
 
     return this.db
       .selectDistinct({ userId: users.id, username: users.username, name: users.name })
@@ -231,18 +529,15 @@ export class BookRequestRepository {
 
     if (!row) return undefined;
 
-    const names = await this.findUsernames([row.request.decidedByUserId]);
-    return {
-      ...row,
-      decidedByUsername: row.request.decidedByUserId != null ? (names.get(row.request.decidedByUserId) ?? null) : null,
-    };
+    const [withDecider] = await this.withDecidedBy([row]);
+    return withDecider;
   }
 
-  private async findUsernames(ids: Array<number | null>): Promise<Map<number, string>> {
+  private async findDeciders(ids: Array<number | null>): Promise<Map<number, { username: string; name: string }>> {
     const unique = [...new Set(ids.filter((id): id is number => id != null))];
     if (unique.length === 0) return new Map();
-    const rows = await this.db.select({ id: users.id, username: users.username }).from(users).where(inArray(users.id, unique));
-    return new Map(rows.map((r) => [r.id, r.username]));
+    const rows = await this.db.select({ id: users.id, username: users.username, name: users.name }).from(users).where(inArray(users.id, unique));
+    return new Map(rows.map((r) => [r.id, { username: r.username, name: r.name }]));
   }
 
   /**
@@ -267,6 +562,121 @@ export class BookRequestRepository {
       if ((await countLiveSelfServe(tx, data.userId)) >= maxLive) return null;
       return this.insertWithAliases(tx, data, aliasKeys);
     });
+  }
+
+  /**
+   * Both new halves of a pair in one transaction, linked to each other before it commits.
+   *
+   * One transaction rather than two creates, because a pair that half exists is worse than either
+   * outcome: the cap could refuse the second half after the first was already queued, and a unique
+   * violation on the second would leave the first behind for the caller to retry into a fold.
+   * Rolling both back makes the retry see the world exactly as it was. Null means the cap refused.
+   */
+  async createPair(
+    entries: Array<{ data: NewBookRequestRow; aliasKeys: string[] }>,
+    selfServeCap: { userId: number; maxLive: number; newRows: number } | null,
+  ): Promise<BookRequestRow[] | null> {
+    return this.db.transaction(async (tx) => {
+      if (selfServeCap && selfServeCap.newRows > 0) {
+        await tx.execute(sql`select pg_advisory_xact_lock(${SELF_SERVE_CAP_LOCK_NAMESPACE}, ${selfServeCap.userId})`);
+        if ((await countLiveSelfServe(tx, selfServeCap.userId)) + selfServeCap.newRows > selfServeCap.maxLive) return null;
+      }
+
+      const rows: BookRequestRow[] = [];
+      for (const entry of entries) rows.push(await this.insertWithAliases(tx, entry.data, entry.aliasKeys));
+
+      if (rows.length === 2) {
+        const [first, second] = rows as [BookRequestRow, BookRequestRow];
+        await tx.update(bookRequests).set({ companionRequestId: second.id }).where(eq(bookRequests.id, first.id));
+        await tx.update(bookRequests).set({ companionRequestId: first.id }).where(eq(bookRequests.id, second.id));
+        first.companionRequestId = second.id;
+        second.companionRequestId = first.id;
+      }
+      return rows;
+    });
+  }
+
+  /**
+   * Points two requests at each other, when neither is already paired with something still live.
+   *
+   * Used when a half of a pair joined a request that already existed. That request may have been
+   * paired before; a partner that is still live is the one the dedupe claim says this pair should
+   * have joined anyway, so the link is refused rather than stolen, and a settled partner is let go
+   * so it stops pointing at a request that no longer points back. Locked, because two pairs for the
+   * same work can be submitted at the same moment.
+   */
+  async linkCompanions(firstId: number, secondId: number): Promise<boolean> {
+    if (firstId === secondId) return false;
+    return this.db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: bookRequests.id, mediaKind: bookRequests.mediaKind, companionRequestId: bookRequests.companionRequestId })
+        .from(bookRequests)
+        .where(inArray(bookRequests.id, [firstId, secondId]))
+        .for('update');
+      if (rows.length !== 2 || rows[0]!.mediaKind === rows[1]!.mediaKind) return false;
+      if (rows.every((row) => row.companionRequestId === (row.id === firstId ? secondId : firstId))) return true;
+
+      const previous = rows.map((row) => row.companionRequestId).filter((id): id is number => id !== null && id !== firstId && id !== secondId);
+      if (previous.length > 0) {
+        const partners = await tx
+          .select({ id: bookRequests.id, status: bookRequests.status })
+          .from(bookRequests)
+          .where(inArray(bookRequests.id, previous))
+          .for('update');
+        if (partners.some((partner) => ACTIVE_BOOK_REQUEST_STATUSES.includes(partner.status as BookRequestStatus))) return false;
+        await tx
+          .update(bookRequests)
+          .set({ companionRequestId: null })
+          .where(and(inArray(bookRequests.id, previous), inArray(bookRequests.companionRequestId, [firstId, secondId])));
+      }
+
+      await tx.update(bookRequests).set({ companionRequestId: secondId }).where(eq(bookRequests.id, firstId));
+      await tx.update(bookRequests).set({ companionRequestId: firstId }).where(eq(bookRequests.id, secondId));
+      return true;
+    });
+  }
+
+  /**
+   * Names the book a request's files should join, unless one is already named or the request has
+   * already landed. A request somebody pointed at a book on purpose keeps that book.
+   */
+  async setTargetBookIfUnset(id: number, bookId: number): Promise<boolean> {
+    const rows = await this.db
+      .update(bookRequests)
+      .set({ targetBookId: bookId })
+      .where(
+        and(eq(bookRequests.id, id), isNull(bookRequests.targetBookId), inArray(bookRequests.status, [...WORKER_WRITABLE_BOOK_REQUEST_STATUSES])),
+      )
+      .returning({ id: bookRequests.id });
+    return rows.length > 0;
+  }
+
+  /** Where a book lives, or undefined when it is gone. */
+  async findBookPlacement(bookId: number): Promise<BookPlacement | undefined> {
+    const [row] = await this.db
+      .select({
+        bookId: books.id,
+        libraryId: books.libraryId,
+        libraryFolderId: books.libraryFolderId,
+        folderPath: books.folderPath,
+        status: books.status,
+        organizationMode: libraries.organizationMode,
+      })
+      .from(books)
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
+      .where(eq(books.id, bookId))
+      .limit(1);
+    return row;
+  }
+
+  /** Which media a book already holds, judged by its content files the way ownership is. */
+  async findBookMediaKinds(bookId: number): Promise<Set<BookRequestMediaKind>> {
+    const rows = await this.db
+      .selectDistinct({ format: bookFiles.format })
+      .from(bookFiles)
+      .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.role, 'content')));
+    const formats = new Set(rows.map((row) => row.format?.toLowerCase()).filter((format): format is string => Boolean(format)));
+    return new Set(BOOK_REQUEST_MEDIA_KINDS.filter((kind) => BOOK_REQUEST_FORMATS_BY_MEDIA_KIND[kind].some((format) => formats.has(format))));
   }
 
   private async insertWithAliases(tx: RequestWriteExecutor, data: NewBookRequestRow, aliasKeys: string[]): Promise<BookRequestRow> {
@@ -523,9 +933,14 @@ export class BookRequestRepository {
    * from. They matter because a live row holds the dedupe claim on its work, so an abandoned one
    * quietly subscribes the next person to ask for that book to a request nobody is driving.
    *
+   * Timed from when the row became self-serve, which `decidedAt` records both for a request made
+   * self-serve and for one a fulfiller took on, not from `createdAt`: an older request taken on
+   * was already past the limit and was cancelled at the next sweep under its new fulfiller.
+   *
    * Bounded, because this runs on a timer and a backlog must not turn into one enormous sweep.
    */
   async findAbandonedSelfServe(olderThan: Date, limit: number): Promise<BookRequestRow[]> {
+    const selfServeSince = sql`coalesce(${bookRequests.decidedAt}, ${bookRequests.createdAt})`;
     const withAttempt = this.db
       .select({ id: bookRequestDownloads.requestId })
       .from(bookRequestDownloads)
@@ -538,11 +953,11 @@ export class BookRequestRepository {
         and(
           eq(bookRequests.selfServe, true),
           inArray(bookRequests.status, [...ABANDONABLE_SELF_SERVE_STATUSES]),
-          lt(bookRequests.createdAt, olderThan),
+          lt(selfServeSince, olderThan),
           notExists(withAttempt),
         ),
       )
-      .orderBy(asc(bookRequests.createdAt))
+      .orderBy(asc(selfServeSince))
       .limit(limit);
   }
 
@@ -608,6 +1023,8 @@ export class BookRequestRepository {
       .where(
         and(
           eq(bookRequests.status, 'approved'),
+          // A request for a retired medium is never searched, so it is never due either.
+          inArray(bookRequests.mediaKind, [...BOOK_REQUEST_MEDIA_KINDS]),
           sql`${bookRequests.targetLibraryId} is not null`,
           sql`${bookRequests.createdAt} > now() - make_interval(days => ${maxAgeDays})`,
           sql`now() - ${bookRequests.updatedAt} >= make_interval(hours => ${baseIntervalHours}) * least(
@@ -727,7 +1144,11 @@ export class BookRequestRepository {
         .select({ id: bookFiles.id })
         .from(bookFiles)
         .where(
-          and(eq(bookFiles.bookId, books.id), eq(bookFiles.role, 'content'), inArray(bookFiles.format, [...OWNED_FORMATS_BY_MEDIA_KIND[mediaKind]])),
+          and(
+            eq(bookFiles.bookId, books.id),
+            eq(bookFiles.role, 'content'),
+            inArray(bookFiles.format, [...BOOK_REQUEST_FORMATS_BY_MEDIA_KIND[mediaKind]]),
+          ),
         ),
     );
 

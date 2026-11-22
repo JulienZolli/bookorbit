@@ -34,7 +34,8 @@ function handleDelete() {
       class="block w-full min-w-0 px-3 py-2 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
       @click="handleNavigate"
     >
-      <span class="line-clamp-3 break-words text-xs leading-relaxed text-foreground">{{ props.annotation.text }}</span>
+      <span v-if="props.annotation.text" class="line-clamp-3 break-words text-xs leading-relaxed text-foreground">{{ props.annotation.text }}</span>
+      <span v-else class="block text-xs italic leading-relaxed text-muted-foreground">{{ t('annotations.textUnavailable') }}</span>
       <span
         v-if="props.annotation.note"
         class="mt-1.5 flex items-start gap-1.5 border-t border-dashed border-border pt-1.5 text-[11px] text-muted-foreground"
@@ -53,7 +54,7 @@ function handleDelete() {
       <span class="flex-1" />
       <button
         type="button"
-        class="flex size-6 items-center justify-center rounded text-muted-foreground opacity-100 transition-opacity hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:focus-visible:opacity-100 [@media(pointer:fine)]:group-hover:opacity-100"
+        class="flex size-6 items-center justify-center rounded-xs text-muted-foreground opacity-100 transition-opacity hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:focus-visible:opacity-100 [@media(pointer:fine)]:group-hover:opacity-100"
         :aria-label="t('reader.sidebar.deleteHighlight')"
         @click="handleDelete"
       >

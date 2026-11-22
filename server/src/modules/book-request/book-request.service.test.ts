@@ -1,5 +1,11 @@
 import { BadRequestException, ForbiddenException, HttpException, NotFoundException } from '@nestjs/common';
-import { FULFILLABLE_BOOK_REQUEST_STATUSES, NotificationType, Permission, withRequiredPermissions } from '@bookorbit/types';
+import {
+  BOOK_REQUEST_SELECT_ALL_LIMIT,
+  FULFILLABLE_BOOK_REQUEST_STATUSES,
+  NotificationType,
+  Permission,
+  withRequiredPermissions,
+} from '@bookorbit/types';
 
 import { BookRequestAttributionService } from './book-request-attribution.service';
 import { BookRequestNotifier } from './book-request-notifier.service';
@@ -77,6 +83,7 @@ function joined(overrides: Record<string, unknown> = {}) {
     requesterUsername: 'reader',
     requesterName: 'Reader',
     decidedByUsername: null,
+    decidedByName: null,
     targetLibraryName: null,
   };
 }
@@ -89,6 +96,7 @@ function makeService(
     downloads?: Record<string, unknown>;
     automationSettings?: Record<string, unknown>;
     libraryService?: Record<string, unknown>;
+    companions?: Record<string, unknown>;
     /** The user a delegated submission names, as `AuthService` would resolve them. */
     actingUser?: RequestUser | null;
   } = {},
@@ -119,6 +127,12 @@ function makeService(
     findLibraryNames: vi.fn().mockResolvedValue(new Map([[7, 'Audiobooks']])),
     bookDockFileExists: vi.fn().mockResolvedValue(true),
     folderBelongsToLibrary: vi.fn().mockResolvedValue(true),
+    createPair: vi.fn().mockResolvedValue([]),
+    linkCompanions: vi.fn().mockResolvedValue(true),
+    setTargetBookIfUnset: vi.fn().mockResolvedValue(true),
+    findByIds: vi.fn().mockResolvedValue([]),
+    findBookPlacement: vi.fn().mockResolvedValue(undefined),
+    findBookMediaKinds: vi.fn().mockResolvedValue(new Set()),
     ...overrides.repo,
   };
   const dedupe = {
@@ -128,10 +142,16 @@ function makeService(
     ...overrides.dedupe,
   };
   const libraryService = {
-    verifyUserAccess: vi.fn().mockResolvedValue(undefined),
+    verifyAccess: vi.fn().mockResolvedValue(undefined),
     findAccessibleLibraryIds: vi.fn().mockResolvedValue([1]),
     findUserIdsWithAccess: vi.fn().mockResolvedValue(new Set([1])),
     ...overrides.libraryService,
+  };
+  // Answers the way the real scope does: every library for a superuser, the user's grants otherwise.
+  const libraryScope = {
+    visibleIdsOrAll: vi.fn((subject: RequestUser) =>
+      subject.isSuperuser ? Promise.resolve(null) : libraryService.findAccessibleLibraryIds(subject),
+    ),
   };
   const notifications = { notify: vi.fn().mockResolvedValue(undefined) };
   const contentFilterRepo = {
@@ -168,6 +188,8 @@ function makeService(
   const auth = { findActingUser: vi.fn().mockResolvedValue(overrides.actingUser ?? null) };
   const attribution = new BookRequestAttributionService(auth as never);
 
+  const companions = { handOn: vi.fn().mockResolvedValue(false), ...overrides.companions };
+
   const service = new BookRequestService(
     repo as never,
     dedupe as never,
@@ -179,7 +201,9 @@ function makeService(
     removal as never,
     gateway as never,
     attribution,
-    undefined as never,
+    {} as never,
+    companions as never,
+    libraryScope as never,
     {
       enrich: vi.fn((request: { subtitle: string | null; isbn13: string | null }) =>
         Promise.resolve({ subtitle: request.subtitle, isbn13: request.isbn13 }),
@@ -187,7 +211,7 @@ function makeService(
     } as never,
   );
 
-  return { service, repo, dedupe, libraryService, notifications, downloads, automation, automationSettings, removal, gateway, auth };
+  return { service, repo, dedupe, libraryService, notifications, downloads, automation, automationSettings, removal, gateway, auth, companions };
 }
 
 const dto = { title: 'Dune', mediaKind: 'ebook' as const, authors: ['Frank Herbert'] };
@@ -578,7 +602,7 @@ describe('BookRequestService.submit', () => {
 
     await service.submit(dto, user());
 
-    expect(libraryService.verifyUserAccess).not.toHaveBeenCalled();
+    expect(libraryService.verifyAccess).not.toHaveBeenCalled();
     expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ targetLibraryId: 7 }), expect.any(Array));
   });
 
@@ -591,7 +615,7 @@ describe('BookRequestService.submit', () => {
 
   it('rejects a target library the requester cannot reach', async () => {
     const { service, repo, libraryService } = makeService();
-    libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
+    libraryService.verifyAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
 
     await expect(service.submit({ ...dto, targetLibraryId: 9 }, user())).rejects.toThrow(ForbiddenException);
     expect(repo.create).not.toHaveBeenCalled();
@@ -766,7 +790,7 @@ describe('BookRequestService.submit on behalf of another user', () => {
 
     await service.submit({ ...dto, userId: 42, targetLibraryId: 5 }, moderator());
 
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(42, 5, false);
+    expect(libraryService.verifyAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 42, isSuperuser: false }), 5);
   });
 
   /**
@@ -912,6 +936,14 @@ describe('BookRequestService.cancel', () => {
     expect(removal.removeLatestForRequest).toHaveBeenCalledWith(10, false, 'reader');
   });
 
+  it('passes explicit file-deletion consent to the download client', async () => {
+    const { service, removal } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'downloading' })) } });
+
+    await service.cancel(10, user(), true);
+
+    expect(removal.removeLatestForRequest).toHaveBeenCalledWith(10, true, 'reader');
+  });
+
   /** A download client that is down must not be the reason a stuck request stays stuck. */
   it('cancels anyway when the download client will not let go, and says so on the row', async () => {
     const { service, repo } = makeService({
@@ -967,6 +999,16 @@ describe('BookRequestService.cancelDownload', () => {
     expect(repo.updateIf).toHaveBeenCalledWith(10, ['grabbed', 'downloading'], { status: 'approved', statusReason: null });
     expect(repo.updateIf).not.toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ status: 'cancelled' }));
     expect(gateway.emitChanged).toHaveBeenCalled();
+  });
+
+  it('passes explicit file-deletion consent when cancelling one transfer', async () => {
+    const { service, removal } = makeService({
+      repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'downloading' })) },
+    });
+
+    await service.cancelDownload(10, 11, user(), true);
+
+    expect(removal.removeAttempt).toHaveBeenCalledWith(10, 11, true, 'reader');
   });
 
   it('refuses someone who cannot drive the request', async () => {
@@ -1132,6 +1174,14 @@ describe('BookRequestService.remove', () => {
     expect(repo.remove).toHaveBeenCalled();
   });
 
+  it('passes explicit file-deletion consent before deleting the request', async () => {
+    const { service, removal } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'available' })) } });
+
+    await service.remove(10, approver, true);
+
+    expect(removal.removeLatestForRequest).toHaveBeenCalledWith(10, true, 'reader');
+  });
+
   it('keeps the row when the torrent could not be removed, rather than orphaning it', async () => {
     const { service, repo } = makeService({
       repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'available' })) },
@@ -1214,7 +1264,7 @@ describe('BookRequestService.approve', () => {
 
   it('refuses a reroute to a library the approver cannot reach', async () => {
     const { service, repo, libraryService } = makeService();
-    libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
+    libraryService.verifyAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
     await expect(service.approve(10, { targetLibraryId: 5 }, approver)).rejects.toThrow(ForbiddenException);
     expect(repo.updateIf).not.toHaveBeenCalled();
   });
@@ -1261,15 +1311,38 @@ describe('BookRequestService.approve', () => {
     expect(repo.updateIf).toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ targetLibraryId: 5 }));
   });
 
-  it('refuses a folder that does not belong to the library the approver rerouted to', async () => {
+  /**
+   * The stored folder belongs to the stored library. Rerouting with no folder named used to carry
+   * it along and be refused as not part of the new library, with nothing the approver could send
+   * to clear it.
+   */
+  it('leaves the old library folder behind when the approver reroutes without naming one', async () => {
     const { service, repo } = makeService({
       repo: {
         findById: vi.fn().mockResolvedValue(joined({ targetLibraryId: 3, targetFolderId: 8 })),
         folderBelongsToLibrary: vi.fn().mockResolvedValue(false),
       },
     });
-    await expect(service.approve(10, { targetLibraryId: 5 }, approver)).rejects.toThrow(BadRequestException);
+    await service.approve(10, { targetLibraryId: 5 }, approver);
+    expect(repo.folderBelongsToLibrary).not.toHaveBeenCalled();
+    expect(repo.updateIf).toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ targetLibraryId: 5, targetFolderId: null }));
+  });
+
+  it('still refuses a named folder that does not belong to the library the approver rerouted to', async () => {
+    const { service, repo } = makeService({
+      repo: {
+        findById: vi.fn().mockResolvedValue(joined({ targetLibraryId: 3, targetFolderId: 8 })),
+        folderBelongsToLibrary: vi.fn().mockResolvedValue(false),
+      },
+    });
+    await expect(service.approve(10, { targetLibraryId: 5, targetFolderId: 8 }, approver)).rejects.toThrow(BadRequestException);
     expect(repo.updateIf).not.toHaveBeenCalled();
+  });
+
+  it('keeps the stored folder when the approver names the same library', async () => {
+    const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ targetLibraryId: 3, targetFolderId: 8 })) } });
+    await service.approve(10, { targetLibraryId: 3 }, approver);
+    expect(repo.updateIf).toHaveBeenCalledWith(10, expect.anything(), expect.objectContaining({ targetLibraryId: 3, targetFolderId: 8 }));
   });
 
   it('keeps a folder that does belong to the destination library', async () => {
@@ -1345,7 +1418,7 @@ describe('BookRequestService.submit refusal codes', () => {
 
   it('codes a destination library the caller cannot reach', async () => {
     const { service, libraryService } = makeService();
-    libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
+    libraryService.verifyAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
 
     const body = await refusal(service.submit({ ...dto, targetLibraryId: 9 }, user()));
     expect(body.errorCode).toBe('SUBMIT_LIBRARY_FORBIDDEN');
@@ -1681,6 +1754,23 @@ describe('BookRequestService.getOne', () => {
     const { service } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ userId: 2 })) } });
     await expect(service.getOne(10, user())).rejects.toThrow(ForbiddenException);
   });
+
+  /** The username stays for clients that read it; the display name is beside it, not instead of it. */
+  it('names the decider by username and by display name', async () => {
+    const decided = { ...joined({ status: 'approved', decidedByUserId: 4 }), decidedByUsername: 'mod', decidedByName: 'Sam Whitfield' };
+    const { service } = makeService({ repo: { findById: vi.fn().mockResolvedValue(decided) } });
+
+    await expect(service.getOne(10, user())).resolves.toMatchObject({
+      decidedByUserId: 4,
+      decidedByUsername: 'mod',
+      decidedByName: 'Sam Whitfield',
+    });
+  });
+
+  it('names no decider on an undecided request', async () => {
+    const { service } = makeService();
+    await expect(service.getOne(10, user())).resolves.toMatchObject({ decidedByUsername: null, decidedByName: null });
+  });
 });
 
 /**
@@ -2002,6 +2092,7 @@ describe('BookRequestService.getDefaultDestinations', () => {
     await expect(service.getDefaultDestinations()).resolves.toEqual({
       ebook: { libraryId: null, libraryName: null, folderId: null },
       audiobook: { libraryId: 7, libraryName: 'Audiobooks', folderId: 21 },
+      // Retired, but released iOS builds decode it as a required field, so it is always answered empty.
       comic: { libraryId: null, libraryName: null, folderId: null },
     });
   });
@@ -2024,7 +2115,7 @@ describe('BookRequestService.getDefaultDestinations', () => {
     await service.getDefaultDestinations();
 
     expect(repo.findLibraryNames).toHaveBeenCalledTimes(1);
-    expect(repo.findLibraryNames).toHaveBeenCalledWith([7, 7, 7]);
+    expect(repo.findLibraryNames).toHaveBeenCalledWith([7, 7]);
   });
 
   /**
@@ -2098,5 +2189,665 @@ describe('BookRequestService.assertCanFulfil', () => {
     repo.findById.mockResolvedValue(undefined);
 
     await expect(service.assertCanFulfil(10, owner())).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('BookRequestService with a request for the retired comic medium', () => {
+  /** It still loads and can be closed, but nothing may send it looking for a release. */
+  it('refuses to approve it, leaving the request untouched', async () => {
+    const { service, repo, automation } = makeService();
+    repo.findById.mockResolvedValue(joined({ mediaKind: 'comic', targetLibraryId: 3 }));
+
+    await expect(service.approve(10, {}, moderator())).rejects.toThrow('Comic requests are no longer supported');
+    expect(repo.updateIf).not.toHaveBeenCalled();
+    expect(automation.considerRequest).not.toHaveBeenCalled();
+  });
+
+  it('still lets it be rejected', async () => {
+    const { service, repo } = makeService();
+    repo.findById.mockResolvedValue(joined({ mediaKind: 'comic' }));
+
+    await service.reject(10, {}, moderator());
+
+    expect(repo.updateIf).toHaveBeenCalledWith(10, ['pending'], expect.objectContaining({ status: 'rejected' }));
+  });
+});
+
+describe('BookRequestService.submitPair', () => {
+  const pairDto = {
+    title: 'Dune',
+    authors: ['Frank Herbert'],
+    ebook: { targetLibraryId: 3 },
+    audiobook: { targetLibraryId: 3, coverUrl: 'https://covers.example/dune-square.jpg', preferredFormats: ['m4b'] },
+  };
+
+  /** The repository answers a pair insert the way the real one does: both rows, already linked. */
+  function pairRows(overrides: { ebook?: Record<string, unknown>; audiobook?: Record<string, unknown> } = {}) {
+    const ebook = row({ id: 10, mediaKind: 'ebook', companionRequestId: 11, ...overrides.ebook });
+    const audiobook = row({ id: 11, mediaKind: 'audiobook', companionRequestId: 10, ...overrides.audiobook });
+    return { ebook, audiobook };
+  }
+
+  function findByIdFor(rows: Array<ReturnType<typeof row>>) {
+    return vi.fn().mockImplementation((id: number) => {
+      const found = rows.find((candidate) => candidate.id === id);
+      return Promise.resolve(found ? { ...joined(), request: found } : undefined);
+    });
+  }
+
+  it('creates both halves in one insert, each carrying its own medium, destination and formats', async () => {
+    const { ebook, audiobook } = pairRows();
+    const { service, repo } = makeService({
+      repo: { createPair: vi.fn().mockResolvedValue([ebook, audiobook]), findById: findByIdFor([ebook, audiobook]) },
+    });
+
+    const result = await service.submitPair(pairDto, user());
+
+    expect(repo.createPair).toHaveBeenCalledTimes(1);
+    const [entries, cap] = repo.createPair.mock.calls[0] as [Array<{ data: Record<string, unknown>; aliasKeys: string[] }>, unknown];
+    expect(entries.map((entry) => entry.data.mediaKind)).toEqual(['ebook', 'audiobook']);
+    expect(entries[0]!.data).toMatchObject({
+      status: 'pending',
+      targetLibraryId: 3,
+      dedupeKey: 'work:dune:frankherbert:ebook',
+      preferredFormats: [],
+    });
+    expect(entries[1]!.data).toMatchObject({
+      status: 'pending',
+      dedupeKey: 'work:dune:frankherbert:audiobook',
+      coverUrl: 'https://covers.example/dune-square.jpg',
+      preferredFormats: ['m4b'],
+    });
+    expect(cap).toBeNull();
+    expect(repo.createPair).toHaveBeenCalledWith(expect.any(Array), null);
+    expect(result.ebook.request.companionRequestId).toBe(11);
+    expect(result.audiobook.request.companionRequestId).toBe(10);
+    expect(result.ebook.subscribed).toBe(false);
+  });
+
+  it('tells the approvers once, naming both media, rather than once per half', async () => {
+    const { ebook, audiobook } = pairRows();
+    const { service, notifications } = makeService({
+      repo: { createPair: vi.fn().mockResolvedValue([ebook, audiobook]), findById: findByIdFor([ebook, audiobook]) },
+    });
+
+    await service.submitPair(pairDto, user());
+
+    const submitted = notifications.notify.mock.calls.filter(([payload]) => payload.type === NotificationType.BookRequestSubmitted);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]![0]).toMatchObject({ message: 'Reader requested "Dune" as an ebook and an audiobook', meta: { requestId: 10 } });
+  });
+
+  it('joins a half somebody already asked for, creates the other, and links the two', async () => {
+    const existingEbook = row({ id: 7, userId: 2, mediaKind: 'ebook' });
+    const created = row({ id: 11, mediaKind: 'audiobook' });
+    const findActiveRequestFor = vi
+      .fn()
+      .mockImplementation((work: { mediaKind: string }) => Promise.resolve(work.mediaKind === 'ebook' ? existingEbook : undefined));
+    const { service, repo } = makeService({
+      dedupe: { findActiveRequestFor },
+      repo: {
+        createPair: vi.fn().mockResolvedValue([created]),
+        linkCompanions: vi.fn().mockResolvedValue(true),
+        findById: findByIdFor([existingEbook, created]),
+      },
+    });
+
+    const result = await service.submitPair(pairDto, user());
+
+    expect(repo.createPair).toHaveBeenCalledWith([expect.objectContaining({ data: expect.objectContaining({ mediaKind: 'audiobook' }) })], null);
+    expect(repo.addSubscriber).toHaveBeenCalledWith(7, 1);
+    expect(repo.linkCompanions).toHaveBeenCalledWith(7, 11);
+    expect(result.ebook.subscribed).toBe(true);
+    expect(result.audiobook.subscribed).toBe(false);
+  });
+
+  it('refuses the whole pair before writing either half when one half is refused', async () => {
+    const verifyAccess = vi
+      .fn()
+      .mockImplementation((_userId: number, libraryId: number) =>
+        libraryId === 9 ? Promise.reject(new ForbiddenException('No access to that library')) : Promise.resolve(undefined),
+      );
+    const { service, repo } = makeService({ libraryService: { verifyAccess }, repo: { createPair: vi.fn() } });
+
+    await expect(service.submitPair({ ...pairDto, audiobook: { targetLibraryId: 9 } }, user())).rejects.toMatchObject({
+      response: expect.objectContaining({ errorCode: 'SUBMIT_LIBRARY_FORBIDDEN' }),
+    });
+    expect(repo.createPair).not.toHaveBeenCalled();
+    expect(repo.addSubscriber).not.toHaveBeenCalled();
+  });
+
+  it('counts both new self-serve halves against the cap in one go, and refuses when they would overrun it', async () => {
+    const { service, repo } = makeService({ repo: { createPair: vi.fn().mockResolvedValue(null) } });
+
+    await expect(
+      service.submitPair({ ...pairDto, selfServe: true }, user({ permissions: [Permission.BookRequestAccess, Permission.BookRequestSelfFulfill] })),
+    ).rejects.toMatchObject({ response: expect.objectContaining({ errorCode: 'SUBMIT_SELF_SERVE_LIMIT' }) });
+    expect(repo.createPair).toHaveBeenCalledWith(expect.any(Array), { userId: 1, maxLive: 10, newRows: 2 });
+  });
+
+  it('points the half still to come at the book the other half is already on the shelf as', async () => {
+    const findOwnedBookFor = vi.fn().mockImplementation((work: { mediaKind: string }) => Promise.resolve(work.mediaKind === 'ebook' ? 42 : null));
+    const { ebook, audiobook } = pairRows({ ebook: { status: 'available', matchedBookId: 42 } });
+    const { service, repo } = makeService({
+      dedupe: { findOwnedBookFor },
+      repo: {
+        createPair: vi.fn().mockResolvedValue([ebook, audiobook]),
+        findById: findByIdFor([ebook, audiobook]),
+        findBookPlacement: vi.fn().mockResolvedValue({
+          bookId: 42,
+          libraryId: 3,
+          libraryFolderId: 4,
+          folderPath: '/lib/Dune',
+          status: 'present',
+          organizationMode: 'book_per_folder',
+        }),
+      },
+    });
+
+    await service.submitPair(
+      pairDto,
+      user({ contentFilters: { includeTagIds: [], excludeTagIds: [], includeGenreIds: [], excludeGenreIds: [], exemptRequestsFromUserId: 1 } }),
+    );
+
+    const [entries] = repo.createPair.mock.calls[0] as [Array<{ data: Record<string, unknown> }>];
+    expect(entries[0]!.data).toMatchObject({ status: 'available', matchedBookId: 42, targetBookId: null });
+    expect(entries[1]!.data).toMatchObject({ status: 'pending', targetBookId: 42 });
+  });
+
+  it('leaves the half still to come alone when it is headed for a different library than the shelved half', async () => {
+    const findOwnedBookFor = vi.fn().mockImplementation((work: { mediaKind: string }) => Promise.resolve(work.mediaKind === 'ebook' ? 42 : null));
+    const { ebook, audiobook } = pairRows({ ebook: { status: 'available', matchedBookId: 42 } });
+    const { service, repo } = makeService({
+      dedupe: { findOwnedBookFor },
+      repo: {
+        createPair: vi.fn().mockResolvedValue([ebook, audiobook]),
+        findById: findByIdFor([ebook, audiobook]),
+        findBookPlacement: vi.fn().mockResolvedValue({
+          bookId: 42,
+          libraryId: 5,
+          libraryFolderId: 6,
+          folderPath: '/other/Dune',
+          status: 'present',
+          organizationMode: 'book_per_folder',
+        }),
+      },
+    });
+
+    await service.submitPair(
+      pairDto,
+      user({ contentFilters: { includeTagIds: [], excludeTagIds: [], includeGenreIds: [], excludeGenreIds: [], exemptRequestsFromUserId: 1 } }),
+    );
+
+    const [entries] = repo.createPair.mock.calls[0] as [Array<{ data: Record<string, unknown> }>];
+    expect(entries[1]!.data).toMatchObject({ targetBookId: null });
+  });
+
+  it('plans again after losing an insert race, and joins whichever half the winner claimed', async () => {
+    const violation = Object.assign(new Error('duplicate key'), { code: '23505' });
+    const winner = row({ id: 7, userId: 2, mediaKind: 'audiobook' });
+    const created = row({ id: 10, mediaKind: 'ebook' });
+    const findActiveRequestFor = vi
+      .fn()
+      // First plan: nothing claimed either half.
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      // Second plan: somebody claimed the audiobook in between.
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(winner);
+    const createPair = vi.fn().mockRejectedValueOnce(violation).mockResolvedValueOnce([created]);
+    const { service, repo } = makeService({
+      dedupe: { findActiveRequestFor },
+      repo: { createPair, linkCompanions: vi.fn().mockResolvedValue(true), findById: findByIdFor([winner, created]) },
+    });
+
+    const result = await service.submitPair(pairDto, user());
+
+    expect(createPair).toHaveBeenCalledTimes(2);
+    expect(repo.linkCompanions).toHaveBeenCalledWith(10, 7);
+    expect(result.audiobook.subscribed).toBe(true);
+  });
+});
+
+describe('BookRequestService.submit for a book that is missing a format', () => {
+  const folderBook = {
+    bookId: 42,
+    libraryId: 3,
+    libraryFolderId: 4,
+    folderPath: '/lib/Dune',
+    status: 'present',
+    organizationMode: 'book_per_folder',
+  };
+
+  it("pins the request to the book, landing it in the book's own library and folder", async () => {
+    const { service, repo } = makeService({
+      repo: { findBookPlacement: vi.fn().mockResolvedValue(folderBook), findBookMediaKinds: vi.fn().mockResolvedValue(new Set(['ebook'])) },
+    });
+
+    await service.submit({ ...dto, mediaKind: 'audiobook', targetBookId: 42, targetLibraryId: 8 }, user({ isSuperuser: true }));
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ targetBookId: 42, targetLibraryId: 3, targetFolderId: 4 }), expect.any(Array));
+  });
+
+  it('files into a loose-file library the ordinary way, since a single file cannot hold a second format', async () => {
+    const { service, repo } = makeService({
+      repo: {
+        findBookPlacement: vi.fn().mockResolvedValue({ ...folderBook, organizationMode: 'book_per_file' }),
+        findBookMediaKinds: vi.fn().mockResolvedValue(new Set(['ebook'])),
+      },
+    });
+
+    await service.submit({ ...dto, mediaKind: 'audiobook', targetBookId: 42, targetLibraryId: 8 }, user({ isSuperuser: true }));
+
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ targetBookId: null, targetLibraryId: 8 }), expect.any(Array));
+  });
+
+  it('refuses a book in a library the requester cannot reach as if it did not exist', async () => {
+    const { service, repo } = makeService({
+      repo: { findBookPlacement: vi.fn().mockResolvedValue({ ...folderBook, libraryId: 99 }), findBookMediaKinds: vi.fn() },
+    });
+
+    await expect(service.submit({ ...dto, mediaKind: 'audiobook', targetBookId: 42 }, user())).rejects.toMatchObject({
+      response: expect.objectContaining({ errorCode: 'SUBMIT_TARGET_BOOK_NOT_FOUND' }),
+    });
+    expect(repo.findBookMediaKinds).not.toHaveBeenCalled();
+    expect(repo.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a format the book already has', async () => {
+    const { service, repo } = makeService({
+      repo: { findBookPlacement: vi.fn().mockResolvedValue(folderBook), findBookMediaKinds: vi.fn().mockResolvedValue(new Set(['ebook'])) },
+    });
+
+    await expect(service.submit({ ...dto, targetBookId: 42 }, user({ isSuperuser: true }))).rejects.toMatchObject({
+      response: expect.objectContaining({ errorCode: 'SUBMIT_TARGET_BOOK_HAS_MEDIUM', errorMeta: { mediaKind: 'ebook' } }),
+    });
+    expect(repo.create).not.toHaveBeenCalled();
+  });
+
+  it('points a request it joins at the book, when that request lands in the same library', async () => {
+    const existing = row({ id: 7, userId: 2, mediaKind: 'audiobook', targetLibraryId: 3 });
+    const { service, repo } = makeService({
+      dedupe: { findActiveRequestFor: vi.fn().mockResolvedValue(existing) },
+      repo: {
+        findBookPlacement: vi.fn().mockResolvedValue(folderBook),
+        findBookMediaKinds: vi.fn().mockResolvedValue(new Set(['ebook'])),
+        setTargetBookIfUnset: vi.fn().mockResolvedValue(true),
+        findById: vi.fn().mockResolvedValue(joined({ id: 7, userId: 2, mediaKind: 'audiobook' })),
+      },
+    });
+
+    const result = await service.submit({ ...dto, mediaKind: 'audiobook', targetBookId: 42 }, user({ isSuperuser: true }));
+
+    expect(result.subscribed).toBe(true);
+    expect(repo.setTargetBookIfUnset).toHaveBeenCalledWith(7, 42);
+  });
+});
+
+describe('BookRequestService grouped lists', () => {
+  it("attaches each pair's folded-away half to the half that leads it, read in one batch", async () => {
+    const lead = { ...joined({ id: 10, mediaKind: 'ebook', companionRequestId: 11 }), visibleCompanionId: 11 };
+    const single = { ...joined({ id: 12 }), visibleCompanionId: null };
+    const { service, repo } = makeService({
+      repo: {
+        findAll: vi.fn().mockResolvedValue({ items: [lead, single], total: 2 }),
+        findByIds: vi.fn().mockResolvedValue([joined({ id: 11, mediaKind: 'audiobook', companionRequestId: 10 })]),
+      },
+    });
+
+    const page = await service.listMine({ groupPairs: true }, user());
+
+    expect(repo.findAll).toHaveBeenCalledWith(expect.objectContaining({ groupPairs: true }));
+    expect(repo.findByIds).toHaveBeenCalledTimes(1);
+    expect(repo.findByIds).toHaveBeenCalledWith([11]);
+    expect(page.items[0]!.companion?.id).toBe(11);
+    expect(page.items[1]!.companion).toBeNull();
+  });
+
+  it('leaves the shape alone for a caller that did not ask to group', async () => {
+    const { service, repo } = makeService({
+      repo: { findAll: vi.fn().mockResolvedValue({ items: [{ ...joined({ id: 10 }), visibleCompanionId: null }], total: 1 }), findByIds: vi.fn() },
+    });
+
+    const page = await service.listMine({}, user());
+
+    expect(repo.findByIds).not.toHaveBeenCalled();
+    expect(page.items[0]).not.toHaveProperty('companion');
+  });
+});
+
+describe('BookRequestService.markFulfilled for one half of a pair', () => {
+  it('hands the book on to the companion so the other half lands beside it', async () => {
+    const { service, companions } = makeService({ companions: { handOn: vi.fn().mockResolvedValue(false) } });
+
+    await service.markFulfilled(10, { matchedBookId: 42 }, moderator());
+
+    expect(companions.handOn).toHaveBeenCalledWith(expect.objectContaining({ id: 10 }), 42);
+  });
+});
+
+describe('BookRequestService list views', () => {
+  const approver = () => user({ permissions: [Permission.BookRequestAccess, Permission.ManageBookRequests] });
+
+  it('leaves the list exactly as it was when no view is asked for', async () => {
+    const { service, repo } = makeService();
+
+    await service.listMine({}, user());
+    await service.listMine({ includeDismissed: true }, user());
+
+    expect(repo.findAll).toHaveBeenNthCalledWith(1, expect.objectContaining({ userId: 1, excludeDismissedFor: 1 }));
+    expect(repo.findAll).toHaveBeenNthCalledWith(2, expect.objectContaining({ excludeDismissedFor: undefined }));
+    for (const [options] of repo.findAll.mock.calls) {
+      expect(options).not.toHaveProperty('statuses');
+      expect(options).not.toHaveProperty('onlyDismissedFor');
+    }
+  });
+
+  it("narrows to the view's statuses without the caller's hidden rows, whatever includeDismissed says", async () => {
+    const { service, repo } = makeService();
+
+    await service.listAll({ view: 'closed', includeDismissed: true, q: 'dune', status: 'rejected' }, approver());
+
+    expect(repo.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({ statuses: ['rejected', 'cancelled'], status: 'rejected', search: 'dune', excludeDismissedFor: 1 }),
+    );
+  });
+
+  it('keeps only the hidden rows for the hidden view', async () => {
+    const { service, repo } = makeService();
+
+    await service.listMine({ view: 'hidden' }, user());
+
+    const [options] = repo.findAll.mock.calls[0] as [Record<string, unknown>];
+    expect(options).toMatchObject({ userId: 1, onlyDismissedFor: 1 });
+    expect(options.excludeDismissedFor).toBeUndefined();
+    expect(options).not.toHaveProperty('statuses');
+  });
+});
+
+describe('BookRequestService view counts', () => {
+  const approver = () => user({ permissions: [Permission.BookRequestAccess, Permission.ManageBookRequests] });
+
+  /** Every figure goes through the list's own where clause, one count per view, all at once. */
+  it('counts every view under the same filters, with hidden rows only in the hidden view', async () => {
+    const countRows = vi.fn((options: Record<string, unknown>) => {
+      if (options.failureCode === 'AUTOMATION_DISABLED') return Promise.resolve(1);
+      if (options.onlyDismissedFor !== undefined) return Promise.resolve(4);
+      const statuses = options.statuses as string[] | undefined;
+      return Promise.resolve(statuses ? statuses.length : 20);
+    });
+    const { service } = makeService({ repo: { countRows } });
+
+    const counts = await service.getMineViewCounts({ q: 'dune', mediaKind: 'ebook', view: 'closed', includeDismissed: true }, user());
+
+    expect(counts).toEqual({ active: 20, needs_action: 4, in_progress: 4, finished: 1, closed: 2, hidden: 4, awaitingManualPick: 1 });
+    expect(countRows).toHaveBeenCalledTimes(7);
+    for (const [options] of countRows.mock.calls) {
+      expect(options).toMatchObject({ userId: 1, search: 'dune', mediaKind: 'ebook' });
+      if (options.onlyDismissedFor === undefined) expect(options.excludeDismissedFor).toBe(1);
+    }
+    expect(countRows).toHaveBeenCalledWith(
+      expect.objectContaining({ statuses: ['approved'], failureCode: 'AUTOMATION_DISABLED', excludeDismissedFor: 1 }),
+    );
+  });
+
+  it('counts the approver queue without scoping it to the caller', async () => {
+    const countRows = vi.fn().mockResolvedValue(0);
+    const { service } = makeService({ repo: { countRows } });
+
+    await service.getAllViewCounts({ requesterUserId: 42 }, approver());
+
+    for (const [options] of countRows.mock.calls) {
+      expect(options).toMatchObject({ requesterUserId: 42 });
+      expect(options).not.toHaveProperty('userId');
+    }
+  });
+
+  it('refuses the approver counts to somebody who cannot moderate', async () => {
+    const countRows = vi.fn();
+    const { service } = makeService({ repo: { countRows } });
+
+    await expect(service.getAllViewCounts({}, user())).rejects.toThrow(ForbiddenException);
+    expect(countRows).not.toHaveBeenCalled();
+  });
+});
+
+describe('BookRequestService selection', () => {
+  const approver = () => user({ permissions: [Permission.BookRequestAccess, Permission.ManageBookRequests] });
+
+  function selected(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 10,
+      title: 'Dune',
+      mediaKind: 'ebook',
+      status: 'pending',
+      userId: 1,
+      fulfillerUserId: null,
+      dismissed: false,
+      subscribed: false,
+      ...overrides,
+    };
+  }
+
+  it('reports both halves of a pair under the row that leads it, in list order', async () => {
+    const findSelection = vi.fn().mockResolvedValue({
+      rows: [
+        { lead: selected({ id: 10 }), companion: selected({ id: 11, mediaKind: 'audiobook', status: 'rejected' }) },
+        { lead: selected({ id: 12, title: 'Emma', userId: 5, subscribed: true, dismissed: true }), companion: null },
+      ],
+      totalRows: 2,
+    });
+    const { service } = makeService({ repo: { findSelection } });
+
+    const selection = await service.selectMine({ view: 'needs_action', q: 'a', sortBy: 'title', sortDir: 'asc', page: 3, limit: 5 }, user());
+
+    expect(findSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 1,
+        statuses: ['pending', 'approved', 'needs_review', 'failed'],
+        search: 'a',
+        sortBy: 'title',
+        sortDir: 'asc',
+      }),
+      1,
+      BOOK_REQUEST_SELECT_ALL_LIMIT,
+    );
+    expect(selection.items.map((item) => [item.id, item.rowId])).toEqual([
+      [10, 10],
+      [11, 10],
+      [12, 12],
+    ]);
+    expect(selection.items[2]).toMatchObject({ title: 'Emma', userId: 5, subscribed: true, dismissed: true });
+    expect(selection).toMatchObject({ totalRows: 2, truncated: false });
+  });
+
+  /** A requester can sit in their own request's subscribers, and that is not following it. */
+  it('never reports the caller as following their own request', async () => {
+    const findSelection = vi.fn().mockResolvedValue({ rows: [{ lead: selected({ userId: 1, subscribed: true }), companion: null }], totalRows: 1 });
+    const { service } = makeService({ repo: { findSelection } });
+
+    const selection = await service.selectMine({}, user());
+
+    expect(selection.items[0]!.subscribed).toBe(false);
+  });
+
+  it('says when more rows matched than a selection may hold', async () => {
+    const findSelection = vi.fn().mockResolvedValue({ rows: [], totalRows: BOOK_REQUEST_SELECT_ALL_LIMIT + 1 });
+    const { service } = makeService({ repo: { findSelection } });
+
+    await expect(service.selectAll({}, approver())).resolves.toMatchObject({ truncated: true, totalRows: BOOK_REQUEST_SELECT_ALL_LIMIT + 1 });
+  });
+
+  it('refuses the approver selection to somebody who cannot moderate', async () => {
+    const findSelection = vi.fn();
+    const { service } = makeService({ repo: { findSelection } });
+
+    await expect(service.selectAll({}, user())).rejects.toThrow(ForbiddenException);
+    expect(findSelection).not.toHaveBeenCalled();
+  });
+});
+
+/** The latest attempt of a request, as `findLatestForRequests` hands it back. */
+function latestDownload(requestId: number, adapterType: string | null, clientKey: string | null = 'abc') {
+  return { download: { id: requestId * 10, requestId, clientKey }, downloadClientAdapterType: adapterType };
+}
+
+describe('BookRequestService.cancelMany', () => {
+  it('cancels every id and reports each one as updated, with no removed list', async () => {
+    const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'pending' })) } });
+
+    const result = await service.cancelMany({ ids: [10, 11, 10] }, user());
+
+    expect(result.updated).toHaveLength(2);
+    expect(result.failed).toEqual([]);
+    expect(result).not.toHaveProperty('removed');
+    expect(repo.updateIf).toHaveBeenCalledTimes(2);
+  });
+
+  it('names the rows it could not cancel instead of failing the whole batch', async () => {
+    const { service } = makeService({
+      repo: {
+        findById: vi
+          .fn()
+          .mockImplementation((id: number) =>
+            Promise.resolve(id === 11 ? joined({ id: 11, status: 'available', title: 'Watchers' }) : joined({ id, status: 'pending' })),
+          ),
+      },
+    });
+
+    const result = await service.cancelMany({ ids: [10, 11] }, user());
+
+    expect(result.updated.map((item) => item.id)).toEqual([10]);
+    expect(result.failed).toEqual([
+      {
+        id: 11,
+        title: 'Watchers',
+        reason: 'A request that is available can no longer be cancelled',
+        errorCode: 'BOOK_REQUEST_NOT_CANCELLABLE',
+        errorMeta: { status: 'available' },
+      },
+    ]);
+  });
+
+  /** The same files a single cancel from the page would take, read for the whole batch at once. */
+  it('deletes files only where the latest attempt sits with a client that always deletes them', async () => {
+    const findLatestForRequests = vi.fn().mockResolvedValue(
+      new Map([
+        [10, latestDownload(10, 'torbox')],
+        [11, latestDownload(11, 'qbittorrent')],
+        [12, latestDownload(12, 'torbox', null)],
+      ]),
+    );
+    const { service, removal } = makeService({
+      repo: { findById: vi.fn().mockImplementation((id: number) => Promise.resolve(joined({ id, status: 'downloading' }))) },
+      downloads: { findLatestForRequests },
+    });
+
+    await service.cancelMany({ ids: [10, 11, 12, 13] }, user());
+
+    // One read for the whole batch; the later ones are each cancelled row being mapped back.
+    expect(findLatestForRequests).toHaveBeenNthCalledWith(1, [10, 11, 12, 13]);
+    expect(removal.removeLatestForRequest.mock.calls.map(([id, deleteFiles]) => [id, deleteFiles])).toEqual([
+      [10, true],
+      [11, false],
+      [12, false],
+      [13, false],
+    ]);
+  });
+});
+
+describe('BookRequestService.restoreMany', () => {
+  it('restores every visible id and names the ones the caller cannot see', async () => {
+    const { service, repo } = makeService({
+      repo: {
+        findById: vi.fn().mockImplementation((id: number) => Promise.resolve(joined({ id, userId: id === 11 ? 9 : 1, status: 'cancelled' }))),
+      },
+    });
+
+    const result = await service.restoreMany({ ids: [10, 11] }, user());
+
+    expect(result.updated.map((item) => item.id)).toEqual([10]);
+    expect(result.failed.map((failure) => failure.id)).toEqual([11]);
+    expect(result).not.toHaveProperty('removed');
+    expect(repo.restore).toHaveBeenCalledExactlyOnceWith(10, 1);
+  });
+});
+
+describe('BookRequestService.leaveMany', () => {
+  it('reports every request left as removed and none as updated, refusing the caller their own', async () => {
+    const removeSubscriber = vi.fn().mockResolvedValue(true);
+    const { service } = makeService({
+      repo: {
+        findById: vi.fn().mockImplementation((id: number) => Promise.resolve(joined({ id, userId: id === 12 ? 1 : 9 }))),
+        isSubscriber: vi.fn().mockResolvedValue(true),
+        removeSubscriber,
+      },
+    });
+
+    const result = await service.leaveMany({ ids: [10, 11, 12] }, user());
+
+    expect(result.updated).toEqual([]);
+    expect(result.removed).toEqual([10, 11]);
+    expect(result.failed.map((failure) => [failure.id, failure.reason])).toEqual([
+      [12, 'This is your own request, so cancel or hide it rather than leaving it'],
+    ]);
+    expect(removeSubscriber).toHaveBeenCalledTimes(2);
+  });
+
+  it('still reports an empty removed list when nothing could be left', async () => {
+    const { service } = makeService({ repo: { findById: vi.fn().mockResolvedValue(undefined) } });
+
+    const result = await service.leaveMany({ ids: [10] }, user());
+
+    expect(result).toMatchObject({ updated: [], removed: [] });
+    expect(result.failed.map((failure) => failure.id)).toEqual([10]);
+  });
+});
+
+describe('BookRequestService.removeMany', () => {
+  const approver = () => user({ id: 2, permissions: [Permission.BookRequestAccess, Permission.ManageBookRequests] });
+
+  it('deletes the settled rows, reports them as removed, and names the ones still being worked on', async () => {
+    const { service, repo } = makeService({
+      repo: {
+        findById: vi
+          .fn()
+          .mockImplementation((id: number) =>
+            Promise.resolve(id === 11 ? joined({ id: 11, status: 'downloading', title: 'Whistler' }) : joined({ id, status: 'available' })),
+          ),
+      },
+    });
+
+    const result = await service.removeMany({ ids: [10, 11, 12] }, approver());
+
+    expect(result.updated).toEqual([]);
+    expect(result.removed).toEqual([10, 12]);
+    expect(result.failed.map((failure) => [failure.id, failure.title])).toEqual([[11, 'Whistler']]);
+    expect(repo.remove).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies the same file rule as a single delete from the page', async () => {
+    const findLatestForRequests = vi.fn().mockResolvedValue(new Map([[10, latestDownload(10, 'torbox')]]));
+    const { service, removal } = makeService({
+      repo: { findById: vi.fn().mockImplementation((id: number) => Promise.resolve(joined({ id, status: 'available' }))) },
+      downloads: { findLatestForRequests },
+    });
+
+    await service.removeMany({ ids: [10, 11] }, approver());
+
+    expect(removal.removeLatestForRequest.mock.calls.map(([id, deleteFiles]) => [id, deleteFiles])).toEqual([
+      [10, true],
+      [11, false],
+    ]);
+  });
+
+  it('refuses every row to somebody who cannot moderate', async () => {
+    const { service, repo } = makeService({ repo: { findById: vi.fn().mockResolvedValue(joined({ status: 'available' })) } });
+
+    const result = await service.removeMany({ ids: [10] }, user());
+
+    expect(result.removed).toEqual([]);
+    expect(result.failed.map((failure) => failure.reason)).toEqual(['You cannot delete book requests']);
+    expect(repo.remove).not.toHaveBeenCalled();
   });
 });

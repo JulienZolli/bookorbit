@@ -1,19 +1,21 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
 import type { BooksPage, SeriesBooksPage, SeriesDetail, SeriesNextBookResponse, SeriesPage, SeriesSummary } from '@bookorbit/types';
-import { READER_OPENABLE_FORMATS, SERIES_GAP_PREVIEW_LIMIT, getOpenableFormatsForGroup } from '@bookorbit/types';
+import { READER_OPENABLE_FORMATS, SERIES_GAP_PREVIEW_LIMIT, getOpenableFormatsForGroup, isOptInReaderFormat } from '@bookorbit/types';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
+import { withoutHiddenLibraries } from '../../common/library-visibility/library-visibility';
 import type { RequestUser } from '../../common/types/request-user';
 import { normalizeSeriesTotalBooks } from '../../common/utils/series-total-books.utils';
 import { assembleBookCards } from '../book/utils/assemble-book-cards';
 import { BookReadService } from '../book/book-read.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { LibraryService } from '../library/library.service';
 import { FindNextSeriesBookDto } from './dto/find-next-series-book.dto';
 import { ListSeriesBooksDto } from './dto/list-series-books.dto';
 import { ListSeriesDto } from './dto/list-series.dto';
 import { SeriesRepository } from './series.repository';
 import { computeSeriesGaps } from './utils/series-gaps.utils';
-import { buildVolumeLadder } from './utils/series-ladder.utils';
+import { buildVolumeLadder, countSeriesVolumes } from './utils/series-ladder.utils';
 
 @Injectable()
 export class SeriesService {
@@ -23,6 +25,7 @@ export class SeriesService {
     private readonly seriesRepo: SeriesRepository,
     private readonly bookReadService: BookReadService,
     private readonly libraryService: LibraryService,
+    private readonly coverStore: BookCoverStore,
   ) {}
 
   private assertPaginationWindow(page: number, size: number): void {
@@ -36,7 +39,7 @@ export class SeriesService {
     const size = dto.size ?? 50;
     this.assertPaginationWindow(page, size);
 
-    const libraryIds = await this.resolveLibraryIds(user, dto.libraryId);
+    const libraryIds = await this.resolveSeriesPageLibraryIds(user, dto.libraryId);
     if (libraryIds.length === 0) {
       return { items: [], total: 0, page, size, facets: { all: 0, notStarted: 0, inProgress: 0, complete: 0, hasGaps: 0 } };
     }
@@ -61,6 +64,7 @@ export class SeriesService {
         bookCount: row.bookCount,
         expectedBookCount: row.expectedBookCount,
       });
+      const counts = ladder.counts ?? { ownedVolumeCount: row.bookCount, readVolumeCount: row.readCount, readingVolumeCount: row.readingCount };
 
       return {
         id: row.id,
@@ -73,6 +77,9 @@ export class SeriesService {
         lastAddedAt: row.lastAddedAt ?? null,
         libraryNames: row.libraryNames,
         expectedBookCount: normalizeSeriesTotalBooks(row.expectedBookCount) ?? null,
+        ownedVolumeCount: counts.ownedVolumeCount,
+        readVolumeCount: counts.readVolumeCount,
+        readingVolumeCount: counts.readingVolumeCount,
         volumes: ladder.volumes,
         volumesTruncated: ladder.truncated,
         gaps: ladder.gaps.slice(0, SERIES_GAP_PREVIEW_LIMIT),
@@ -88,7 +95,7 @@ export class SeriesService {
 
   /** Total series the user can browse; matches the unfiltered total of {@link findAll}. */
   async countAll(user: RequestUser): Promise<number> {
-    const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const libraryIds = withoutHiddenLibraries(await this.libraryService.findAccessibleLibraryIds(user), user, 'series');
     if (libraryIds.length === 0) return 0;
     return this.seriesRepo.countSeries({ libraryIds, contentFilters: user.isSuperuser ? undefined : user.contentFilters });
   }
@@ -98,28 +105,35 @@ export class SeriesService {
     const size = dto.size ?? 50;
     this.assertPaginationWindow(page, size);
 
-    const libraryIds = await this.resolveLibraryIds(user, dto.libraryId);
-    if (libraryIds.length === 0) {
+    const accessibleLibraryIds = await this.resolveLibraryIds(user, dto.libraryId);
+    if (accessibleLibraryIds.length === 0) {
       throw new NotFoundException('Series not found');
     }
 
-    const [detail, bookPage] = await Promise.all([
-      this.seriesRepo.findDetail({
-        seriesId,
-        userId: user.id,
-        libraryIds,
-        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
-      }),
-      this.seriesRepo.findBookIds({
-        seriesId,
-        page,
-        size,
-        sort: dto.sort ?? 'seriesIndex',
-        order: dto.order ?? 'asc',
-        libraryIds,
-        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
-      }),
-    ]);
+    const load = (libraryIds: number[]) =>
+      Promise.all([
+        this.seriesRepo.findDetail({
+          seriesId,
+          userId: user.id,
+          libraryIds,
+          contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+        }),
+        this.seriesRepo.findBookIds({
+          seriesId,
+          page,
+          size,
+          sort: dto.sort ?? 'seriesIndex',
+          order: dto.order ?? 'asc',
+          libraryIds,
+          contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+        }),
+      ]);
+
+    const shownLibraryIds = dto.libraryId ? accessibleLibraryIds : withoutHiddenLibraries(accessibleLibraryIds, user, 'series');
+    const narrowed = shownLibraryIds.length > 0 && shownLibraryIds.length < accessibleLibraryIds.length;
+    let [detail, bookPage] = await load(narrowed ? shownLibraryIds : accessibleLibraryIds);
+    // A series kept entirely in hidden libraries still opens, from a book's page, with all its books.
+    if (!detail && narrowed) [detail, bookPage] = await load(accessibleLibraryIds);
 
     if (!detail) {
       if (dto.libraryId) {
@@ -136,6 +150,8 @@ export class SeriesService {
             name: existsInAnyLibrary.name,
             bookCount: 0,
             readCount: 0,
+            ownedVolumeCount: 0,
+            readVolumeCount: 0,
             authors: existsInAnyLibrary.authors,
             possibleGaps: [],
             expectedBookCount: existsInAnyLibrary.expectedBookCount ?? null,
@@ -147,6 +163,9 @@ export class SeriesService {
     }
 
     const possibleGaps = computeSeriesGaps(detail.indices, detail.bookCount, detail.expectedBookCount);
+    const volumeCounts = detail.members
+      ? countSeriesVolumes({ members: detail.members, bookCount: detail.bookCount, expectedBookCount: detail.expectedBookCount })
+      : { ownedVolumeCount: detail.bookCount, readVolumeCount: detail.readCount };
 
     let items: BooksPage['items'] = [];
     if (bookPage.bookIds.length > 0) {
@@ -162,6 +181,7 @@ export class SeriesService {
         cardData.tagRows,
         cardData.seriesMembershipRows,
       );
+      await this.coverStore.enrichCardFaces(cards);
       const orderMap = new Map(bookPage.bookIds.map((id, i) => [id, i]));
       items = cards
         .map((card) => {
@@ -183,6 +203,8 @@ export class SeriesService {
       name: detail.name,
       bookCount: detail.bookCount,
       readCount: detail.readCount,
+      ownedVolumeCount: volumeCounts.ownedVolumeCount,
+      readVolumeCount: volumeCounts.readVolumeCount,
       authors: detail.authors,
       possibleGaps,
       expectedBookCount: detail.expectedBookCount ?? null,
@@ -204,7 +226,9 @@ export class SeriesService {
       seriesId,
       bookId,
       libraryIds,
-      formats: dto.formatGroup ? getOpenableFormatsForGroup(dto.formatGroup) : [...READER_OPENABLE_FORMATS],
+      formats: (dto.formatGroup ? getOpenableFormatsForGroup(dto.formatGroup) : [...READER_OPENABLE_FORMATS]).filter(
+        (format) => dto.includeDjvu === true || !isOptInReaderFormat(format),
+      ),
       contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
@@ -219,6 +243,12 @@ export class SeriesService {
         seriesIndex: row.seriesIndex,
       },
     };
+  }
+
+  /** A library filter wins; otherwise the Series page reads every visible library not hidden from it. */
+  private async resolveSeriesPageLibraryIds(user: RequestUser, scopedLibraryId?: number): Promise<number[]> {
+    const libraryIds = await this.resolveLibraryIds(user, scopedLibraryId);
+    return scopedLibraryId ? libraryIds : withoutHiddenLibraries(libraryIds, user, 'series');
   }
 
   private async resolveLibraryIds(user: RequestUser, scopedLibraryId?: number): Promise<number[]> {

@@ -18,6 +18,7 @@ describe('FileRenameRepository', () => {
       relPath: 'old-folder/Old Title.epub',
       format: 'epub',
       role: 'primary',
+      mediaOverlayAvailable: true,
       libraryFolderId: 20,
       libraryFolderPath: '/library',
       libraryId: 30,
@@ -29,6 +30,7 @@ describe('FileRenameRepository', () => {
       subtitle: 'Book One',
       publisher: 'Ace',
       language: 'en',
+      isbn10: '0441172717',
       isbn13: '9780441172719',
       publishedYear: 1965,
       seriesName: 'Dune',
@@ -66,6 +68,7 @@ describe('FileRenameRepository', () => {
         relPath: 'old-folder/Old Title.epub',
         format: 'epub',
         role: 'primary',
+        mediaOverlayAvailable: true,
       },
       libraryId: 30,
       libraryFolderId: 20,
@@ -79,6 +82,7 @@ describe('FileRenameRepository', () => {
         subtitle: 'Book One',
         publisher: 'Ace',
         language: 'en',
+        isbn10: '0441172717',
         isbn13: '9780441172719',
         publishedYear: 1965,
         seriesName: 'Dune',
@@ -160,97 +164,53 @@ describe('FileRenameRepository', () => {
     ]);
   });
 
-  it('findBookByExactFolderPath returns the exact folder owner in a library', async () => {
-    const row = { id: 99, folderPath: '/library/Author/Book', primaryFileId: 42, status: 'present' };
+  it('findFolderOwners maps each held folder to its book, title, and first-listed author', async () => {
     const db = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([row]),
-      }),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnThis(),
+          leftJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockResolvedValue([
+            { bookId: 99, folderPath: '/library/Frank Herbert/Dune', title: 'Dune' },
+            { bookId: 100, folderPath: '/library/Anonymous/Beowulf', title: null },
+          ]),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnThis(),
+          innerJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue([
+            { bookId: 99, name: 'Frank Herbert' },
+            { bookId: 99, name: 'Brian Herbert' },
+          ]),
+        }),
     };
 
     const repo = new FileRenameRepository(db as never);
+    const owners = await repo.findFolderOwners(3, ['/library/Frank Herbert/Dune', '/library/Anonymous/Beowulf', '/library/Frank Herbert/Dune']);
 
-    await expect(repo.findBookByExactFolderPath(3, '/library/Author/Book')).resolves.toEqual(row);
+    expect(owners).toEqual(
+      new Map([
+        ['/library/Frank Herbert/Dune', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }],
+        ['/library/Anonymous/Beowulf', { bookId: 100, title: null, primaryAuthor: null }],
+      ]),
+    );
   });
 
-  it('applyExistingFolderMerge reassigns files, deletes the source book, and fills a missing target primary', async () => {
-    const setCalls: unknown[] = [];
-    const deleteWhere = vi.fn().mockResolvedValue(undefined);
-    const tx = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        for: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([{ libraryFolderId: 7, primaryFileId: null }]),
-      }),
-      update: vi.fn().mockImplementation(() => ({
-        set: vi.fn().mockImplementation((values: unknown) => {
-          setCalls.push(values);
-          return { where: vi.fn().mockResolvedValue(undefined) };
-        }),
-      })),
-      delete: vi.fn().mockReturnValue({ where: deleteWhere }),
-    };
+  it('findFolderOwners skips the author query when no book holds any of the folders', async () => {
     const db = {
-      transaction: vi.fn().mockImplementation(async (callback: (value: unknown) => Promise<unknown>) => callback(tx)),
+      select: vi.fn().mockReturnValueOnce({
+        from: vi.fn().mockReturnThis(),
+        leftJoin: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([]),
+      }),
     };
 
     const repo = new FileRenameRepository(db as never);
 
-    await repo.applyExistingFolderMerge({
-      sourceBookId: 5,
-      targetBookId: 99,
-      fallbackPrimaryFileId: 10,
-      updates: [
-        { id: 10, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' },
-        { id: 11, absolutePath: '/library/Author/Book/old.opf', relPath: 'Author/Book/old.opf' },
-      ],
-    });
-
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(setCalls).toEqual([
-      expect.objectContaining({ bookId: 99, libraryFolderId: 7, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' }),
-      expect.objectContaining({ bookId: 99, libraryFolderId: 7, absolutePath: '/library/Author/Book/old.opf', relPath: 'Author/Book/old.opf' }),
-      expect.objectContaining({ primaryFileId: 10, status: 'present' }),
-    ]);
-    expect(tx.delete).toHaveBeenCalledTimes(1);
-    expect(deleteWhere).toHaveBeenCalledTimes(1);
-  });
-
-  it('applyExistingFolderMerge does not replace an existing target primary file', async () => {
-    const setCalls: unknown[] = [];
-    const tx = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        for: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([{ libraryFolderId: 7, primaryFileId: 42 }]),
-      }),
-      update: vi.fn().mockImplementation(() => ({
-        set: vi.fn().mockImplementation((values: unknown) => {
-          setCalls.push(values);
-          return { where: vi.fn().mockResolvedValue(undefined) };
-        }),
-      })),
-      delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
-    };
-    const db = {
-      transaction: vi.fn().mockImplementation(async (callback: (value: unknown) => Promise<unknown>) => callback(tx)),
-    };
-
-    const repo = new FileRenameRepository(db as never);
-
-    await repo.applyExistingFolderMerge({
-      sourceBookId: 5,
-      targetBookId: 99,
-      fallbackPrimaryFileId: 10,
-      updates: [{ id: 10, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' }],
-    });
-
-    expect(setCalls.at(-1)).toEqual(expect.not.objectContaining({ primaryFileId: 10 }));
-    expect(setCalls.at(-1)).toEqual(expect.objectContaining({ status: 'present' }));
+    await expect(repo.findFolderOwners(3, ['/library/Frank Herbert/Dune'])).resolves.toEqual(new Map());
+    expect(db.select).toHaveBeenCalledTimes(1);
   });
 
   it('checkPathTakenByOtherBook only flags collisions from other books', async () => {

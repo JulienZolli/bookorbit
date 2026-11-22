@@ -1,6 +1,8 @@
 vi.mock('drizzle-orm', () => ({
   and: vi.fn((...clauses: unknown[]) => ({ type: 'and', clauses })),
+  desc: vi.fn((value: unknown) => ({ type: 'desc', value })),
   eq: vi.fn((left: unknown, right: unknown) => ({ type: 'eq', left, right })),
+  or: vi.fn((...clauses: unknown[]) => ({ type: 'or', clauses })),
   inArray: vi.fn((column: unknown, values: unknown[]) => ({ type: 'inArray', column, values })),
   isNotNull: vi.fn((value: unknown) => ({ type: 'isNotNull', value })),
   sql: vi.fn((parts: TemplateStringsArray, ...values: unknown[]) => ({ type: 'sql', parts, values })),
@@ -16,7 +18,7 @@ vi.mock('../../common/utils/content-filter-sql.utils', () => ({
   buildContentFilterClauses: vi.fn(() => [{ type: 'contentFilter' }]),
 }));
 
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, or } from 'drizzle-orm';
 
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 import { accentInsensitiveExactMatchRank, accentInsensitiveIlike } from '../../common/utils/accent-insensitive-search.utils';
@@ -146,6 +148,23 @@ describe('CatalogRepository', () => {
     expect(inArray).toHaveBeenCalledWith(books.libraryId, [4, 9]);
   });
 
+  it('lists every visible language, most common first, without a search term', async () => {
+    const { repository, selectChain } = makeRepository([{ name: 'English' }, { name: 'nl' }, { name: null }, { name: '  ' }]);
+
+    await expect(repository.listLanguages(filteredScope)).resolves.toEqual([{ name: 'English' }, { name: 'nl' }]);
+
+    expect(selectChain.from).toHaveBeenCalledWith(bookMetadata);
+    expect(selectChain.innerJoin).toHaveBeenCalledWith(books, expect.anything());
+    expect(isNotNull).toHaveBeenCalledWith(bookMetadata.language);
+    expect(inArray).toHaveBeenCalledWith(books.libraryId, [4, 9]);
+    expect(buildContentFilterClauses).toHaveBeenCalledWith(filteredScope.contentFilters, expect.anything());
+    expect(accentInsensitiveIlike).not.toHaveBeenCalled();
+    expect(selectChain.groupBy).toHaveBeenCalledWith(bookMetadata.language);
+    expect(desc).toHaveBeenCalledWith(expect.objectContaining({ type: 'sql' }));
+    expect(selectChain.orderBy).toHaveBeenCalledWith(expect.objectContaining({ type: 'desc' }), bookMetadata.language);
+    expect(selectChain.limit).toHaveBeenCalledWith(200);
+  });
+
   it('does not build content-filter SQL for a superuser scope', async () => {
     const { repository } = makeRepository();
 
@@ -154,13 +173,14 @@ describe('CatalogRepository', () => {
     expect(buildContentFilterClauses).not.toHaveBeenCalled();
   });
 
-  it('keeps collection lookup user-scoped and wildcard-safe', async () => {
+  it('searches owned and public collections with wildcard-safe matching', async () => {
     const { repository, selectChain } = makeRepository([{ name: 'Favorites' }]);
 
     await expect(repository.searchCollections(42, ' sci_fi% ')).resolves.toEqual([{ name: 'Favorites' }]);
 
     expect(eq).toHaveBeenCalledWith(collections.userId, 42);
-    expect(eq).toHaveBeenCalledWith(collections.mediaType, 'books');
+    expect(eq).toHaveBeenCalledWith(collections.isPublic, true);
+    expect(or).toHaveBeenCalledWith(expect.anything(), expect.anything());
     expect(accentInsensitiveIlike).toHaveBeenCalledWith(collections.name, '%sci\\_fi\\%%');
     expect(and).toHaveBeenCalled();
     expect(selectChain.from).toHaveBeenCalledWith(collections);

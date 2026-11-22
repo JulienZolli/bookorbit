@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
 
+import { AppAttestModule } from '../app-attest/app-attest.module';
 import { BookModule } from '../book/book.module';
 import { LibraryModule } from '../library/library.module';
-import { PodcastModule } from '../podcast/podcast.module';
 import { SmartScopeController } from './smart-scope.controller';
 import { SmartScopeRepository } from './smart-scope.repository';
 import { SmartScopeService } from './smart-scope.service';
 
 @Module({
-  imports: [BookModule, LibraryModule, PodcastModule],
+  imports: [AppAttestModule, BookModule, LibraryModule],
   controllers: [SmartScopeController],
   providers: [SmartScopeService, SmartScopeRepository],
   exports: [SmartScopeService],

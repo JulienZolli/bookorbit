@@ -9,6 +9,7 @@ import {
   primaryKey,
   real,
   serial,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -66,15 +67,24 @@ export const readingAttempts = pgTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    bookId: integer('book_id')
-      .notNull()
-      .references(() => books.id, { onDelete: 'cascade' }),
+    // Null once the book is deleted: a finished read outlives it, described by the snapshot below.
+    bookId: integer('book_id').references(() => books.id, { onDelete: 'set null' }),
     startedOn: date('started_on', { mode: 'string' }),
     endedOn: date('ended_on', { mode: 'string' }),
     outcome: varchar('outcome', { length: 20 }).$type<ReadingAttemptOutcome>(),
     origin: varchar('origin', { length: 20 }).$type<ReadingAttemptOrigin>().notNull(),
     externalProvider: varchar('external_provider', { length: 40 }),
     externalId: varchar('external_id', { length: 255 }),
+    // This read's own 1-5 stars. The book's rating follows its latest finished read.
+    rating: smallint('rating'),
+    // Written just before the book is deleted, so the read can still be named afterwards.
+    bookTitleSnapshot: varchar('book_title_snapshot', { length: 1000 }),
+    // A JSON array of names: author names can contain commas.
+    bookAuthorsSnapshot: text('book_authors_snapshot'),
+    bookFormatSnapshot: varchar('book_format_snapshot', { length: 20 }),
+    bookPageCountSnapshot: integer('book_page_count_snapshot'),
+    bookLibraryIdSnapshot: integer('book_library_id_snapshot'),
+    bookRemovedAt: timestamp('book_removed_at', { withTimezone: true }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
@@ -96,6 +106,7 @@ export const readingAttempts = pgTable(
     check('reading_attempts_origin_chk', sql`${t.origin} in ('manual', 'bookorbit', 'kobo', 'koreader', 'hardcover', 'migration')`),
     check('reading_attempts_end_after_start_chk', sql`${t.endedOn} is null or ${t.startedOn} is null or ${t.endedOn} >= ${t.startedOn}`),
     check('reading_attempts_closed_has_outcome_chk', sql`${t.endedOn} is null or ${t.outcome} is not null`),
+    check('reading_attempts_rating_range_chk', sql`${t.rating} is null or (${t.rating} >= 1 and ${t.rating} <= 5)`),
   ],
 );
 
@@ -155,6 +166,54 @@ export const userBookNotes = pgTable(
 
 export type UserBookNoteRow = typeof userBookNotes.$inferSelect;
 export type NewUserBookNote = typeof userBookNotes.$inferInsert;
+
+export const bookJournalEntries = pgTable(
+  'book_journal_entries',
+  {
+    id: serial('id').primaryKey(),
+    // Client-generated, so an entry written offline can be retried without duplicating it.
+    clientId: uuid('client_id').notNull(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    body: text('body').notNull(),
+    quote: text('quote'),
+    chapterTitle: varchar('chapter_title', { length: 500 }),
+    positionPercent: real('position_percent'),
+    cfi: varchar('cfi', { length: 2000 }),
+    positionSeconds: real('position_seconds'),
+    // Client-supplied for an entry captured offline, so it gets the decoder that reads any year.
+    createdAt: timestamptz('created_at')
+      .default(sql`now()`)
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => new Date()),
+    // Trash. Restorable until permanently deleted.
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('book_journal_entries_user_client_id_uidx').on(t.userId, t.clientId),
+    index('book_journal_entries_user_book_created_active_idx')
+      .on(t.userId, t.bookId, t.createdAt)
+      .where(sql`${t.deletedAt} is null`),
+    index('book_journal_entries_book_id_idx').on(t.bookId),
+    check('book_journal_entries_body_length_chk', sql`char_length(${t.body}) between 1 and 10000`),
+    check('book_journal_entries_quote_length_chk', sql`${t.quote} is null or char_length(${t.quote}) <= 5000`),
+    check(
+      'book_journal_entries_position_percent_range_chk',
+      sql`${t.positionPercent} is null or (${t.positionPercent} >= 0 and ${t.positionPercent} <= 100)`,
+    ),
+    check('book_journal_entries_position_seconds_nonnegative_chk', sql`${t.positionSeconds} is null or ${t.positionSeconds} >= 0`),
+  ],
+);
+
+export type BookJournalEntryRow = typeof bookJournalEntries.$inferSelect;
+export type NewBookJournalEntry = typeof bookJournalEntries.$inferInsert;
 
 export const readingProgress = pgTable(
   'reading_progress',
@@ -260,6 +319,8 @@ export const readingSessions = pgTable(
     // Nullable: CBX with no percentage tracking may omit these.
     progressDelta: real('progress_delta'),
     endProgress: real('end_progress'),
+    // Counter-derived sync estimates only: the previous counter push, where the interval the estimate stands for begins.
+    syncIntervalStartedAt: timestamp('sync_interval_started_at', { withTimezone: true }),
   },
   (t) => [
     uniqueIndex('rs_user_session_id_uidx').on(t.userId, t.sessionId),
@@ -376,7 +437,23 @@ export const audiobookProgress = pgTable(
 export type AudiobookProgress = typeof audiobookProgress.$inferSelect;
 export type NewAudiobookProgress = typeof audiobookProgress.$inferInsert;
 
-export type BookmarkOrigin = 'web' | 'koreader';
+// Manifest revisions a client may still hold, keyed to the track layout they describe. A playback
+// write naming an older revision is accepted when its positions key matches today's, because the
+// change (chapters, tags) did not move any audio. Released iOS never recovers from a 412.
+export const audiobookManifestRevisions = pgTable(
+  'audiobook_manifest_revisions',
+  {
+    bookId: integer('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    revision: varchar('revision', { length: 64 }).notNull(),
+    positionsKey: varchar('positions_key', { length: 64 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.bookId, t.revision] }), index('amr_book_created_idx').on(t.bookId, t.createdAt)],
+);
+
+export type BookmarkOrigin = 'web' | 'koreader' | 'kobo';
 
 export const userBookReadAloudSyncSettings = pgTable(
   'user_book_read_aloud_sync_settings',
@@ -414,6 +491,7 @@ export const bookmarks = pgTable(
     bookId: integer('book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
+    bookFileId: integer('book_file_id').references(() => bookFiles.id, { onDelete: 'set null' }),
     // EPUB: CFI string pinpoints exact location. Null for audio bookmarks.
     cfi: varchar('cfi', { length: 2000 }),
     title: varchar('title', { length: 500 }).notNull(),
@@ -447,8 +525,8 @@ export const bookmarks = pgTable(
       .where(sql`${t.cfi} is not null`),
     uniqueIndex('bookmarks_user_book_pos_uidx')
       .on(t.userId, t.bookId, t.positionSeconds)
-      .where(sql`${t.positionSeconds} is not null and ${t.cfi} is null`),
-    check('bookmarks_origin_chk', sql`${t.origin} in ('web', 'koreader')`),
+      .where(sql`${t.positionSeconds} is not null and ${t.cfi} is null and ${t.deletedAt} is null`),
+    check('bookmarks_origin_chk', sql`${t.origin} in ('web', 'koreader', 'kobo')`),
   ],
 );
 
@@ -479,7 +557,13 @@ export const annotations = pgTable(
     // deviceCreatedAt doubles as the KOReader-side identity datetime for synced annotations.
     deviceCreatedAt: varchar('device_created_at', { length: 19 }),
     deviceUpdatedAt: varchar('device_updated_at', { length: 19 }),
+    // Real time of the last note, color, style or text change from any client. Device edits are
+    // judged against it, since the device strings above mix Kobo UTC with KOReader local time.
+    contentUpdatedAt: timestamp('content_updated_at', { withTimezone: true }),
     sourceCreatedAt: timestamp('source_created_at', { withTimezone: true }),
+    // Server-only reader metadata. Deliberately outside `version`, which drives device push-down:
+    // no device carries a star, so starring must not re-send the highlight to every device.
+    starredAt: timestamp('starred_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
@@ -549,6 +633,12 @@ export const annotationPositions = pgTable(
 export type AnnotationPosition = typeof annotationPositions.$inferSelect;
 export type NewAnnotationPosition = typeof annotationPositions.$inferInsert;
 
+export interface AnnotationDeviceContent {
+  note: string | null;
+  color: string | null;
+  style: string | null;
+}
+
 export const annotationSyncState = pgTable(
   'annotation_sync_state',
   {
@@ -567,6 +657,12 @@ export const annotationSyncState = pgTable(
     // 0 = row exists from device upload but nothing pushed yet; otherwise the canonical
     // version this device has acknowledged. Only the exchange ack advances it.
     lastAppliedVersion: integer('last_applied_version').notNull().default(0),
+    // What this device last held, in its own terms (palette color, drawer), so an upload can
+    // tell the fields it changed from the ones it merely echoes. Null until the first upload or ack.
+    deviceContent: jsonb('device_content').$type<AnnotationDeviceContent>(),
+    // Kobo only: which clock the served `clientLastModifiedUtc` came from when the device last acked. Before 1 it was a
+    // device wall time labelled UTC, which the firmware could rank below its own edit and silently ignore.
+    servedClock: smallint('served_clock').notNull().default(0),
     deleteAckedAt: timestamp('delete_acked_at', { withTimezone: true }),
     firstSyncedAt: timestamp('first_synced_at', { withTimezone: true }).defaultNow().notNull(),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true })

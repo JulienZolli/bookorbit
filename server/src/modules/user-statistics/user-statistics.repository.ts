@@ -1,3 +1,4 @@
+import { finishedReadScope } from '../user-book-status/finished-read-scope';
 import { Inject, Injectable } from '@nestjs/common';
 import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -35,7 +36,6 @@ import {
   readingProgress,
   readingSessions,
   userBookStatus,
-  userLibraryAccess,
   userReadingDailyStats,
   users,
 } from '../../db/schema';
@@ -117,12 +117,6 @@ const DAILY_STATS_INSERT_CHUNK_SIZE = 1_000;
 export class UserStatisticsRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
 
-  private async getAccessibleLibraryIds(userId: number, isSuperuser: boolean): Promise<number[] | null> {
-    if (isSuperuser) return null;
-    const rows = await this.db.select({ libraryId: userLibraryAccess.libraryId }).from(userLibraryAccess).where(eq(userLibraryAccess.userId, userId));
-    return rows.map((r) => r.libraryId);
-  }
-
   private intersectLibraryIds(accessible: number[] | null, requested: number[] | number | undefined): number[] | null {
     const requestedIds = Array.isArray(requested) ? requested : requested == null ? [] : [requested];
     if (requestedIds.length === 0) return accessible;
@@ -143,9 +137,8 @@ export class UserStatisticsRepository {
     return inArray(userReadingDailyStats.libraryId, libraryIds);
   }
 
-  async resolveActivityLibraryIds(userId: number, isSuperuser: boolean, requested?: number[]): Promise<number[] | null> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    return this.intersectLibraryIds(accessible, requested);
+  resolveActivityLibraryIds(accessibleLibraryIds: number[] | null, requested?: number[]): number[] | null {
+    return this.intersectLibraryIds(accessibleLibraryIds, requested);
   }
 
   async getActivitySessionPage(
@@ -232,14 +225,14 @@ export class UserStatisticsRepository {
         count: sql<number>`count(*)::int`,
       })
       .from(readingAttempts)
-      .innerJoin(books, eq(books.id, readingAttempts.bookId))
+      .leftJoin(books, eq(books.id, readingAttempts.bookId))
       .where(
         and(
           eq(readingAttempts.userId, userId),
           eq(readingAttempts.outcome, 'completed'),
           isNotNull(readingAttempts.endedOn),
           isNull(readingAttempts.deletedAt),
-          this.libraryFilter(libraryIds),
+          finishedReadScope(libraryIds),
         ),
       )
       .groupBy(yearExpr, monthExpr)
@@ -474,9 +467,8 @@ export class UserStatisticsRepository {
     return date.toISOString().slice(0, 10);
   }
 
-  async getSummary(userId: number, isSuperuser: boolean, filterLibraryIds?: number[]): Promise<UserStatisticsSummary> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryIds = this.intersectLibraryIds(accessible, filterLibraryIds);
+  async getSummary(userId: number, accessibleLibraryIds: number[] | null, filterLibraryIds?: number[]): Promise<UserStatisticsSummary> {
+    const libraryIds = this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds);
     const libraryFilter = this.libraryFilter(libraryIds);
 
     // Status counts come from user_book_status (respects manual overrides)
@@ -517,9 +509,13 @@ export class UserStatisticsRepository {
     };
   }
 
-  async getDailyReadingStats(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 365): Promise<UserDailyReadingStat[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.dailyStatsLibraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+  async getDailyReadingStats(
+    userId: number,
+    accessibleLibraryIds: number[] | null,
+    filterLibraryIds?: number[],
+    days = 365,
+  ): Promise<UserDailyReadingStat[]> {
+    const libraryFilter = this.dailyStatsLibraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const sinceDay = this.sinceDateForDays(days).toISOString().slice(0, 10);
 
     return this.db
@@ -537,13 +533,12 @@ export class UserStatisticsRepository {
 
   async getPeakReadingHours(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 365,
     timeZone = 'UTC',
   ): Promise<{ hour: number; format: string; source: ReadingSessionSource | null; readingSeconds: number; eventsCount: number }[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
     const resolvedTimeZone = resolveTimeZone(timeZone, 'UTC');
     const hourExpr = sql<number>`extract(hour from (${readingSessions.startedAt} AT TIME ZONE ${resolvedTimeZone}))::int`;
@@ -577,14 +572,13 @@ export class UserStatisticsRepository {
 
   async getSessionTimelineItems(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds: number[] | undefined,
     sinceInclusive: Date,
     untilExclusive: Date,
     limit = 3000,
   ): Promise<SessionTimelineItemRow[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
 
     return this.db
       .select({
@@ -615,12 +609,11 @@ export class UserStatisticsRepository {
 
   async getSessionTimelineSessionById(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds: number[] | undefined,
     sessionId: number,
   ): Promise<SessionTimelineSessionRow | null> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
 
     const [row] = await this.db
       .select({
@@ -803,12 +796,11 @@ export class UserStatisticsRepository {
 
   async getFavoriteReadingDays(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 365,
   ): Promise<{ dayOfWeek: number; source: ReadingSessionSource | null; format: string; readingSeconds: number; eventsCount: number }[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
     const dayOfWeekExpr = sql<number>`extract(dow from ${readingSessions.startedAt})::int`;
     const formatExpr = sql<string>`upper(coalesce(${bookFiles.format}, 'UNKNOWN'))`;
@@ -831,12 +823,11 @@ export class UserStatisticsRepository {
 
   async getCompletionTimeline(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 1825,
   ): Promise<UserCompletionTimelinePoint[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryIds = this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds);
     const since = this.formatDayKey(this.sinceDateForDays(days));
     const yearExpr = sql<number>`extract(year from ${readingAttempts.endedOn})::int`;
     const monthExpr = sql<number>`extract(month from ${readingAttempts.endedOn})::int`;
@@ -848,7 +839,7 @@ export class UserStatisticsRepository {
         count: sql<number>`count(*)::int`,
       })
       .from(readingAttempts)
-      .innerJoin(books, eq(books.id, readingAttempts.bookId))
+      .leftJoin(books, eq(books.id, readingAttempts.bookId))
       .where(
         and(
           eq(readingAttempts.userId, userId),
@@ -856,26 +847,30 @@ export class UserStatisticsRepository {
           isNotNull(readingAttempts.endedOn),
           isNull(readingAttempts.deletedAt),
           gte(readingAttempts.endedOn, since),
-          libraryFilter,
+          finishedReadScope(libraryIds),
         ),
       )
       .groupBy(yearExpr, monthExpr)
       .orderBy(yearExpr, monthExpr);
   }
 
-  async getMonthlyCompletions(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 365): Promise<UserCompletionTimelinePoint[]> {
-    return this.getCompletionTimeline(userId, isSuperuser, filterLibraryIds, days);
+  async getMonthlyCompletions(
+    userId: number,
+    accessibleLibraryIds: number[] | null,
+    filterLibraryIds?: number[],
+    days = 365,
+  ): Promise<UserCompletionTimelinePoint[]> {
+    return this.getCompletionTimeline(userId, accessibleLibraryIds, filterLibraryIds, days);
   }
 
   async getProgressFunnelInRange(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds: number[] | undefined,
     since: Date,
     untilExclusive?: Date,
   ): Promise<UserProgressFunnel> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const timeFilter = untilExclusive
       ? and(gte(readingSessions.startedAt, since), lt(readingSessions.startedAt, untilExclusive))
       : gte(readingSessions.startedAt, since);
@@ -910,9 +905,8 @@ export class UserStatisticsRepository {
     };
   }
 
-  async getCompletionLatencyDays(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 1825): Promise<number[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+  async getCompletionLatencyDays(userId: number, accessibleLibraryIds: number[] | null, filterLibraryIds?: number[], days = 1825): Promise<number[]> {
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.formatDayKey(this.sinceDateForDays(days));
 
     const rows = await this.db
@@ -941,12 +935,11 @@ export class UserStatisticsRepository {
 
   async getGenreReadingTime(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 365,
   ): Promise<{ genre: string; source: ReadingSessionSource | null; readingSeconds: number }[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
 
     // Grouped by source so the genre treemap can show a per-source tooltip breakdown;
@@ -967,12 +960,11 @@ export class UserStatisticsRepository {
 
   async getDailyReadingSecondsBySource(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds: number[] | undefined,
     days: number,
   ): Promise<{ day: string; source: ReadingSessionSource | null; readingSeconds: number }[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
     const dayExpr = sql<string>`date_trunc('day', ${readingSessions.startedAt})::date::text`;
 
@@ -988,9 +980,13 @@ export class UserStatisticsRepository {
       .groupBy(dayExpr, readingSessions.source);
   }
 
-  async getReadingPacePoints(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 1825): Promise<UserReadingPacePoint[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+  async getReadingPacePoints(
+    userId: number,
+    accessibleLibraryIds: number[] | null,
+    filterLibraryIds?: number[],
+    days = 1825,
+  ): Promise<UserReadingPacePoint[]> {
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
 
     const rows = await this.db
@@ -1023,9 +1019,13 @@ export class UserStatisticsRepository {
     }));
   }
 
-  async getReadingSurvivalMaxProgress(userId: number, isSuperuser: boolean, filterLibraryIds?: number[], days = 1825): Promise<number[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+  async getReadingSurvivalMaxProgress(
+    userId: number,
+    accessibleLibraryIds: number[] | null,
+    filterLibraryIds?: number[],
+    days = 1825,
+  ): Promise<number[]> {
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
 
     const perBook = this.db
@@ -1045,13 +1045,12 @@ export class UserStatisticsRepository {
 
   async getCompletionRaceRawSessions(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 1825,
     limit = 15,
   ): Promise<{ bookId: number; title: string | null; startedAt: Date; endProgress: number }[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
 
     const topBookIds = await this.db
@@ -1082,17 +1081,19 @@ export class UserStatisticsRepository {
 
   async getSessionArchetypePoints(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 365,
+    timeZone = 'UTC',
   ): Promise<UserSessionArchetypePoint[]> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessible, filterLibraryIds));
+    const libraryFilter = this.libraryFilter(this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds));
     const since = this.sinceDateForDays(days);
+    const resolvedTimeZone = resolveTimeZone(timeZone, 'UTC');
 
-    const hourExpr = sql<number>`extract(hour from ${readingSessions.startedAt}) + extract(minute from ${readingSessions.startedAt}) / 60.0`;
+    const localStartedAt = sql`(${readingSessions.startedAt} AT TIME ZONE ${resolvedTimeZone})`;
+    const hourExpr = sql<number>`extract(hour from ${localStartedAt}) + extract(minute from ${localStartedAt}) / 60.0`;
     const durationExpr = sql<number>`${readingSessions.durationSeconds} / 60.0`;
-    const dowExpr = sql<number>`extract(dow from ${readingSessions.startedAt})::int`;
+    const dowExpr = sql<number>`extract(dow from ${localStartedAt})::int`;
 
     const rows = await this.db
       .select({ hour: hourExpr, durationMinutes: durationExpr, dayOfWeek: dowExpr })
@@ -1111,14 +1112,13 @@ export class UserStatisticsRepository {
 
   async getAuthorGenreChord(
     userId: number,
-    isSuperuser: boolean,
+    accessibleLibraryIds: number[] | null,
     filterLibraryIds?: number[],
     days = 1825,
     authorLimit = 12,
     genreLimit = 12,
   ): Promise<ChordDiagramData> {
-    const accessible = await this.getAccessibleLibraryIds(userId, isSuperuser);
-    const libFilter = this.intersectLibraryIds(accessible, filterLibraryIds);
+    const libFilter = this.intersectLibraryIds(accessibleLibraryIds, filterLibraryIds);
     const since = this.sinceDateForDays(days);
     const sinceStr = since.toISOString().slice(0, 10);
 

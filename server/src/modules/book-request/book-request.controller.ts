@@ -9,9 +9,11 @@ import type { RequestUser } from '../../common/types/request-user';
 import { BookRequestService } from './book-request.service';
 import { CheckAvailabilityDto } from './dto/check-availability.dto';
 import { CreateBookRequestDto } from './dto/create-book-request.dto';
+import { CreateBookRequestPairDto } from './dto/create-book-request-pair.dto';
 import { BulkBookRequestsDto } from './dto/bulk-book-requests.dto';
 import { ListBookRequestsDto } from './dto/list-book-requests.dto';
 import { UpdateBookRequestLanguageDto } from './dto/update-book-request-language.dto';
+import { RemoveDownloadDto } from './dto/remove-download.dto';
 
 @Controller('book-requests')
 @RequirePermission(Permission.BookRequestAccess)
@@ -29,6 +31,25 @@ export class BookRequestController {
     return this.service.submit(dto, user);
   }
 
+  /**
+   * An ebook and an audiobook of one work in one submission. A separate route rather than a flag on
+   * the one above, because the answer is two requests and a released client reads that route's
+   * answer as exactly one. Advertised by the `book-request-pairs` server feature.
+   */
+  @Post('pairs')
+  @Auditable({
+    action: AuditAction.BookRequestCreate,
+    resource: AuditResource.BookRequest,
+    getResourceId: (_req, body) => {
+      const pair = body as { ebook?: { request?: { id?: number } }; audiobook?: { request?: { id?: number } } } | undefined;
+      return pair?.ebook?.request?.id ?? pair?.audiobook?.request?.id;
+    },
+    description: 'Created an ebook and audiobook book request pair',
+  })
+  submitPair(@Body() dto: CreateBookRequestPairDto, @CurrentUser() user: RequestUser) {
+    return this.service.submitPair(dto, user);
+  }
+
   @Get()
   listMine(@Query() query: ListBookRequestsDto, @CurrentUser() user: RequestUser) {
     return this.service.listMine(query, user);
@@ -37,6 +58,22 @@ export class BookRequestController {
   @Get('summary')
   getSummary(@CurrentUser() user: RequestUser) {
     return this.service.getSummary(user);
+  }
+
+  /**
+   * How many rows each view of this list holds under the same filters, so the page can label its
+   * sections without loading them. Page, sort, view and grouping are accepted and ignored: every
+   * figure is a count of grouped rows, one per view.
+   */
+  @Get('view-counts')
+  getViewCounts(@Query() query: ListBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.getMineViewCounts(query, user);
+  }
+
+  /** Every request the list's filters match, in list order and bounded, for "select all matching". */
+  @Get('selection')
+  getSelection(@Query() query: ListBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.selectMine(query, user);
   }
 
   /**
@@ -88,6 +125,25 @@ export class BookRequestController {
     return this.service.setLanguage(id, dto.language, user);
   }
 
+  /**
+   * Bulk cancellation, declared before `:id/cancel` for readability; the two paths never collide.
+   * Each request's files go only where cancelling that row alone would have taken them.
+   */
+  @Post('cancel')
+  @HttpCode(HttpStatus.OK)
+  @Auditable({
+    action: AuditAction.BookRequestCancel,
+    resource: AuditResource.BookRequest,
+    getMeta: (_req, body) => {
+      const result = body as { updated?: unknown[]; failed?: unknown[] } | null;
+      return { cancelled: result?.updated?.length ?? 0, failed: result?.failed?.length ?? 0 };
+    },
+    description: 'Cancelled a selection of book requests',
+  })
+  cancelMany(@Body() dto: BulkBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.cancelMany(dto, user);
+  }
+
   @Post(':id/cancel')
   @HttpCode(HttpStatus.OK)
   @Auditable({
@@ -96,8 +152,8 @@ export class BookRequestController {
     getResourceId: (req) => Number(req.params.id),
     description: 'Cancelled a book request',
   })
-  cancel(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    return this.service.cancel(id, user);
+  cancel(@Param('id', ParseIntPipe) id: number, @Body() dto: RemoveDownloadDto, @CurrentUser() user: RequestUser) {
+    return this.service.cancel(id, user, dto?.deleteFiles ?? false);
   }
 
   @Post(':id/downloads/:downloadId/cancel')
@@ -108,8 +164,23 @@ export class BookRequestController {
     getResourceId: (req) => Number(req.params.id),
     description: 'Cancelled an active book request download',
   })
-  cancelDownload(@Param('id', ParseIntPipe) id: number, @Param('downloadId', ParseIntPipe) downloadId: number, @CurrentUser() user: RequestUser) {
-    return this.service.cancelDownload(id, downloadId, user);
+  cancelDownload(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('downloadId', ParseIntPipe) downloadId: number,
+    @Body() dto: RemoveDownloadDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.service.cancelDownload(id, downloadId, user, dto?.deleteFiles ?? false);
+  }
+
+  /**
+   * Leaving a selection of requests somebody else made. Not audited, like leaving one; every id
+   * left comes back in `removed`.
+   */
+  @Post('leave')
+  @HttpCode(HttpStatus.OK)
+  leaveMany(@Body() dto: BulkBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.leaveMany(dto, user);
   }
 
   /**
@@ -140,6 +211,13 @@ export class BookRequestController {
   @HttpCode(HttpStatus.OK)
   dismiss(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     return this.service.dismiss(id, user);
+  }
+
+  /** Bulk un-hiding, declared before `:id/restore`; not audited, like dismissal. */
+  @Post('restore')
+  @HttpCode(HttpStatus.OK)
+  restoreMany(@Body() dto: BulkBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.restoreMany(dto, user);
   }
 
   @Post(':id/restore')

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { BookCard } from '@bookorbit/types'
-import { getSeriesBookMediaGroupKey, groupSeriesBooksByMedia } from './useSeriesBookMediaGroups'
+import { getSeriesBookMediaGroupKeys, groupSeriesBooksByMedia } from './useSeriesBookMediaGroups'
 
 function makeBook(format: string | null | undefined, overrides: Partial<BookCard> = {}): BookCard {
   return {
@@ -23,6 +23,7 @@ function makeBook(format: string | null | undefined, overrides: Partial<BookCard
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -39,51 +40,88 @@ function makeBook(format: string | null | undefined, overrides: Partial<BookCard
 
 describe('series book media groups', () => {
   it.each(['epub', 'pdf', 'mobi', 'azw', 'azw3', 'fb2', 'unknown', null])('groups %s as Books', (format) => {
-    expect(getSeriesBookMediaGroupKey(makeBook(format))).toBe('books')
+    expect(getSeriesBookMediaGroupKeys(makeBook(format))).toEqual(['books'])
   })
 
   it.each(['m4b', 'mp3', 'm4a', 'opus', 'ogg', 'flac'])('groups %s as Audiobooks', (format) => {
-    expect(getSeriesBookMediaGroupKey(makeBook(format))).toBe('audiobooks')
+    expect(getSeriesBookMediaGroupKeys(makeBook(format))).toEqual(['audiobooks'])
   })
 
   it.each(['cbz', 'cbr', 'cb7'])('groups %s as Comics', (format) => {
-    expect(getSeriesBookMediaGroupKey(makeBook(format))).toBe('comics')
+    expect(getSeriesBookMediaGroupKeys(makeBook(format))).toEqual(['comics'])
   })
 
-  it('uses the primary file before secondary files', () => {
+  it('groups a book by every media kind it contains regardless of its primary file', () => {
     const book = makeBook('epub', {
       files: [
-        { id: 1, format: 'mp3', role: 'secondary', sizeBytes: null },
+        { id: 1, format: 'mp3', role: 'content', sizeBytes: null },
         { id: 2, format: 'epub', role: 'primary', sizeBytes: null },
-        { id: 3, format: 'cbz', role: 'secondary', sizeBytes: null },
+        { id: 3, format: 'cbz', role: 'content', sizeBytes: null },
       ],
     })
 
-    expect(getSeriesBookMediaGroupKey(book)).toBe('books')
+    expect(getSeriesBookMediaGroupKeys(book)).toEqual(['books', 'audiobooks', 'comics'])
   })
 
-  it('uses the first formatted file when no primary file exists', () => {
+  it('ignores cover, supplement and metadata files when grouping an audiobook', () => {
     const book = makeBook(undefined, {
       files: [
-        { id: 1, format: null, role: 'secondary', sizeBytes: null },
-        { id: 2, format: 'm4b', role: 'secondary', sizeBytes: null },
+        { id: 1, format: 'mp3', role: 'primary', sizeBytes: null },
+        { id: 2, format: 'jpg', role: 'supplement', sizeBytes: null },
+        { id: 3, format: 'jpg', role: 'cover', sizeBytes: null },
+        { id: 4, format: 'nfo', role: 'metadata', sizeBytes: null },
+        { id: 5, format: 'cue', role: 'supplement', sizeBytes: null },
       ],
     })
 
-    expect(getSeriesBookMediaGroupKey(book)).toBe('audiobooks')
+    expect(getSeriesBookMediaGroupKeys(book)).toEqual(['audiobooks'])
   })
 
-  it('falls back to Books when files are missing', () => {
-    expect(getSeriesBookMediaGroupKey(makeBook(undefined))).toBe('books')
+  it('does not add a book to the same group more than once', () => {
+    const book = makeBook(undefined, {
+      files: [
+        { id: 1, format: 'mp3', role: 'primary', sizeBytes: null },
+        { id: 2, format: 'm4b', role: 'content', sizeBytes: null },
+        { id: 3, format: ' M4A ', role: 'content', sizeBytes: null },
+      ],
+    })
+
+    expect(getSeriesBookMediaGroupKeys(book)).toEqual(['audiobooks'])
   })
 
-  it('returns ordered groups with matching books', () => {
-    const books = [makeBook('mp3', { id: 1 }), makeBook('cbz', { id: 2 }), makeBook('pdf', { id: 3 }), makeBook('epub', { id: 4 })]
+  it.each([{ files: [] }, { files: [{ id: 1, format: null, role: 'primary', sizeBytes: null }] }])(
+    'falls back to Books when no file identifies a media kind',
+    ({ files }) => {
+      expect(getSeriesBookMediaGroupKeys(makeBook(undefined, { files }))).toEqual(['books'])
+    },
+  )
 
-    expect(groupSeriesBooksByMedia(books).map((group) => [group.label, group.books.map((book) => book.id)])).toEqual([
-      ['Books', [3, 4]],
-      ['Audiobooks', [1]],
-      ['Comics', [2]],
+  it('returns ordered groups, includes mixed-media books in each match, and preserves input order', () => {
+    const books = [
+      makeBook('mp3', { id: 1 }),
+      makeBook('cbz', { id: 2 }),
+      makeBook('epub', {
+        id: 3,
+        files: [
+          { id: 30, format: 'epub', role: 'primary', sizeBytes: null },
+          { id: 31, format: 'm4b', role: 'content', sizeBytes: null },
+        ],
+      }),
+      makeBook('pdf', {
+        id: 4,
+        files: [
+          { id: 40, format: 'pdf', role: 'primary', sizeBytes: null },
+          { id: 41, format: 'flac', role: 'content', sizeBytes: null },
+          { id: 42, format: 'cbr', role: 'content', sizeBytes: null },
+        ],
+      }),
+      makeBook(undefined, { id: 5 }),
+    ]
+
+    expect(groupSeriesBooksByMedia(books).map((group) => [group.label, group.mediaKind, group.books.map((book) => book.id)])).toEqual([
+      ['Books', 'ebook', [3, 4, 5]],
+      ['Audiobooks', 'audiobook', [1, 3, 4]],
+      ['Comics', 'comic', [2, 4]],
     ])
   })
 })

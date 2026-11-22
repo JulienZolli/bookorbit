@@ -39,13 +39,14 @@ describe('Docker file-backed environment values', () => {
   });
 
   it.each([
+    'AI_ENCRYPTION_KEY',
     'BOOK_REQUEST_ENCRYPTION_KEY',
     'DATABASE_URL',
     'EMAIL_ENCRYPTION_KEY',
     'GITHUB_RELEASES_TOKEN',
     'JWT_SECRET',
     'MIGRATION_ENCRYPTION_KEY',
-    'PODCAST_ENCRYPTION_KEY',
+    'READ_ALOUD_WORKER_TOKEN',
     'POSTGRES_PASSWORD',
     'SETUP_BOOTSTRAP_TOKEN',
   ])('loads %s from a mounted file', (name) => {

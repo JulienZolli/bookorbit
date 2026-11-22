@@ -2,25 +2,27 @@
 
 Everything you need to work in this codebase: architecture, setup, workflows, conventions, and commands.
 
-For the contribution process (issues, PRs, review), see [CONTRIBUTING.md](CONTRIBUTING.md). For localization and Crowdin workflow details, see [LOCALIZATION.md](LOCALIZATION.md). For test architecture and E2E suite details, see [TESTING.md](TESTING.md).
+For the contribution process (issues, PRs, review), see [CONTRIBUTING.md](../CONTRIBUTING.md). For localization and Crowdin workflow details, see [LOCALIZATION.md](LOCALIZATION.md). For test architecture and E2E suite details, see [TESTING.md](TESTING.md).
 
 ---
 
 ## Architecture Overview
 
-BookOrbit is a pnpm monorepo with three workspaces: a Vue 3 single-page app, a NestJS API server, and a shared types package.
+BookOrbit is a pnpm monorepo with a Vue 3 single-page app, a NestJS API server, shared packages, and optional worker processes.
 
 ```mermaid
 graph LR
-    Client["Client<br/><small>Vue 3 SPA</small><br/><small>localhost:5173</small>"]
-    Server["Server<br/><small>NestJS + Fastify</small><br/><small>localhost:3000/api</small>"]
+    Client["Client<br/><small>Vue 3 SPA</small><br/><small>localhost:6263</small>"]
+    Server["Server<br/><small>NestJS + Fastify</small><br/><small>localhost:6262/api</small>"]
     DB["PostgreSQL<br/><small>Drizzle ORM</small>"]
     WS["WebSocket<br/><small>Socket.IO</small>"]
     Types["Shared Types<br/><small>@bookorbit/types</small>"]
+    Worker["Read-aloud worker<br/><small>STAlign + QuartzNet</small>"]
 
     Client -- "HTTP (fetch)" --> Server
     Client <-. "real-time events" .-> WS
     Server --> DB
+    Server -. "private HTTP" .-> Worker
     Server --> WS
     Types -.- Client
     Types -.- Server
@@ -29,10 +31,11 @@ graph LR
 | Layer        | Tech                            | Location          |
 | ------------ | ------------------------------- | ----------------- |
 | Frontend     | Vue 3, Tailwind CSS v4, Vite    | `client/`         |
-| Backend      | NestJS 11, Fastify, Drizzle ORM | `server/`         |
+| Backend      | NestJS 12, Fastify, Drizzle ORM | `server/`         |
 | Database     | PostgreSQL 18, pgvector         | Docker container  |
 | Shared types | TypeScript                      | `packages/types/` |
 | Real-time    | Socket.IO                       | Server + Client   |
+| Workers      | Node.js sidecars                | `workers/`        |
 
 ---
 
@@ -61,6 +64,8 @@ bookorbit/
 ├── packages/
 │   └── types/               # Shared TypeScript types
 │       └── src/             # Exported via @bookorbit/types
+├── workers/
+│   └── read-aloud/          # Optional STAlign and QuartzNet worker
 ├── scripts/                 # Bootstrap, DB reset, E2E orchestration
 ├── docker/                  # Postgres init scripts (extensions)
 ├── .github/                 # CI workflows, PR/issue templates
@@ -100,7 +105,7 @@ git clone https://github.com/<your-username>/bookorbit.git
 cd bookorbit
 ```
 
-If you are an external contributor, fork first and clone your fork. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+If you are an external contributor, fork first and clone your fork. See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
 
 #### Step 2 - Create your environment file
 
@@ -162,8 +167,8 @@ If everything worked, you will see the server, client, and types watcher start u
 
 | Check                                    | Expected                                   |
 | ---------------------------------------- | ------------------------------------------ |
-| Open http://localhost:5173               | BookOrbit login page loads                 |
-| Open http://localhost:3000/api/v1/health | Returns `{"status":"ok"}`                  |
+| Open http://localhost:6263               | BookOrbit login page loads                 |
+| Open http://localhost:6262/api/v1/health | Returns `{"status":"ok"}`                  |
 | `docker ps`                              | Shows `bookorbit-dev-db` container running |
 
 ---
@@ -178,8 +183,8 @@ This starts the server, client, and types watcher concurrently with hot reload.
 
 | Service | URL                       |
 | ------- | ------------------------- |
-| Client  | http://localhost:5173     |
-| API     | http://localhost:3000/api |
+| Client  | http://localhost:6263     |
+| API     | http://localhost:6262/api |
 
 If PostgreSQL is not running, start it first with `pnpm run db:up`.
 
@@ -195,8 +200,8 @@ When enabled, open:
 
 | Docs         | URL                                 |
 | ------------ | ----------------------------------- |
-| Swagger UI   | http://localhost:3000/api/docs      |
-| OpenAPI JSON | http://localhost:3000/api/docs-json |
+| Swagger UI   | http://localhost:6262/api/docs      |
+| OpenAPI JSON | http://localhost:6262/api/docs-json |
 
 <details>
 <summary>Running workspaces separately</summary>
@@ -224,19 +229,19 @@ pnpm --filter @bookorbit/types dev
 
 These are the variables you are most likely to need during development. See `server/.env.example` for the full list with comments.
 
-| Variable                 | Purpose                                            | Default (dev)                                             |
-| ------------------------ | -------------------------------------------------- | --------------------------------------------------------- |
-| `DATABASE_URL`           | PostgreSQL connection string                       | `postgres://bookorbit:bookorbit@localhost:5432/bookorbit` |
-| `PORT`                   | Server listen port                                 | `3000`                                                    |
-| `HOST`                   | Server listen address (IPv4 or IPv6)               | `0.0.0.0`                                                 |
-| `NODE_ENV`               | Runtime mode                                       | `development`                                             |
-| `JWT_SECRET`             | Signing key for auth tokens                        | `change-me-in-production`                                 |
-| `PODCAST_ENCRYPTION_KEY` | Podcast URL encryption key; required in production | Falls back to `JWT_SECRET` in development                 |
-| `APP_DATA_PATH`          | Storage for covers, avatars, cache                 | `../local/data`                                           |
-| `LIBRARY_BROWSE_ROOT`    | Library folder picker root                         | `/`                                                       |
-| `APP_URL`                | Base URL for email links                           | `http://localhost:5173`                                   |
-| `SWAGGER_ENABLED`        | Serve Swagger UI and OpenAPI JSON                  | `false`                                                   |
-| `DISABLE_LOCAL_AUTH`     | Disable password authentication                    | `false`                                                   |
+| Variable              | Purpose                              | Default (dev)                                             |
+| --------------------- | ------------------------------------ | --------------------------------------------------------- |
+| `DATABASE_URL`        | PostgreSQL connection string         | `postgres://bookorbit:bookorbit@localhost:5432/bookorbit` |
+| `PORT`                | Server listen port                   | `3000`                                                    |
+| `HOST`                | Server listen address (IPv4 or IPv6) | `0.0.0.0`                                                 |
+| `NODE_ENV`            | Runtime mode                         | `development`                                             |
+| `JWT_SECRET`          | Signing key for auth tokens          | `change-me-in-production`                                 |
+| `APP_DATA_PATH`       | Storage for covers, avatars, cache   | `../local/data`                                           |
+| `LIBRARY_BROWSE_ROOT` | Library folder picker root           | `/`                                                       |
+| `APP_URL`             | Base URL for email links             | `http://localhost:6263`                                   |
+| `SWAGGER_ENABLED`     | Serve Swagger UI and OpenAPI JSON    | `false`                                                   |
+| `DISABLE_LOCAL_AUTH`  | Disable password authentication      | `false`                                                   |
+| `AI_ENCRYPTION_KEY`   | Encrypts AI provider keys            | unset; see [AI_PROVIDERS.md](AI_PROVIDERS.md)             |
 
 For a native server accessible only on this machine, set `HOST=127.0.0.1` in `server/.env`. `HOST` accepts an IPv4 or IPv6 address without a port or brackets, such as `::1` for IPv6 loopback. An unset or blank value keeps the existing `0.0.0.0` default. `PORT` continues to select the listen port.
 
@@ -310,6 +315,7 @@ pnpm run db:seed
 | `pnpm run test`                  | Server + client unit tests       |
 | `pnpm run test:server`           | Server unit tests only           |
 | `pnpm run test:client`           | Client unit tests only           |
+| `pnpm run test:worker`           | Read-aloud worker tests only     |
 | `cd server && pnpm test:watch`   | Server tests in watch mode       |
 | `pnpm run e2e:run -- <suite-id>` | Run a single E2E suite           |
 | `pnpm run e2e:all`               | Run all E2E suites sequentially  |
@@ -471,7 +477,7 @@ pnpm run e2e:run -- <suite-id>
 
 **Port already in use**
 
-The server defaults to port 3000 (configured via `PORT` in `server/.env`) and the client to 5173 (Vite default). If either is occupied, find the process that owns it and stop it, or change the server port in `server/.env`.
+Local development runs the server on port 6262 (`PORT` in `server/.env`) and the client on 6263 (`server.port` in `client/vite.config.ts`, with `strictPort`, so Vite fails instead of silently moving). Both avoid 3000, which many other self-hosted apps and dev tools claim. A server started without `PORT`, such as the Docker image, still listens on 3000. If either is occupied, find the process that owns it and stop it, or change the server port in `server/.env`.
 
 **Hot reload not picking up changes**
 
@@ -528,6 +534,7 @@ All commands are run from the repository root unless noted otherwise.
 | `pnpm run test`                  | Run server + client unit tests   |
 | `pnpm run test:server`           | Run server unit tests            |
 | `pnpm run test:client`           | Run client unit tests            |
+| `pnpm run test:worker`           | Run read-aloud worker tests      |
 | `cd server && pnpm test:watch`   | Server tests in watch mode       |
 | `pnpm run coverage`              | Unit tests with coverage reports |
 | `pnpm run coverage:server`       | Server coverage only             |

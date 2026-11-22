@@ -1,4 +1,4 @@
-import { APP_FEATURES, Permission } from '@bookorbit/types'
+import { Permission } from '@bookorbit/types'
 
 export interface PermissionGroup {
   id: string
@@ -15,26 +15,23 @@ export interface PermissionGroup {
 export const PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: 'libraryBooks',
-    use: [Permission.LibraryDownload, Permission.LibraryUpload, Permission.LibraryEditMetadata],
-    manage: [Permission.LibraryDeleteBooks],
+    use: [
+      Permission.LibraryDownload,
+      Permission.LibraryUpload,
+      Permission.LibraryEditMetadata,
+      Permission.LibraryGenerateReadAloud,
+      Permission.LibraryGenerateStoryGuide,
+    ],
+    manage: [Permission.LibraryDeleteBooks, Permission.LibraryMergeBooks],
   },
   {
     id: 'bookRequests',
     use: [Permission.BookRequestAccess, Permission.BookRequestAutoApprove, Permission.BookRequestSelfFulfill],
     manage: [Permission.ManageBookRequests],
   },
-  ...(APP_FEATURES.podcasts
-    ? [
-        {
-          id: 'podcasts',
-          use: [Permission.PodcastDownload],
-          manage: [Permission.PodcastManageFeeds, Permission.PodcastEditMetadata, Permission.PodcastManageRetention, Permission.PodcastPurge],
-        },
-      ]
-    : []),
   {
-    id: 'devices',
-    use: [Permission.KoboSync, Permission.KoreaderSync, Permission.OpdsAccess],
+    id: 'devicesAccess',
+    use: [Permission.KoboSync, Permission.KoreaderSync, Permission.OpdsAccess, Permission.ApiKeys],
     manage: [],
   },
   {
@@ -89,7 +86,6 @@ export function isRestrictionPermission(permissionName: string): boolean {
  */
 const STANDARD_PRESET: Permission[] = [
   Permission.LibraryDownload,
-  ...(APP_FEATURES.podcasts ? [Permission.PodcastDownload] : []),
   Permission.KoboSync,
   Permission.KoreaderSync,
   Permission.HardcoverSync,

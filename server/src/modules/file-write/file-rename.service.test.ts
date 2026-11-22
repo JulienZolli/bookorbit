@@ -56,6 +56,7 @@ describe('FileRenameService', () => {
         subtitle: null,
         publisher: 'Ace',
         language: 'en',
+        isbn10: null,
         isbn13: '9780441172719',
         publishedYear: 1965,
         seriesName: null,
@@ -73,13 +74,16 @@ describe('FileRenameService', () => {
     };
   }
 
-  function makeService(configValues: Record<string, unknown> = {}) {
+  function makeService(
+    configValues: Record<string, unknown> = {},
+    covers: { coverStore?: Record<string, ReturnType<typeof vi.fn>>; coverReconciler?: { enqueue: ReturnType<typeof vi.fn> } } = {},
+  ) {
     const renameRepo = {
       findBookRenameData: vi.fn(),
       checkPathTakenByOtherBook: vi.fn().mockResolvedValue(false),
       applyFolderRename: vi.fn().mockResolvedValue(undefined),
-      findBookByExactFolderPath: vi.fn().mockResolvedValue(null),
-      applyExistingFolderMerge: vi.fn().mockResolvedValue(undefined),
+      findFolderOwners: vi.fn().mockResolvedValue(new Map()),
+      transaction: vi.fn().mockImplementation((work: (tx: unknown) => Promise<unknown>) => work({})),
       findAllBookFiles: vi.fn().mockImplementation(async () => {
         const data = await renameRepo.findBookRenameData();
         if (!data) return [];
@@ -96,6 +100,7 @@ describe('FileRenameService', () => {
     };
     const lockService = {
       withLock: vi.fn().mockImplementation(async (_path: string, fn: () => Promise<unknown>) => fn()),
+      tryWithLock: vi.fn().mockImplementation((_path: string, fn: () => Promise<unknown>) => fn()),
     };
     const appSettings = {
       getUploadPattern: vi.fn().mockResolvedValue('{authors}/{title}'),
@@ -109,6 +114,14 @@ describe('FileRenameService', () => {
       get: vi.fn().mockImplementation((key: string) => configValues[key]),
     } as unknown as ConfigService;
 
+    const coverStore = covers.coverStore ?? {
+      slotsForAdoption: vi.fn().mockResolvedValue([]),
+      adoptSlots: vi.fn().mockResolvedValue([]),
+      removeCoverDirectory: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const consolidation = { consolidate: vi.fn().mockResolvedValue({}) };
+
     const selfWriteRegistry = new SelfWriteRegistry();
     const service = new FileRenameService(
       renameRepo as never,
@@ -117,9 +130,12 @@ describe('FileRenameService', () => {
       notificationService as never,
       config,
       selfWriteRegistry,
+      coverStore as never,
+      consolidation as never,
+      covers.coverReconciler as never,
     );
 
-    return { service, renameRepo, lockService, appSettings, notificationService, selfWriteRegistry };
+    return { service, renameRepo, lockService, appSettings, notificationService, selfWriteRegistry, coverStore, consolidation };
   }
 
   beforeEach(() => {
@@ -170,6 +186,15 @@ describe('FileRenameService', () => {
 
     await expect(service.performRename(5, 12)).resolves.toEqual(expect.objectContaining({ status: 'skipped', reason: 'disabled' }));
     expect(notificationService.notify).not.toHaveBeenCalled();
+  });
+
+  it('uses ISBN-10 in the naming pattern when ISBN-13 is absent', async () => {
+    const { service, renameRepo } = makeService();
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({ fileNamingPattern: '{isbn}', metadata: { isbn10: '0306406152', isbn13: null } }),
+    );
+
+    await expect(service.performRename(5, 12)).resolves.toEqual(expect.objectContaining({ status: 'success', newPath: '/library/0306406152.epub' }));
   });
 
   it('skips and notifies when another book already owns the target path', async () => {
@@ -836,7 +861,7 @@ describe('FileRenameService', () => {
   });
 
   it('renames files for a case-only book folder instead of treating the folder as a collision', async () => {
-    const { service, renameRepo } = makeService();
+    const { service, consolidation, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
       makeRenameData({
         organizationMode: 'book_per_folder',
@@ -857,7 +882,7 @@ describe('FileRenameService', () => {
     const result = await service.performRename(5, 12);
 
     expect(result).toEqual(expect.objectContaining({ status: 'success' }));
-    expect(renameRepo.findBookByExactFolderPath).not.toHaveBeenCalled();
+    expect(consolidation.consolidate).not.toHaveBeenCalled();
     expect(mockRename).toHaveBeenCalledTimes(1);
     expect(mockRename).toHaveBeenCalledWith('/library/Frank herbert/Dune/Dune.epub', '/library/Frank Herbert/Dune/Dune.epub');
   });
@@ -1139,6 +1164,29 @@ describe('FileRenameService', () => {
     expect(mockRename).toHaveBeenCalledWith('/library/Frank Herbert/Dune/Dune.epub', '/library/Frank Herbert/Dune.epub');
   });
 
+  it.each(['book_per_folder', 'book_per_file'])('preserves a root file identity after renaming in %s mode', async (organizationMode) => {
+    const { service, renameRepo } = makeService();
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({
+        organizationMode,
+        fileNamingPattern: '{title}',
+        file: { absolutePath: '/library/Old Title.epub', relPath: 'Old Title.epub' },
+        bookFolderPath: '/library/Old Title.epub',
+      }),
+    );
+
+    const result = await service.performRename(5, 12);
+
+    expect(result).toMatchObject({ status: 'success', newPath: '/library/Dune.epub' });
+    expect(renameRepo.applyFolderRename).toHaveBeenCalledWith(
+      5,
+      [{ id: 10, absolutePath: '/library/Dune.epub', relPath: 'Dune.epub' }],
+      '/library/Dune.epub',
+    );
+    expect(renameRepo.findFolderOwners).not.toHaveBeenCalled();
+    expect(mockRename).toHaveBeenCalledWith('/library/Old Title.epub', '/library/Dune.epub');
+  });
+
   it('moves a flat file into a new per-book folder when bookFolderPath equals the file path', async () => {
     const { service, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
@@ -1211,7 +1259,7 @@ describe('FileRenameService', () => {
   });
 
   it('merges renamed files into an existing folder book when target filenames are free', async () => {
-    const { service, renameRepo } = makeService();
+    const { service, consolidation, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
       makeRenameData({
         organizationMode: 'book_per_folder',
@@ -1231,12 +1279,9 @@ describe('FileRenameService', () => {
       if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
-    renameRepo.findBookByExactFolderPath.mockResolvedValue({
-      id: 99,
-      folderPath: '/library/Frank Herbert/Dune (1965)',
-      primaryFileId: 42,
-      status: 'present',
-    });
+    renameRepo.findFolderOwners.mockResolvedValue(
+      new Map([['/library/Frank Herbert/Dune (1965)', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]),
+    );
 
     const result = await service.performRename(5, 12);
 
@@ -1247,19 +1292,20 @@ describe('FileRenameService', () => {
         newPath: '/library/Frank Herbert/Dune (1965)/Dune (1965).epub',
       }),
     );
-    expect(renameRepo.findBookByExactFolderPath).toHaveBeenCalledWith(1, '/library/Frank Herbert/Dune (1965)');
-    expect(renameRepo.applyExistingFolderMerge).toHaveBeenCalledWith({
-      sourceBookId: 5,
+    expect(renameRepo.findFolderOwners).toHaveBeenCalledWith(1, ['/library/Frank Herbert/Dune (1965)']);
+    expect(consolidation.consolidate).toHaveBeenCalledWith(expect.anything(), {
       targetBookId: 99,
-      fallbackPrimaryFileId: 10,
-      updates: [
+      sourceBookId: 5,
+      destination: null,
+      mergedByUserId: 12,
+      sourceFileUpdates: [
         {
-          id: 10,
+          fileId: 10,
           absolutePath: '/library/Frank Herbert/Dune (1965)/Dune (1965).epub',
           relPath: 'Frank Herbert/Dune (1965)/Dune (1965).epub',
         },
         {
-          id: 11,
+          fileId: 11,
           absolutePath: '/library/Frank Herbert/Dune (1965)/old.opf',
           relPath: 'Frank Herbert/Dune (1965)/old.opf',
         },
@@ -1270,8 +1316,90 @@ describe('FileRenameService', () => {
     expect(mockRename).toHaveBeenNthCalledWith(2, '/library/Incoming/old.opf', '/library/Frank Herbert/Dune (1965)/old.opf');
   });
 
+  it('fails without moving anything when the book that owns the target folder holds its lock', async () => {
+    const { service, consolidation, renameRepo, lockService } = makeService();
+    lockService.tryWithLock.mockReturnValue(null);
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({
+        organizationMode: 'book_per_folder',
+        fileNamingPattern: '{authors}/{title} ({year})/{title} ({year})',
+        file: {
+          absolutePath: '/library/Incoming/old.epub',
+          relPath: 'Incoming/old.epub',
+        },
+        bookFolderPath: '/library/Incoming',
+      }),
+    );
+    renameRepo.findAllBookFiles.mockResolvedValue([
+      { id: 10, absolutePath: '/library/Incoming/old.epub', relPath: 'Incoming/old.epub', role: 'primary', format: 'epub' },
+      { id: 11, absolutePath: '/library/Incoming/old.opf', relPath: 'Incoming/old.opf', role: 'metadata', format: 'opf' },
+    ]);
+    mockAccess.mockImplementation((path: any) => {
+      if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
+      return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    });
+    renameRepo.findFolderOwners.mockResolvedValue(
+      new Map([['/library/Frank Herbert/Dune (1965)', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]),
+    );
+
+    const result = await service.performRename(5, 12);
+
+    expect(result.status).toBe('failed');
+    expect(lockService.tryWithLock).toHaveBeenCalledWith(bookOperationLockKey(99), expect.any(Function));
+    expect(consolidation.consolidate).not.toHaveBeenCalled();
+  });
+  it('hands the merged book’s covers to the target book it was merged into', async () => {
+    const sourceSlots = [{ bookId: 5, medium: 'audio' }];
+    const order: string[] = [];
+    const coverStore = {
+      slotsForAdoption: vi.fn().mockImplementation(() => {
+        order.push('read');
+        return Promise.resolve(sourceSlots);
+      }),
+      adoptSlots: vi.fn().mockImplementation(() => {
+        order.push('adopt');
+        return Promise.resolve(['audio']);
+      }),
+      removeCoverDirectory: vi.fn().mockImplementation(() => {
+        order.push('remove');
+        return Promise.resolve();
+      }),
+    };
+    const coverReconciler = { enqueue: vi.fn().mockResolvedValue(undefined) };
+    const { service, consolidation, renameRepo } = makeService({}, { coverStore, coverReconciler });
+    renameRepo.findBookRenameData.mockResolvedValue(
+      makeRenameData({
+        organizationMode: 'book_per_folder',
+        fileNamingPattern: '{authors}/{title} ({year})/{title} ({year})',
+        file: { absolutePath: '/library/Incoming/old.m4b', relPath: 'Incoming/old.m4b', format: 'm4b' },
+        bookFolderPath: '/library/Incoming',
+      }),
+    );
+    renameRepo.findAllBookFiles.mockResolvedValue([
+      { id: 10, absolutePath: '/library/Incoming/old.m4b', relPath: 'Incoming/old.m4b', role: 'primary', format: 'm4b' },
+    ]);
+    consolidation.consolidate.mockImplementation(() => {
+      order.push('merge');
+      return Promise.resolve();
+    });
+    mockAccess.mockImplementation((path: any) => {
+      if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
+      return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    });
+    renameRepo.findFolderOwners.mockResolvedValue(
+      new Map([['/library/Frank Herbert/Dune (1965)', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]),
+    );
+
+    await expect(service.performRename(5, 12)).resolves.toEqual(expect.objectContaining({ status: 'success' }));
+
+    expect(order).toEqual(['read', 'merge', 'adopt', 'remove']);
+    expect(coverStore.adoptSlots).toHaveBeenCalledWith(5, sourceSlots, 99);
+    expect(coverStore.removeCoverDirectory).toHaveBeenCalledWith(5);
+    expect(coverReconciler.enqueue).toHaveBeenCalledWith([99], { filesChanged: true });
+  });
+
   it('skips existing-folder merge when the concrete target file already exists on disk', async () => {
-    const { service, renameRepo } = makeService();
+    const { service, consolidation, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
       makeRenameData({
         organizationMode: 'book_per_folder',
@@ -1290,23 +1418,20 @@ describe('FileRenameService', () => {
       }
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
-    renameRepo.findBookByExactFolderPath.mockResolvedValue({
-      id: 99,
-      folderPath: '/library/Frank Herbert/Dune (1965)',
-      primaryFileId: 42,
-      status: 'present',
-    });
+    renameRepo.findFolderOwners.mockResolvedValue(
+      new Map([['/library/Frank Herbert/Dune (1965)', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]),
+    );
 
     const result = await service.performRename(5, 12);
 
     expect(result).toEqual(expect.objectContaining({ status: 'skipped', reason: 'target path already exists on disk' }));
-    expect(renameRepo.applyExistingFolderMerge).not.toHaveBeenCalled();
+    expect(consolidation.consolidate).not.toHaveBeenCalled();
     expect(renameRepo.applyFolderRename).not.toHaveBeenCalled();
     expect(mockRename).not.toHaveBeenCalled();
   });
 
   it('moves into an existing unowned folder without treating the folder as a collision', async () => {
-    const { service, renameRepo } = makeService();
+    const { service, consolidation, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
       makeRenameData({
         organizationMode: 'book_per_folder',
@@ -1325,7 +1450,7 @@ describe('FileRenameService', () => {
       if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
-    renameRepo.findBookByExactFolderPath.mockResolvedValue(null);
+    renameRepo.findFolderOwners.mockResolvedValue(new Map());
 
     const result = await service.performRename(5, 12);
 
@@ -1341,13 +1466,13 @@ describe('FileRenameService', () => {
       ],
       '/library/Frank Herbert/Dune (1965)',
     );
-    expect(renameRepo.applyExistingFolderMerge).not.toHaveBeenCalled();
+    expect(consolidation.consolidate).not.toHaveBeenCalled();
     expect(mockRename).toHaveBeenCalledTimes(1);
     expect(mockRename).toHaveBeenCalledWith('/library/Incoming/old.epub', '/library/Frank Herbert/Dune (1965)/Dune (1965).epub');
   });
 
   it('rolls back disk moves when an existing-folder merge fails in the database', async () => {
-    const { service, renameRepo } = makeService();
+    const { service, consolidation, renameRepo } = makeService();
     renameRepo.findBookRenameData.mockResolvedValue(
       makeRenameData({
         organizationMode: 'book_per_folder',
@@ -1367,13 +1492,10 @@ describe('FileRenameService', () => {
       if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
-    renameRepo.findBookByExactFolderPath.mockResolvedValue({
-      id: 99,
-      folderPath: '/library/Frank Herbert/Dune (1965)',
-      primaryFileId: 42,
-      status: 'present',
-    });
-    renameRepo.applyExistingFolderMerge.mockRejectedValue(new Error('db unavailable'));
+    renameRepo.findFolderOwners.mockResolvedValue(
+      new Map([['/library/Frank Herbert/Dune (1965)', { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]),
+    );
+    consolidation.consolidate.mockRejectedValue(new Error('db unavailable'));
 
     const result = await service.performRename(5, 12);
 
@@ -1383,6 +1505,137 @@ describe('FileRenameService', () => {
     expect(mockRename).toHaveBeenNthCalledWith(2, '/library/Incoming/old.jpg', '/library/Frank Herbert/Dune (1965)/old.jpg');
     expect(mockRename).toHaveBeenNthCalledWith(3, '/library/Frank Herbert/Dune (1965)/old.jpg', '/library/Incoming/old.jpg');
     expect(mockRename).toHaveBeenNthCalledWith(4, '/library/Frank Herbert/Dune (1965)/Dune (1965).epub', '/library/Incoming/old.epub');
+  });
+
+  describe('a target folder held by another book', () => {
+    const seriesPattern = '{authors}/<{series}/><{seriesIndex}> - <{title}|{originalFilename}>';
+    const seriesFolder = '/library/Frank Herbert/Dune';
+    const duneOwner = { bookId: 99, title: 'Dune', primaryAuthor: 'Frank Herbert' };
+    const messiahMetadata = { title: 'Dune Messiah', seriesName: 'Dune', seriesIndex: '2' };
+
+    function expectNothingTouched({ renameRepo, consolidation }: Pick<ReturnType<typeof makeService>, 'renameRepo' | 'consolidation'>) {
+      expect(renameRepo.applyFolderRename).not.toHaveBeenCalled();
+      expect(consolidation.consolidate).not.toHaveBeenCalled();
+      expect(mockRename).not.toHaveBeenCalled();
+      expect(mockMkdir).not.toHaveBeenCalled();
+    }
+
+    it('refuses a loose file whose series folder belongs to a different book instead of failing on the folder index', async () => {
+      const { service, consolidation, renameRepo, notificationService } = makeService();
+      renameRepo.findBookRenameData.mockResolvedValue(
+        makeRenameData({
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: seriesPattern,
+          metadata: messiahMetadata,
+          file: { absolutePath: '/library/dune-messiah.epub', relPath: 'dune-messiah.epub' },
+          bookFolderPath: '/library/dune-messiah.epub',
+        }),
+      );
+      renameRepo.findFolderOwners.mockResolvedValue(new Map([[seriesFolder, duneOwner]]));
+      mockAccess.mockResolvedValue(undefined as never);
+
+      const result = await service.performRename(5, 12);
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          status: 'skipped',
+          reason: 'target folder belongs to another book',
+          oldPath: '/library/dune-messiah.epub',
+          newPath: '/library/Frank Herbert/Dune/02 - Dune Messiah.epub',
+        }),
+      );
+      expect(renameRepo.findFolderOwners).toHaveBeenCalledWith(1, [seriesFolder]);
+      expectNothingTouched({ renameRepo, consolidation });
+      expect(notificationService.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'File rename skipped: target folder belongs to another book.' }),
+      );
+    });
+
+    it('refuses to fold a different book with its own folder into the series folder', async () => {
+      const { service, consolidation, renameRepo } = makeService();
+      renameRepo.findBookRenameData.mockResolvedValue(
+        makeRenameData({
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: seriesPattern,
+          metadata: messiahMetadata,
+          file: { absolutePath: '/library/Frank Herbert/Dune Messiah/Dune Messiah.epub', relPath: 'Frank Herbert/Dune Messiah/Dune Messiah.epub' },
+          bookFolderPath: '/library/Frank Herbert/Dune Messiah',
+        }),
+      );
+      renameRepo.findFolderOwners.mockResolvedValue(new Map([[seriesFolder, duneOwner]]));
+      mockAccess.mockResolvedValue(undefined as never);
+
+      const result = await service.performRename(5, 12);
+
+      expect(result).toEqual(expect.objectContaining({ status: 'skipped', reason: 'target folder belongs to another book' }));
+      expectNothingTouched({ renameRepo, consolidation });
+    });
+
+    it('refuses a nested move into a parent folder that belongs to a different book', async () => {
+      const { service, consolidation, renameRepo } = makeService();
+      renameRepo.findBookRenameData.mockResolvedValue(
+        makeRenameData({
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: seriesPattern,
+          metadata: messiahMetadata,
+          file: { absolutePath: '/library/Frank Herbert/Dune/Messiah/Dune Messiah.epub', relPath: 'Frank Herbert/Dune/Messiah/Dune Messiah.epub' },
+          bookFolderPath: '/library/Frank Herbert/Dune/Messiah',
+        }),
+      );
+      renameRepo.findFolderOwners.mockResolvedValue(new Map([[seriesFolder, duneOwner]]));
+      mockAccess.mockResolvedValue(undefined as never);
+
+      const result = await service.performRename(5, 12);
+
+      expect(result).toEqual(expect.objectContaining({ status: 'skipped', reason: 'target folder belongs to another book' }));
+      expectNothingTouched({ renameRepo, consolidation });
+    });
+
+    it('refuses the same work when its folder is gone from disk rather than reviving a missing book', async () => {
+      const { service, consolidation, renameRepo } = makeService();
+      renameRepo.findBookRenameData.mockResolvedValue(
+        makeRenameData({
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: '{authors}/{title} ({year})/{title} ({year})',
+          file: { absolutePath: '/library/Incoming/old.epub', relPath: 'Incoming/old.epub' },
+          bookFolderPath: '/library/Incoming',
+        }),
+      );
+      renameRepo.findFolderOwners.mockResolvedValue(new Map([['/library/Frank Herbert/Dune (1965)', duneOwner]]));
+      mockAccess.mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+
+      const result = await service.performRename(5, 12);
+
+      expect(result).toEqual(expect.objectContaining({ status: 'skipped', reason: 'target folder belongs to another book' }));
+      expectNothingTouched({ renameRepo, consolidation });
+    });
+
+    it('merges a loose audiobook into the folder its own ebook already holds', async () => {
+      const { service, consolidation, renameRepo } = makeService();
+      renameRepo.findBookRenameData.mockResolvedValue(
+        makeRenameData({
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: '{authors}/{title} ({year})/{title} ({year})',
+          file: { absolutePath: '/library/dune.m4b', relPath: 'dune.m4b', format: 'm4b' },
+          bookFolderPath: '/library/dune.m4b',
+        }),
+      );
+      renameRepo.findAllBookFiles.mockResolvedValue([
+        { id: 10, absolutePath: '/library/dune.m4b', relPath: 'dune.m4b', role: 'content', format: 'm4b' },
+      ]);
+      renameRepo.findFolderOwners.mockResolvedValue(new Map([['/library/Frank Herbert/Dune (1965)', { ...duneOwner, title: 'DUNE' }]]));
+      mockAccess.mockImplementation((path: any) => {
+        if (path.toString() === '/library/Frank Herbert/Dune (1965)') return Promise.resolve(undefined);
+        return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+      });
+
+      const result = await service.performRename(5, 12);
+
+      expect(result).toEqual(expect.objectContaining({ status: 'success', newPath: '/library/Frank Herbert/Dune (1965)/Dune (1965).m4b' }));
+      expect(consolidation.consolidate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sourceBookId: 5, targetBookId: 99 }));
+      expect(renameRepo.applyFolderRename).not.toHaveBeenCalled();
+      expect(mockRename).toHaveBeenCalledWith('/library/dune.m4b', '/library/Frank Herbert/Dune (1965)/Dune (1965).m4b');
+    });
   });
 
   it('detects case-only nested folder moves and uses per-file individual moves (avoids EINVAL on case-insensitive filesystems)', async () => {
@@ -1625,10 +1878,13 @@ describe('FileRenameService', () => {
       if (path.toString() === '/library/Frank Herbert/cover.jpg') return Promise.resolve(undefined);
       return Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     });
+    const warn = vi.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
 
     const result = await service.performRename(5, 12);
     expect(result.status).toBe('skipped');
     expect(result.reason).toBe('target path already exists on disk');
+    // The book's own file is free; the log must name the companion that collided.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('newPath="/library/Frank Herbert/cover.jpg"'));
   });
 
   describe('cancelPendingRename', () => {

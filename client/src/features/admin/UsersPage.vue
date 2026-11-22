@@ -78,6 +78,7 @@ const defaultLibraryAccessError = ref<string | null>(null)
 
 const canManageUserDefaults = computed(() => hasPermission(Permission.ManageUsers))
 const canManageAppSettings = computed(() => hasPermission(Permission.ManageAppSettings))
+const canManageUserApiKeys = computed(() => hasPermission(Permission.ManageUsers))
 const showDefaults = computed(() => !initialLoad.value && !error.value && (canManageAppSettings.value || canManageUserDefaults.value))
 
 const {
@@ -424,7 +425,7 @@ async function saveDefaultLibraryAccess() {
             >
               {{ filter.label }}
               <span
-                class="rounded px-1 text-xs tabular-nums"
+                class="rounded-xs px-1 text-xs tabular-nums"
                 :class="state === filter.value ? 'bg-primary/15 text-primary' : 'bg-foreground/8 text-muted-foreground'"
               >
                 {{ formatNumber(filter.count) }}
@@ -529,6 +530,7 @@ async function saveDefaultLibraryAccess() {
       :current-user-id="currentUser?.id"
       :can-delete="canDeleteEditingUser"
       :password-login-enabled="passwordLoginEnabled"
+      :can-manage-api-keys="canManageUserApiKeys"
       @close="closeDrawer"
       @saved="onSaved"
       @request-superuser-change="requestSuperuserChange"

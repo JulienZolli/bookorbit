@@ -1,3 +1,4 @@
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 
@@ -9,9 +10,11 @@ import { PositionConverterService } from '../position-converter/position-convert
 import type { BookmarkAckBookDto, BookmarkExchangeAckDto, BookmarkExchangeBookDto, BookmarkExchangeDto, KoreaderBookmarkDto } from './dto';
 import { KoreaderBookmarkRepository } from './koreader-bookmark.repository';
 import { KoreaderRepository } from './koreader.repository';
+import { exchangeDeviceId } from '../../common/utils/koreader-exchange-device.utils';
 
 const EXCHANGE_EVENT = 'koreader.bookmark_exchange';
 const ACK_EVENT = 'koreader.bookmark_exchange_ack';
+const RESET_EVENT = 'koreader.bookmark_copy_reset';
 
 /** Per-book working set. Dogears are rare, so one bounded page covers a whole book. */
 const BOOKMARKS_PER_BOOK_LIMIT = 500;
@@ -21,6 +24,8 @@ const CONVERSION_BUDGET_PER_REQUEST = 20;
 const TOMBSTONE_RETENTION_DAYS = 90;
 const PURGE_CANDIDATES_PER_REQUEST = 50;
 const TITLE_MAX_LENGTH = 500;
+/** Fewer applied dogears than this are never read as a lost copy, so deleting a book's only one still works. */
+const LOST_COPY_MIN_LINKED = 2;
 
 export interface BookmarkAddEntry {
   serverId: number;
@@ -51,11 +56,14 @@ export interface BookmarkExchangeBookResult {
 export interface BookmarkExchangeResponse {
   results: BookmarkExchangeBookResult[];
   unmatched: string[];
+  /** Matched books whose device copy differs from the library file; see the annotation exchange. */
+  positionIncompatible: string[];
 }
 
 export interface BookmarkExchangeAckResponse {
   results: { hash: string; acked: number }[];
   unmatched: string[];
+  positionIncompatible: string[];
 }
 
 /** The device identity of a bookmark: md5 of `${datetime}|${pos}`, matching the plugin. */
@@ -72,6 +80,7 @@ export class KoreaderBookmarkExchangeService {
     private readonly bookmarkRepo: KoreaderBookmarkRepository,
     private readonly bookmarkSync: BookmarkSyncService,
     private readonly positionConverter: PositionConverterService,
+    private readonly libraryScope: LibraryScopeService,
   ) {}
 
   async exchange(user: RequestUser, dto: BookmarkExchangeDto): Promise<BookmarkExchangeResponse> {
@@ -85,6 +94,7 @@ export class KoreaderBookmarkExchangeService {
       const matches = await this.resolveBooks(user.id, dto.books);
       const results: BookmarkExchangeBookResult[] = [];
       const unmatched: string[] = [];
+      const positionIncompatible: string[] = [];
       let pushedTotal = 0;
 
       for (const book of dto.books) {
@@ -94,7 +104,11 @@ export class KoreaderBookmarkExchangeService {
           unmatched.push(hash);
           continue;
         }
-        const result = await this.exchangeBook(user.id, dto.deviceId, hash, match.bookId, match.bookFileId, book);
+        if (match.progressCompatible === false) {
+          positionIncompatible.push(hash);
+          continue;
+        }
+        const result = await this.exchangeBook(user.id, exchangeDeviceId(dto.deviceId, hash), hash, match.bookId, match.bookFileId, book);
         pushedTotal += result.toApply.add.length + result.toApply.delete.length;
         results.push(result);
       }
@@ -102,9 +116,9 @@ export class KoreaderBookmarkExchangeService {
       await this.purgeExpiredTombstones(user.id);
 
       this.logger.log(
-        `[${EXCHANGE_EVENT}] [end] userId=${user.id} deviceId=${dto.deviceId.slice(0, 8)} durationMs=${Date.now() - startedAtMs} books=${results.length} pushed=${pushedTotal} unmatched=${unmatched.length} - bookmark exchange completed`,
+        `[${EXCHANGE_EVENT}] [end] userId=${user.id} deviceId=${dto.deviceId.slice(0, 8)} durationMs=${Date.now() - startedAtMs} books=${results.length} pushed=${pushedTotal} unmatched=${unmatched.length} positionIncompatible=${positionIncompatible.length} - bookmark exchange completed`,
       );
-      return { results, unmatched };
+      return { results, unmatched, positionIncompatible };
     } catch (error) {
       this.logFailure(EXCHANGE_EVENT, user.id, dto.deviceId, startedAtMs, error);
       throw error;
@@ -117,6 +131,7 @@ export class KoreaderBookmarkExchangeService {
       const matches = await this.resolveBooks(user.id, dto.books);
       const results: { hash: string; acked: number }[] = [];
       const unmatched: string[] = [];
+      const positionIncompatible: string[] = [];
 
       for (const book of dto.books) {
         const hash = book.hash.toLowerCase();
@@ -125,14 +140,18 @@ export class KoreaderBookmarkExchangeService {
           unmatched.push(hash);
           continue;
         }
-        const acked = await this.ackBook(user.id, dto.deviceId, match.bookId, book);
+        if (match.progressCompatible === false) {
+          positionIncompatible.push(hash);
+          continue;
+        }
+        const acked = await this.ackBook(user.id, exchangeDeviceId(dto.deviceId, hash), match.bookId, book);
         results.push({ hash, acked });
       }
 
       this.logger.log(
-        `[${ACK_EVENT}] [end] userId=${user.id} deviceId=${dto.deviceId.slice(0, 8)} durationMs=${Date.now() - startedAtMs} books=${results.length} unmatched=${unmatched.length} - bookmark exchange ack applied`,
+        `[${ACK_EVENT}] [end] userId=${user.id} deviceId=${dto.deviceId.slice(0, 8)} durationMs=${Date.now() - startedAtMs} books=${results.length} unmatched=${unmatched.length} positionIncompatible=${positionIncompatible.length} - bookmark exchange ack applied`,
       );
-      return { results, unmatched };
+      return { results, unmatched, positionIncompatible };
     } catch (error) {
       this.logFailure(ACK_EVENT, user.id, dto.deviceId, startedAtMs, error);
       throw error;
@@ -140,7 +159,7 @@ export class KoreaderBookmarkExchangeService {
   }
 
   private async resolveBooks(userId: number, books: { hash: string }[]) {
-    const accessibleLibraryIds = await this.koreaderRepo.getAccessibleLibraryIds(userId);
+    const accessibleLibraryIds = await this.libraryScope.visibleIdsOrAllForUserId(userId);
     const hashes = [...new Set(books.map((book) => book.hash.toLowerCase()))];
     return this.koreaderRepo.resolveBookFilesByHashes(hashes, accessibleLibraryIds, userId);
   }
@@ -160,12 +179,25 @@ export class KoreaderBookmarkExchangeService {
     bookFileId: number,
     book: BookmarkExchangeBookDto,
   ): Promise<BookmarkExchangeBookResult> {
-    const before = await this.loadWorkingSet(userId, deviceId, bookId);
+    let before = await this.loadWorkingSet(userId, deviceId, bookId);
+
+    // A lost or replaced copy (a re-download) reports none of the dogears it had. Its links
+    // are dropped so every live bookmark is offered again, and nothing is tombstoned.
+    const lostCopy = book.sidecarState === 'new' || (book.keysComplete && book.sidecarState === undefined && this.isLostDeviceCopy(book, before));
+    if (lostCopy) {
+      const liveLinked = before.links.map((link) => link.bookmarkId).filter((bookmarkId) => before.byId.get(bookmarkId)?.deletedAt == null);
+      const dropped = await this.bookmarkRepo.deleteLinks(userId, deviceId, liveLinked);
+      this.logger.log(
+        `[${RESET_EVENT}] [end] userId=${userId} bookId=${bookId} deviceId=${deviceId.slice(0, 8)} reason=${book.sidecarState === 'new' ? 'device' : 'missing_keys'} reoffered=${dropped} - device copy treated as new; nothing deleted`,
+      );
+      if (dropped > 0) before = await this.loadWorkingSet(userId, deviceId, bookId);
+    }
 
     const ingest = await this.ingestDeviceChanges(userId, deviceId, bookId, bookFileId, book.changes, before);
-    const deviceDeleted = book.keysComplete ? await this.applyDeviceDeletions(userId, deviceId, book, before) : 0;
+    const ingested = ingest.mutated ? await this.loadWorkingSet(userId, deviceId, bookId) : before;
+    const deviceDeleted = book.keysComplete && !lostCopy ? await this.applyDeviceDeletions(userId, deviceId, book, ingested) : 0;
 
-    const after = ingest.mutated || deviceDeleted > 0 ? await this.loadWorkingSet(userId, deviceId, bookId) : before;
+    const after = deviceDeleted > 0 ? await this.loadWorkingSet(userId, deviceId, bookId) : ingested;
     const push = await this.buildPushDown(userId, bookFileId, after);
 
     return {
@@ -229,8 +261,17 @@ export class KoreaderBookmarkExchangeService {
       const known = linkByKey.get(key);
       if (known) {
         const bookmark = working.byId.get(known.bookmarkId);
-        // Only the device can rename a dogear, so a differing title is always its edit.
-        if (bookmark && !bookmark.deletedAt && bookmark.title !== title) {
+        if (bookmark && !bookmark.deletedAt && bookmark.bookFileId == null) {
+          const source = await this.positionConverter.xpointerPointToCfi({ bookFileId, pos: change.pos });
+          if (source.cfi === bookmark.cfi) {
+            await this.bookmarkSync.captureSourceFile(userId, bookmark.id, source.cfi!, bookFileId);
+            mutated = true;
+          }
+        }
+        // KOReader does not timestamp dogear note edits. A device title may therefore overwrite
+        // the server only after it has acknowledged the current server version; otherwise its
+        // upload is the stale half of a pending server-to-device rename.
+        if (bookmark && !bookmark.deletedAt && bookmark.title !== title && bookmark.updatedAt <= known.appliedAt) {
           await this.bookmarkSync.applyDeviceEdit(userId, known.bookmarkId, { title, pageno: change.pageno ?? null });
           mutated = true;
         }
@@ -245,6 +286,7 @@ export class KoreaderBookmarkExchangeService {
       }
 
       const landed = await this.bookmarkSync.upsertFromDevice(userId, bookId, {
+        bookFileId,
         cfi: outcome.cfi,
         title,
         devicePos: change.pos,
@@ -293,13 +335,20 @@ export class KoreaderBookmarkExchangeService {
     return tombstoned;
   }
 
+  /** Older plugins cannot say a sidecar is new: a complete key set that keeps none of its live links is read that way. */
+  private isLostDeviceCopy(book: BookmarkExchangeBookDto, working: { links: KoreaderBookmarkLink[]; byId: Map<number, BookmarkRow> }): boolean {
+    const presentKeys = new Set(book.keys.map((entry) => entry.k));
+    const liveLinks = working.links.filter((link) => working.byId.get(link.bookmarkId)?.deletedAt == null);
+    return liveLinks.length >= LOST_COPY_MIN_LINKED && liveLinks.every((link) => !presentKeys.has(link.koreaderKey));
+  }
+
   /** Live bookmarks this device has never seen, plus the tombstones it still holds. */
   private async buildPushDown(
     userId: number,
     bookFileId: number,
     working: { bookmarks: BookmarkRow[]; links: KoreaderBookmarkLink[] },
   ): Promise<{ add: BookmarkAddEntry[]; delete: BookmarkDeleteEntry[]; more: boolean; skippedConversion: number }> {
-    const linkedIds = new Set(working.links.map((link) => link.bookmarkId));
+    const linksByBookmarkId = new Map(working.links.map((link) => [link.bookmarkId, link]));
     const byId = new Map(working.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
 
     const deleteEntries: BookmarkDeleteEntry[] = working.links
@@ -307,7 +356,11 @@ export class KoreaderBookmarkExchangeService {
       .map((link) => ({ serverId: link.bookmarkId, key: link.koreaderKey, datetime: link.deviceDatetime }));
 
     // Audio bookmarks have no device counterpart, and a CFI-less row cannot be placed.
-    const candidates = working.bookmarks.filter((bookmark) => bookmark.deletedAt == null && bookmark.cfi != null && !linkedIds.has(bookmark.id));
+    const candidates = working.bookmarks.filter((bookmark) => {
+      if (bookmark.deletedAt != null || bookmark.cfi == null) return false;
+      const link = linksByBookmarkId.get(bookmark.id);
+      return !link || bookmark.updatedAt > link.appliedAt;
+    });
 
     const add: BookmarkAddEntry[] = [];
     let skippedConversion = 0;
@@ -315,14 +368,22 @@ export class KoreaderBookmarkExchangeService {
 
     for (const bookmark of candidates) {
       if (add.length >= PUSH_DOWN_PAGE) break;
-      let pos = bookmark.devicePos;
+      if (bookmark.bookFileId == null) {
+        skippedConversion += 1;
+        continue;
+      }
+      let pos = bookmark.bookFileId === bookFileId ? bookmark.devicePos : null;
       if (!pos) {
         if (conversionBudget <= 0) {
           skippedConversion += 1;
           continue;
         }
         conversionBudget -= 1;
-        const outcome = await this.positionConverter.cfiPointToXpointer({ bookFileId, cfi: bookmark.cfi! });
+        const outcome = await this.positionConverter.cfiPointToXpointer({
+          bookFileId,
+          cfi: bookmark.cfi!,
+          ...(bookmark.bookFileId != null ? { sourceBookFileId: bookmark.bookFileId } : {}),
+        });
         if (outcome.status === 'failed' || !outcome.pos0) {
           skippedConversion += 1;
           continue;

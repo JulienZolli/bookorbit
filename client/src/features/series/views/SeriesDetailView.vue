@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatNumber } from '@/i18n/formatters'
 import { useRoute, useRouter } from 'vue-router'
@@ -8,14 +8,16 @@ import { toast } from 'vue-sonner'
 
 import type { BookCard, BookDetail } from '@bookorbit/types'
 import VirtualBookGrid from '@/features/book/components/VirtualBookGrid.vue'
+import SingleSortControl from '@/features/book/components/sort-filter/SingleSortControl.vue'
+import LibraryMenuButton from '@/components/browse-header/LibraryMenuButton.vue'
 import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
 import { bookCoverStyle } from '@/features/book/lib/book-cover'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import { useScrollRestoreOnActivate } from '@/features/book/composables/useScrollRestoreOnActivate'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
-import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useBookNavigation } from '@/features/book/composables/useBookNavigation'
 import { useLibraries } from '@/features/library/composables/useLibraries'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { usePageTitle } from '@/composables/usePageTitle'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
@@ -31,6 +33,7 @@ import SeriesGapBanner from '../components/SeriesGapBanner.vue'
 import { fetchSeriesBooks } from '../api/series'
 import { groupSeriesBooksByMedia } from '../composables/useSeriesBookMediaGroups'
 import { useSeriesDetail } from '../composables/useSeriesDetail'
+import type { SeriesBookSort, SortDirection } from '../types/series'
 import { useCoverStack, MAX_VISIBLE as MAX_STACK_VISIBLE } from '../composables/useCoverStack'
 import {
   PORTRAIT_STACK_FRAME_ASPECT_RATIO,
@@ -48,18 +51,20 @@ const route = useRoute()
 const router = useRouter()
 const mainRef = ref<HTMLElement | null>(null)
 useScrollRestoreOnActivate(mainRef)
-const { hasPermission } = usePermissions()
 const { setBookContext } = useBookNavigation()
 const { coverUrl } = useCoverVersions()
 
 const { portraitCoverSize, gridGap } = useDisplaySettings()
 const { libraries, fetchLibraries } = useLibraries()
 
-const seriesId = computed(() => {
-  const raw = route.params.seriesId
+function parseSeriesId(raw: unknown): number | null {
   const value = typeof raw === 'string' ? Number(raw) : NaN
   return Number.isInteger(value) && value > 0 ? value : null
-})
+}
+
+// The shell keeps this view alive per path, so the id is fixed for the instance. Following the shared
+// route would reset the list every time the reader leaves and comes back.
+const seriesId = shallowRef(parseSeriesId(route.params.seriesId))
 
 const {
   seriesInfo,
@@ -103,10 +108,16 @@ const leadBook = ref<{
 let observer: IntersectionObserver | null = null
 let leadBookRequestToken = 0
 
-const canEditMetadata = computed(() => hasPermission('library_edit_metadata'))
+const { hasLibraryPermission, hasPermissionInAnyLibrary } = useLibraryPermissions()
+function canEditBookMetadata(book: BookCard): boolean {
+  return hasLibraryPermission('library_edit_metadata', book.libraryId, 'editor')
+}
+const canEditMetadata = computed(() => hasPermissionInAnyLibrary('library_edit_metadata', 'editor'))
 const safeLeadDescription = useSafeHtml(() => leadBook.value?.description)
 const visibleSeriesAuthors = computed(() => (seriesInfo.value?.authors ?? []).slice(0, 5))
 const hiddenSeriesAuthorsCount = computed(() => Math.max(0, (seriesInfo.value?.authors.length ?? 0) - visibleSeriesAuthors.value.length))
+const ownedVolumeCount = computed(() => seriesInfo.value?.ownedVolumeCount ?? seriesInfo.value?.bookCount ?? 0)
+const readVolumeCount = computed(() => seriesInfo.value?.readVolumeCount ?? seriesInfo.value?.readCount ?? 0)
 const addToCollectionOpen = ref(false)
 const addToCollectionBookId = ref<number | null>(null)
 const leadFallbackStyle = computed(() => {
@@ -220,9 +231,21 @@ function goBack() {
   void router.push({ name: 'series' })
 }
 
-function onLibraryFilterChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  libraryId.value = value ? Number(value) : null
+const BOOK_SORT_FIELDS: SeriesBookSort[] = ['seriesIndex', 'title', 'addedAt']
+
+const bookSortLabels = computed<Record<SeriesBookSort, string>>(() => ({
+  seriesIndex: t('series.detail.sort.seriesOrder'),
+  title: t('series.detail.sort.title'),
+  addedAt: t('series.detail.sort.recentlyAdded'),
+}))
+
+function handleLibraryChange(value: number | null) {
+  libraryId.value = value
+}
+
+function handleBookSort(field: SeriesBookSort, dir: SortDirection) {
+  sort.value = field
+  order.value = dir
 }
 
 function handleLeadCoverError(bookId: number) {
@@ -378,7 +401,7 @@ async function editSeriesMetadata() {
       return
     }
 
-    const ids = books.value.map((book) => book.id)
+    const ids = books.value.filter(canEditBookMetadata).map((book) => book.id)
     if (ids.length === 0) {
       toast.error(t('series.detail.noBooksToEdit'))
       return
@@ -412,6 +435,17 @@ onUnmounted(() => {
   observer?.disconnect()
 })
 
+// Anything that remounts the books section replaces the sentinel, and the observer has to follow it.
+watch(
+  sentinel,
+  (element, previous) => {
+    if (!observer) return
+    if (previous) observer.unobserve(previous)
+    if (element) observer.observe(element)
+  },
+  { flush: 'post' },
+)
+
 watch(
   [books, total],
   ([newBooks, newTotal]) => {
@@ -426,12 +460,6 @@ watch(
 
 watch([sort, order, libraryId], () => {
   void loadBooks({ reset: true, keepPreviousData: true })
-})
-
-watch(seriesId, (newSeriesId) => {
-  if (newSeriesId !== null) {
-    void loadBooks({ reset: true })
-  }
 })
 
 watch(
@@ -460,9 +488,12 @@ defineOptions({ name: 'SeriesDetailView' })
 <template>
   <div class="flex h-full flex-col">
     <main ref="mainRef" class="flex-1 min-h-0 overflow-y-auto py-2">
-      <div class="mb-4">
-        <button class="flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground" @click="goBack">
-          <ChevronLeft :size="16" />
+      <div class="mb-3 flex min-h-11 items-center px-1">
+        <button
+          class="inline-flex h-8 items-center gap-1 rounded-md border border-input px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          @click="goBack"
+        >
+          <ChevronLeft :size="14" />
           {{ t('common.back') }}
         </button>
       </div>
@@ -532,7 +563,7 @@ defineOptions({ name: 'SeriesDetailView' })
                 <div class="min-w-0">
                   <h1 class="text-xl font-bold text-foreground">{{ seriesInfo.name }}</h1>
                   <div class="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                    <span>{{ t('series.detail.bookCount', { count: seriesInfo.bookCount }) }}</span>
+                    <span>{{ t('series.card.volumeCount', { count: ownedVolumeCount }) }}</span>
                     <span v-if="visibleSeriesAuthors.length > 0">
                       {{ t('series.detail.byAuthors', { authors: visibleSeriesAuthors.join(', ') }) }}
                       <span v-if="hiddenSeriesAuthorsCount > 0"> {{ t('series.detail.moreAuthors', { count: hiddenSeriesAuthorsCount }) }}</span>
@@ -552,10 +583,10 @@ defineOptions({ name: 'SeriesDetailView' })
               </div>
 
               <div class="mt-3 grid max-w-md gap-3 sm:grid-cols-2">
-                <SeriesCompletionBar :read-count="seriesInfo.readCount" :total-count="seriesInfo.bookCount" />
+                <SeriesCompletionBar :read-count="readVolumeCount" :total-count="ownedVolumeCount" />
                 <SeriesOwnershipBar
                   v-if="seriesInfo.expectedBookCount !== null"
-                  :owned-count="seriesInfo.bookCount"
+                  :owned-count="ownedVolumeCount"
                   :expected-count="seriesInfo.expectedBookCount"
                 />
               </div>
@@ -637,31 +668,23 @@ defineOptions({ name: 'SeriesDetailView' })
                 {{ t('series.detail.booksHeading') }}
               </h2>
               <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                <select
-                  v-model="sort"
-                  class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-                >
-                  <option value="seriesIndex">{{ t('series.detail.sort.seriesOrder') }}</option>
-                  <option value="title">{{ t('series.detail.sort.title') }}</option>
-                  <option value="addedAt">{{ t('series.detail.sort.recentlyAdded') }}</option>
-                </select>
-
-                <select
-                  v-model="order"
-                  class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-                >
-                  <option value="asc">{{ t('series.detail.order.ascending') }}</option>
-                  <option value="desc">{{ t('series.detail.order.descending') }}</option>
-                </select>
-
-                <select
-                  :value="libraryId ?? ''"
-                  class="h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-sm outline-none transition-colors focus:border-primary/60 sm:w-auto"
-                  @change="onLibraryFilterChange"
-                >
-                  <option value="">{{ t('series.detail.allLibraries') }}</option>
-                  <option v-for="library in libraries" :key="library.id" :value="library.id">{{ library.name }}</option>
-                </select>
+                <div class="flex flex-wrap items-center gap-1">
+                  <SingleSortControl
+                    :field="sort"
+                    :dir="order"
+                    :fields="BOOK_SORT_FIELDS"
+                    :labels="bookSortLabels"
+                    default-field="seriesIndex"
+                    default-dir="asc"
+                    @change="handleBookSort"
+                  />
+                  <LibraryMenuButton
+                    :library-id="libraryId"
+                    :libraries="libraries"
+                    :all-label="t('series.detail.allLibraries')"
+                    @update:library-id="handleLibraryChange"
+                  />
+                </div>
 
                 <div class="flex h-8 w-full items-center justify-between gap-2 rounded-md border border-input px-2.5 text-sm sm:w-auto">
                   <span class="whitespace-nowrap text-muted-foreground">{{ t('series.detail.groupByMedia') }}</span>
@@ -694,6 +717,7 @@ defineOptions({ name: 'SeriesDetailView' })
                   :grid-gap="gridGap"
                   :square-cover-scale="SERIES_SQUARE_COVER_SCALE"
                   :virtualized="false"
+                  :media-kind="group.mediaKind"
                   @action="handleBookAction"
                   @update:book="handleBookUpdate"
                 />
@@ -712,7 +736,7 @@ defineOptions({ name: 'SeriesDetailView' })
             />
           </template>
 
-          <div ref="sentinel" class="mt-4 flex h-8 items-center justify-center">
+          <div ref="sentinel" data-testid="series-books-sentinel" class="mt-4 flex h-8 items-center justify-center">
             <span v-if="loadingBooks" class="text-xs text-muted-foreground">{{ t('common.loading') }}</span>
             <span v-else-if="!hasMore && books.length > 0" class="text-xs text-muted-foreground">
               {{ t('series.detail.allBooksLoaded', { count: formatNumber(total) }) }}

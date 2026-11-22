@@ -61,24 +61,38 @@ const MIN_LEVENSHTEIN_SIMILARITY = 0.6;
 const MIN_TOKEN_OVERLAP_RATIO = 0.5;
 
 /**
- * Folds a title to its comparable form: decomposed, stripped of nonspacing marks so that "Sōseki"
- * and "Soseki" agree, lowercased, and reduced to letters and digits of any script.
+ * Marks that are optional in practice: accents on Latin, Greek and Cyrillic letters, and Arabic and
+ * Hebrew vowel pointing. Every other script keeps its marks, since Devanagari writes vowels as marks
+ * and kana voicing tells two words apart.
+ */
+const OPTIONAL_MARKS = /([\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Arabic}\p{Script=Hebrew}])\p{Mn}+/gu;
+
+/** Decomposes, drops optional marks so that "Sōseki" and "Soseki" agree, and lowercases. */
+export function foldTextForComparison(value: string): string {
+  return value.normalize('NFKD').replace(OPTIONAL_MARKS, '$1').toLowerCase();
+}
+
+/**
+ * Folds a title to its comparable form: letters, marks and digits of any script, separated by
+ * single spaces.
  *
  * Restricting this to `[a-z0-9]` would empty every title written in a non-Latin script, which makes
  * two providers reporting the identical Japanese or Russian title look like different books.
- * Spacing combining marks are kept, since scripts such as Devanagari carry vowels in them.
  */
 export function normalizeTitleText(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/\p{Mn}+/gu, '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+  return foldTextForComparison(value)
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim();
 }
 
 export function tokenizeTitleText(value: string): string[] {
-  return value.split(' ').filter((token) => token.length > 1);
+  return value.split(' ').filter((token) => token.length > 1 || /^\p{N}$/u.test(token));
+}
+
+// A lone digit tells volumes apart (symmetricTitleSimilarity), but in a fuzzy relevance match it dilutes the
+// overlap ratio of a candidate that does not spell the volume number, pushing a right book under the floor.
+function relevanceTokens(value: string): string[] {
+  return tokenizeTitleText(value).filter((token) => token.length > 1);
 }
 
 /**
@@ -134,8 +148,8 @@ export function scoreTitleMatch(query: string, candidate: string): number {
     return TITLE_MATCH_SCORES.substring;
   }
 
-  const queryTokens = significantTokens(tokenizeTitleText(normalizedQuery));
-  const candidateTokens = new Set(tokenizeTitleText(normalizedCandidate));
+  const queryTokens = significantTokens(relevanceTokens(normalizedQuery));
+  const candidateTokens = new Set(relevanceTokens(normalizedCandidate));
   const overlapRatio = queryTokens.length > 0 ? queryTokens.filter((token) => candidateTokens.has(token)).length / queryTokens.length : 0;
   // A minority of the query's meaningful words in common is not evidence of the same book;
   // "The Way of Kings" and "The Way We Were" share exactly one.

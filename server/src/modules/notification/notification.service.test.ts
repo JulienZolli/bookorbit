@@ -15,7 +15,6 @@ describe('NotificationService', () => {
     deleteAllForUser: ReturnType<typeof vi.fn>;
     deleteOlderThan: ReturnType<typeof vi.fn>;
     findUserIdsWithLibraryAccess: ReturnType<typeof vi.fn>;
-    findUserIdsWithLibraryPermission: ReturnType<typeof vi.fn>;
     findUserIdsWithPermission: ReturnType<typeof vi.fn>;
     findAllActiveUserIds: ReturnType<typeof vi.fn>;
     findUserSettings: ReturnType<typeof vi.fn>;
@@ -42,7 +41,6 @@ describe('NotificationService', () => {
       deleteAllForUser: vi.fn(),
       deleteOlderThan: vi.fn(),
       findUserIdsWithLibraryAccess: vi.fn(),
-      findUserIdsWithLibraryPermission: vi.fn(),
       findUserIdsWithPermission: vi.fn(),
       findAllActiveUserIds: vi.fn(),
       findUserSettings: vi.fn(),
@@ -88,16 +86,20 @@ describe('NotificationService', () => {
   // ---------- notify() ----------
 
   describe('notify()', () => {
-    it.each([NotificationType.PodcastEpisodePublished, NotificationType.PodcastFeedUnhealthy, NotificationType.PodcastDownloadFailed])(
-      'ignores disabled podcast notification type %s',
-      async (type) => {
-        await service.notify(makePayload({ kind: 'all' }, { type }));
+    it('does not dispatch request notifications to users who hide Requests', async () => {
+      repo.findUserSettings.mockResolvedValue(
+        new Map([
+          [1, { showBookRequests: false }],
+          [2, {}],
+        ]),
+      );
+      repo.insertOrCollapse.mockResolvedValue([makeInserted(2, { type: NotificationType.BookRequestSubmitted })]);
 
-        expect(repo.findAllActiveUserIds).not.toHaveBeenCalled();
-        expect(repo.insertOrCollapse).not.toHaveBeenCalled();
-        expect(gateway.emitNew).not.toHaveBeenCalled();
-      },
-    );
+      await service.notify(makePayload({ kind: 'users', userIds: [1, 2] }, { type: NotificationType.BookRequestSubmitted }));
+
+      expect(repo.insertOrCollapse).toHaveBeenCalledWith([expect.objectContaining({ userId: 2 })]);
+      expect(gateway.emitNew).toHaveBeenCalledTimes(1);
+    });
 
     it('resolves user IDs for "user" scope', async () => {
       repo.findUserSettings.mockResolvedValue(new Map());
@@ -139,16 +141,6 @@ describe('NotificationService', () => {
       await service.notify(makePayload({ kind: 'permission', permission: Permission.NotificationAccess }));
 
       expect(repo.findUserIdsWithPermission).toHaveBeenCalledWith(Permission.NotificationAccess);
-    });
-
-    it('resolves user IDs that have both library access and the required permission', async () => {
-      repo.findUserIdsWithLibraryPermission.mockResolvedValue([30]);
-      repo.findUserSettings.mockResolvedValue(new Map());
-      repo.insertOrCollapse.mockResolvedValue([makeInserted(30)]);
-
-      await service.notify(makePayload({ kind: 'library_permission', libraryId: 5, permission: Permission.PodcastManageFeeds }));
-
-      expect(repo.findUserIdsWithLibraryPermission).toHaveBeenCalledWith(5, Permission.PodcastManageFeeds);
     });
 
     it('resolves user IDs for "all" scope', async () => {

@@ -139,6 +139,9 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     try {
       const results = await this.processor.reconcileMissingBooks(libraryIds);
       for (const result of results) {
+        if (result.type === 'book-restored' || result.type === 'book-moved' || result.type === 'book-transferred') {
+          this.scannerService.reconcileCoverSlotsAsync(result.bookIds);
+        }
         if (result.type === 'book-missing') {
           this.scannerService.bufferBookMissingEvent(result.libraryId, result.bookIds);
           this.scannerService.bufferBooksUnavailableNotification(result.libraryId, result.bookIds);
@@ -475,6 +478,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
   }
 
   private async process(type: EventType, path: string, libraryId: number): Promise<void> {
+    // A folder of another library nested inside this one is that library's to handle.
+    if (!(await this.scannerService.ownsPath(libraryId, path))) return;
     let result: FileEventResult;
     if (type === 'create') {
       result = await this.processor.handleCreate(path, libraryId);
@@ -495,6 +500,10 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       }
     }
 
+    if (result.type === 'book-restored' || result.type === 'book-moved' || result.type === 'book-transferred') {
+      this.scannerService.reconcileCoverSlotsAsync(result.bookIds);
+    }
+
     if (result.type === 'book-missing') {
       this.scannerService.bufferBookMissingEvent(result.libraryId, result.bookIds);
       this.scannerService.bufferBooksUnavailableNotification(result.libraryId, result.bookIds);
@@ -504,6 +513,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.scannerService.bufferBooksRestoredNotification(result.libraryId, result.bookIds);
     } else if (result.type === 'book-moved') {
       this.gateway.emitBookMoved({ libraryId: result.libraryId, bookIds: result.bookIds });
+      // The new path is already recorded, so the folder scan below cannot see the move regex rules read.
+      this.scannerService.refreshRegexMetadataAfterMoveAsync(result.bookIds);
       // A move updates the file's path and may consolidate virtual-sibling books.
       // Schedule a folder scan so upsertBook can drain any remaining siblings.
       if (type === 'create') this.scheduleFolderScan(path, libraryId);

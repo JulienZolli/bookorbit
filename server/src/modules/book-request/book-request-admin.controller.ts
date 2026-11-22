@@ -11,12 +11,17 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import { RouteConfig } from '@nestjs/platform-fastify';
+import type { FastifyReply } from 'fastify';
+import { createReadStream } from 'fs';
 import { AuditAction, AuditResource, Permission } from '@bookorbit/types';
 
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { RequestUser } from '../../common/types/request-user';
 import { BookRequestService } from './book-request.service';
 import { DownloadClientConfigService } from './download-clients/download-client-config.service';
@@ -26,7 +31,7 @@ import { RequestSeedService } from './fulfillment/request-seed.service';
 import { RequestVerificationService } from './fulfillment/request-verification.service';
 import { BulkBookRequestsDto, BulkRejectBookRequestsDto } from './dto/bulk-book-requests.dto';
 import { DecideBookRequestDto } from './dto/decide-book-request.dto';
-import { GrabBookRequestDto } from './dto/grab-book-request.dto';
+import { GRAB_BODY_LIMIT_BYTES, GrabBookRequestDto } from './dto/grab-book-request.dto';
 import { InspectBookRequestReleaseDto } from './dto/inspect-book-request-release.dto';
 import { FulfillBookRequestDto } from './dto/fulfill-book-request.dto';
 import { ListAllBookRequestsDto } from './dto/list-book-requests.dto';
@@ -54,6 +59,18 @@ export class BookRequestAdminController {
   @Get()
   listAll(@Query() query: ListAllBookRequestsDto, @CurrentUser() user: RequestUser) {
     return this.service.listAll(query, user);
+  }
+
+  /** The approver queue's per-view row counts, under the same filters `listAll` takes. */
+  @Get('view-counts')
+  getViewCounts(@Query() query: ListAllBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.getAllViewCounts(query, user);
+  }
+
+  /** Every request the approver queue's filters match, in list order and bounded. */
+  @Get('selection')
+  getSelection(@Query() query: ListAllBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.selectAll(query, user);
   }
 
   @Get('requesters')
@@ -157,6 +174,25 @@ export class BookRequestAdminController {
   }
 
   /**
+   * Bulk deletion under the same rules as deleting one row, including which files go with it.
+   * POST rather than DELETE because the selection is a body, and `DELETE :id` never collides.
+   */
+  @Post('delete')
+  @HttpCode(HttpStatus.OK)
+  @Auditable({
+    action: AuditAction.BookRequestDelete,
+    resource: AuditResource.BookRequest,
+    getMeta: (_req, body) => {
+      const result = body as { removed?: unknown[]; failed?: unknown[] } | null;
+      return { deleted: result?.removed?.length ?? 0, failed: result?.failed?.length ?? 0 };
+    },
+    description: 'Deleted a selection of book requests',
+  })
+  removeMany(@Body() dto: BulkBookRequestsDto, @CurrentUser() user: RequestUser) {
+    return this.service.removeMany(dto, user);
+  }
+
+  /**
    * The escape hatch for a settled row nobody wants in the history any more. Everyone else gets
    * dismissal, which hides a request without taking the record of it away from the other people
    * who asked for the same book.
@@ -169,8 +205,12 @@ export class BookRequestAdminController {
     getResourceId: (req) => Number(req.params.id),
     description: 'Deleted a book request',
   })
-  remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    return this.service.remove(id, user);
+  remove(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('deleteFiles', new DefaultValuePipe(false), ParseBoolPipe) deleteFiles: boolean,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.service.remove(id, user, deleteFiles);
   }
 
   @Post(':id/fulfill')
@@ -193,6 +233,14 @@ export class BookRequestAdminController {
   @Get(':id/review')
   getReview(@Param('id', ParseIntPipe) id: number) {
     return this.verification.getReview(id);
+  }
+
+  @Get(':id/review/cover')
+  async getReviewCover(@Param('id', ParseIntPipe) id: number, @Res() reply: FastifyReply) {
+    const coverPath = await this.verification.getReviewCoverPath(id);
+    reply.header('Content-Type', imageContentTypeFromPath(coverPath));
+    reply.header('Cache-Control', 'private, no-cache');
+    return reply.send(createReadStream(coverPath));
   }
 
   /** The approver disagrees with the score. Files the held import exactly as a pass would have. */
@@ -232,6 +280,7 @@ export class BookRequestAdminController {
    * .torrent by hand. All three go down the same pipeline from here.
    */
   @Post(':id/grab')
+  @RouteConfig({ bodyLimit: GRAB_BODY_LIMIT_BYTES })
   @HttpCode(HttpStatus.OK)
   @Auditable({
     action: AuditAction.BookRequestGrab,

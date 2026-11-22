@@ -427,6 +427,7 @@ describe('metadata format extractors', () => {
         publishedYear: 2014,
         authors: [],
         genres: [],
+        tags: [],
         comicvineId: null,
       }),
     );
@@ -454,11 +455,27 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         title: 'Batman',
         genres: ['Comics'],
+        tags: ['Superhero'],
         ranobedbId: 'comic-ranobe',
         comicvineId: '140529',
         comicMetadata: { issueNumber: '55', volumeName: 'Batman' },
       }),
     );
+  });
+
+  it('comic extractor keeps Tags as tags and never promotes them to genres', async () => {
+    mockExtractCbzMetadata.mockResolvedValue({
+      title: 'Ninja Scroll',
+      authors: [],
+      genres: [],
+      tags: ['ninja', 'school life'],
+    } as any);
+    mockExtractCbzCover.mockResolvedValue(null);
+
+    const result = await new ComicFormatExtractor('cbz').extract('/books/ninja.cbz');
+
+    expect(result?.genres).toEqual([]);
+    expect(result?.tags).toEqual(['ninja', 'school life']);
   });
 
   it('comic extractor uses CBR reader when a CBZ file is actually a RAR archive', async () => {
@@ -502,8 +519,17 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         publishedYear: 1992,
         cover: null,
+        isbn13: '9780553380958',
       }),
     );
+  });
+
+  it('puts a formatted MOBI ISBN-10 in isbn10', async () => {
+    mockParseMobiFile.mockResolvedValue({ title: 'Book', isbn: '0-9752298-0-x', authors: [], tags: [] } as never);
+    mockExtractMobiCover.mockResolvedValue(null);
+    const result = await new MobiFormatExtractor().extract('/books/book.mobi');
+    expect(result?.isbn10).toBe('097522980X');
+    expect(result?.isbn13).toBeUndefined();
   });
 
   it('pdf extractor returns null for unparseable PDFs', async () => {
@@ -596,6 +622,38 @@ describe('metadata format extractors', () => {
         cover: Buffer.from('cover'),
       }),
     );
+  });
+
+  // Applying path rules to a whole library reads only text fields; covers there are wasted work.
+  it('every extractor skips the cover when told to', async () => {
+    mockExtractEpubMetadata.mockResolvedValue(null);
+    mockParseMobiFile.mockResolvedValue(null);
+    mockParseFb2File.mockResolvedValue(null);
+    mockParsePdfFile.mockResolvedValue(null);
+    mockExtractAudioMetadata.mockResolvedValue(null);
+    mockReadFile.mockResolvedValueOnce(
+      `
+        <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>No Cover Read</dc:title></metadata>
+          <guide><reference type="cover" href="cover.jpg"/></guide>
+        </package>
+      ` as any,
+    );
+
+    await new EpubFormatExtractor().extract('/books/a.epub', { cover: false });
+    await new MobiFormatExtractor().extract('/books/a.mobi', { cover: false });
+    await new Fb2FormatExtractor().extract('/books/a.fb2', { cover: false });
+    await new PdfFormatExtractor({ extractCover: true }).extract('/books/a.pdf', { cover: false });
+    await new AudioFormatExtractor().extract('/books/a.m4b', { cover: false });
+    const opf = await new OpfFormatExtractor().extract('/books/metadata.opf', { cover: false });
+
+    expect(mockExtractEpubCover).not.toHaveBeenCalled();
+    expect(mockExtractMobiCover).not.toHaveBeenCalled();
+    expect(mockExtractFb2Cover).not.toHaveBeenCalled();
+    expect(mockParsePdfFile).toHaveBeenCalledWith('/books/a.pdf', expect.objectContaining({ extractCover: false }));
+    expect(mockExtractAudioMetadata).toHaveBeenCalledWith('/books/a.m4b', { cover: false });
+    expect(opf).toEqual(expect.objectContaining({ title: 'No Cover Read', cover: null }));
+    expect(mockReadFile).toHaveBeenCalledTimes(1);
   });
 
   // Persisting an unreadable file as empty metadata would wipe whatever the book already had.

@@ -5,25 +5,29 @@ import {
   Bell,
   BookMarked,
   BookOpen,
+  BrainCircuit,
   Database,
+  Waypoints,
   DownloadCloud,
+  EyeOff,
   FileText,
   Filter,
   Folder,
   Globe,
   Headphones,
   Highlighter,
+  History,
   Image,
   KeyRound,
   LayoutGrid,
   Library,
   LibraryBig,
   Link2,
+  ListChecks,
   Lock,
   Mail,
   Palette,
   PanelBottom,
-  Podcast,
   Rss,
   ScrollText,
   Server,
@@ -43,12 +47,13 @@ import {
   Wrench,
   Zap,
 } from '@lucide/vue'
-import { APP_FEATURES, Permission } from '@bookorbit/types'
+import { Permission } from '@bookorbit/types'
 
 export interface SettingsNavContext {
   isSuperuser: boolean
   permissions: readonly string[]
   isDemoRestricted: boolean
+  showBookRequests?: boolean
 }
 
 /** Live signals the rail renders beside a row. Resolved by the nav, not stored in this file. */
@@ -58,6 +63,8 @@ export interface SettingsNavItem {
   id: string
   routeName: string
   labelKey: string
+  /** The page heading, when the short nav label would not say what the page is on its own. */
+  titleKey?: string
   descriptionKey?: string
   icon: Component
   /** Extra English search terms so the rail search finds a page by concept, not just by title. */
@@ -144,6 +151,14 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             keywords: 'behaviour animation sorting default view',
           },
           {
+            id: 'appearance-library-visibility',
+            routeName: 'settings-appearance-library-visibility',
+            labelKey: 'settings.appearance.tabs.library-visibility',
+            descriptionKey: 'settings.nav.descriptions.appearanceLibraryVisibility',
+            icon: EyeOff,
+            keywords: 'hide library hidden continue reading shelves series stats statistics year in review goal sync',
+          },
+          {
             id: 'appearance-language',
             routeName: 'settings-appearance-language',
             labelKey: 'settings.appearance.tabs.language',
@@ -212,22 +227,12 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             id: 'tts',
             routeName: 'settings-tts',
             labelKey: 'settings.common.nav.tts',
+            descriptionKey: 'settings.nav.descriptions.readerTts',
             icon: AudioLines,
             keywords: 'tts text to speech read aloud voice narration speed',
           },
         ],
       },
-      ...(APP_FEATURES.podcasts
-        ? [
-            {
-              id: 'podcasts',
-              routeName: 'settings-podcasts',
-              labelKey: 'settings.common.nav.podcasts',
-              icon: Podcast,
-              keywords: 'podcast show episode feed download playback queue',
-            },
-          ]
-        : []),
       {
         id: 'notifications',
         routeName: 'settings-notifications',
@@ -252,6 +257,15 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
         descriptionKey: 'settings.nav.descriptions.restrictions',
         icon: Shield,
         keywords: 'restrict age rating mature hide content filter',
+      },
+      {
+        id: 'api-keys',
+        routeName: 'settings-account-api-keys',
+        labelKey: 'settings.account.tabs.apiKeys',
+        descriptionKey: 'settings.nav.descriptions.apiKeys',
+        icon: KeyRound,
+        keywords: 'api key token integration automation script developer',
+        isVisible: anyPermission(Permission.ApiKeys),
       },
     ],
   },
@@ -317,6 +331,7 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             id: 'metadata-auto-fetch',
             routeName: 'settings-metadata-auto-fetch',
             labelKey: 'settings.metadata.tabs.auto-fetch',
+            titleKey: 'titles.metadata.auto-fetch',
             descriptionKey: 'settings.metadata.tabSubtitles.auto-fetch',
             icon: Zap,
             keywords: 'auto fetch schedule missing fields import books conditions',
@@ -332,6 +347,15 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             isVisible: anyPermission('manage_metadata_config'),
           },
           {
+            id: 'metadata-search-cache',
+            routeName: 'settings-metadata-search-cache',
+            labelKey: 'settings.metadata.tabs.search-cache',
+            descriptionKey: 'settings.metadata.tabSubtitles.search-cache',
+            icon: History,
+            keywords: 'cache saved search results provider ttl expiry offline fallback storage clear',
+            isVisible: anyPermission(Permission.ManageMetadataConfig),
+          },
+          {
             id: 'metadata-genre-blocklist',
             routeName: 'settings-metadata-genre-blocklist',
             labelKey: 'settings.metadata.tabs.genre-blocklist',
@@ -339,6 +363,14 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             icon: Filter,
             keywords: 'genre tag blocklist exclude ignore',
             isVisible: anyPermission('manage_metadata_config'),
+          },
+          {
+            id: 'metadata-reminders',
+            routeName: 'settings-metadata-reminders',
+            labelKey: 'metadataReminders.title',
+            descriptionKey: 'metadataReminders.navDescription',
+            icon: ListChecks,
+            keywords: 'missing empty field reminder isbn tags personal preferences completeness',
           },
         ],
       },
@@ -487,7 +519,25 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
             keywords: 'oidc sso single sign on auth provider claims',
             isVisible: anyPermission('manage_app_settings'),
           },
+          {
+            id: 'admin-api-keys',
+            routeName: 'settings-admin-api-keys',
+            labelKey: 'settings.admin.tabs.api-keys',
+            descriptionKey: 'settings.nav.descriptions.adminApiKeys',
+            icon: KeyRound,
+            keywords: 'api key token integration automation lifetime expiry disable',
+            isVisible: anyPermission(Permission.ManageAppSettings),
+          },
         ],
+      },
+      {
+        id: 'setup',
+        routeName: 'settings-admin-setup',
+        labelKey: 'setupOverview.title',
+        descriptionKey: 'setupOverview.navDescription',
+        icon: Waypoints,
+        keywords: 'setup overview wiring flow map how it works dock requests metadata ai delivery',
+        isVisible: anyPermission(Permission.ManageAppSettings),
       },
       {
         id: 'requests',
@@ -496,23 +546,33 @@ export const SETTINGS_NAV: readonly SettingsNavGroup[] = [
         descriptionKey: 'settings.nav.descriptions.requests',
         icon: DownloadCloud,
         keywords: 'request download client qbittorrent torrent magnet path mapping hardlink',
-        isVisible: anyPermission(Permission.ManageAppSettings),
+        isVisible: (context) => context.showBookRequests !== false && anyPermission(Permission.ManageAppSettings)(context),
       },
       {
         id: 'admin-tts',
         routeName: 'settings-admin-tts',
         labelKey: 'settings.admin.tabs.tts',
+        descriptionKey: 'settings.nav.descriptions.adminTts',
         icon: Speech,
         keywords: 'tts text to speech provider voice engine openai kokoro',
+        isVisible: anyPermission('manage_app_settings'),
+      },
+      {
+        id: 'admin-ai',
+        routeName: 'settings-admin-ai',
+        labelKey: 'settings.admin.tabs.ai',
+        descriptionKey: 'settings.nav.descriptions.adminAi',
+        icon: BrainCircuit,
+        keywords: 'ai llm model provider openai anthropic gemini openrouter ollama budget story guides constellations',
         isVisible: anyPermission('manage_app_settings'),
       },
       {
         id: 'book-dock',
         routeName: 'settings-admin-book-dock',
         labelKey: 'settings.system.tabs.book-dock',
-        descriptionKey: 'settings.nav.descriptions.bookDock',
+        descriptionKey: 'settings.nav.descriptions.bookDockIntake',
         icon: PanelBottom,
-        keywords: 'dock quick action book page toolbar',
+        keywords: 'dock drop folder upload import incoming inbox metadata fetch auto finalize file',
         isVisible: anyPermission(Permission.ManageBookDock),
       },
       {
@@ -555,6 +615,36 @@ export function visibleSettingsNav(context: SettingsNavContext): SettingsNavGrou
     ...group,
     items: group.items.map((item) => visibleItem(item, context)).filter((item): item is SettingsNavItem => item !== null),
   })).filter((group) => group.items.length > 0)
+}
+
+export interface SettingsNavSearchHit {
+  item: SettingsNavItem
+  group: SettingsNavGroup
+  rank: number
+}
+
+/**
+ * Matches every term against a page's label, description, keywords and group, so "sync" finds
+ * Kobo through its keywords. Leaf destinations only: a parent with children is never a target.
+ */
+export function searchSettingsNav(groups: readonly SettingsNavGroup[], query: string, translate: (key: string) => string): SettingsNavSearchHit[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return []
+  const leaves = groups.flatMap((group) =>
+    group.items.flatMap((item) => (item.children?.length ? item.children.map((child) => ({ item: child, group })) : [{ item, group }])),
+  )
+  return leaves
+    .map(({ item, group }) => {
+      const description = item.descriptionKey ? translate(item.descriptionKey) : ''
+      const haystack = `${translate(item.labelKey)} ${description} ${item.keywords ?? ''} ${translate(group.labelKey)}`.toLowerCase()
+      if (!terms.every((term) => haystack.includes(term))) return null
+      const label = translate(item.labelKey).toLowerCase()
+      const lead = terms[0] ?? ''
+      const rank = label.startsWith(lead) ? 0 : label.includes(lead) ? 1 : 2
+      return { item, group, rank }
+    })
+    .filter((hit): hit is SettingsNavSearchHit => hit !== null)
+    .sort((a, b) => a.rank - b.rank)
 }
 
 export interface SettingsNavMatch {

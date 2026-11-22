@@ -1,7 +1,9 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { dirname } from 'path';
 
 import type { BulkRenamePreviewItem, BulkRenamePreviewPage, BulkRenameProgressEvent, BulkRenameStatus } from '@bookorbit/types';
 import { NotificationType } from '@bookorbit/types';
+import { LibraryOperationGate, type LibraryOperationRelease } from '../../common/services/library-operation-gate.service';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { NotificationService } from '../notification/notification.service';
@@ -10,7 +12,7 @@ import { FileRenameRepository } from '../file-write/file-rename.repository';
 import { FileWatcherService } from '../scanner/file-watcher.service';
 import type { BulkRenameBookData } from '../file-write/bulk-rename.repository';
 import { BulkRenameRepository } from '../file-write/bulk-rename.repository';
-import { findSiblingOccupiedTarget, resolveBookFileTargets } from '../file-write/book-file-targets';
+import { findSiblingOccupiedTarget, isSameWork, resolveBookFileTargets, type WorkIdentity } from '../file-write/book-file-targets';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -42,7 +44,6 @@ interface BulkRenameSummary {
 export class BulkRenameService {
   private readonly logger = new Logger(BulkRenameService.name);
   private readonly previewCache = new Map<number, CachedPreview>();
-  private readonly runningLibraries = new Set<number>();
 
   constructor(
     private readonly bulkRenameRepo: BulkRenameRepository,
@@ -51,6 +52,7 @@ export class BulkRenameService {
     private readonly appSettings: AppSettingsService,
     private readonly notificationService: NotificationService,
     private readonly fileWatcherService: FileWatcherService,
+    private readonly libraryGate: LibraryOperationGate,
   ) {}
 
   async getPreview(
@@ -97,9 +99,7 @@ export class BulkRenameService {
     const event = 'library.bulk_rename';
     const startedAt = Date.now();
 
-    if (this.runningLibraries.has(libraryId)) {
-      throw new BadRequestException('A bulk rename is already running for this library.');
-    }
+    this.assertLibraryFree(libraryId);
 
     const settings = await this.bulkRenameRepo.findLibrarySettings(libraryId);
     if (!settings) throw new NotFoundException('Library not found');
@@ -107,7 +107,7 @@ export class BulkRenameService {
       throw new BadRequestException('File rename is not enabled for this library.');
     }
 
-    this.runningLibraries.add(libraryId);
+    const releaseGate = this.acquireLibrary(libraryId);
 
     let bookIds: number[];
     try {
@@ -126,7 +126,7 @@ export class BulkRenameService {
       options.onProgress({ started: true, total: bookIds.length });
     } catch (err) {
       // Nothing has moved yet, so the library is free again the moment preparation fails.
-      this.runningLibraries.delete(libraryId);
+      releaseGate();
       throw err;
     }
 
@@ -189,12 +189,25 @@ export class BulkRenameService {
       // completion event. Anything the watcher saw during the run is intentionally discarded:
       // every change was ours, and the database already records it.
       if (watcherWasPaused) this.fileWatcherService.resumeWatcher(libraryId);
-      this.runningLibraries.delete(libraryId);
+      releaseGate();
     }
   }
 
   isRunning(libraryId: number): boolean {
-    return this.runningLibraries.has(libraryId);
+    return this.libraryGate.current(libraryId) === 'bulk_rename';
+  }
+
+  private assertLibraryFree(libraryId: number): void {
+    const holder = this.libraryGate.current(libraryId);
+    if (holder === 'bulk_rename') throw new BadRequestException('A bulk rename is already running for this library.');
+    if (holder) throw new ConflictException('Another operation is running for this library. Try again when it finishes.');
+  }
+
+  private acquireLibrary(libraryId: number): LibraryOperationRelease {
+    const release = this.libraryGate.tryAcquire(libraryId, 'bulk_rename');
+    if (release) return release;
+    this.assertLibraryFree(libraryId);
+    throw new ConflictException('Another operation is running for this library. Try again when it finishes.');
   }
 
   invalidateCache(libraryId: number): void {
@@ -274,6 +287,10 @@ export class BulkRenameService {
       }
     }
 
+    if (settings.organizationMode === 'book_per_folder') {
+      await this.markFolderCollisions(libraryId, previewItems, books);
+    }
+
     const totalByStatus: Record<BulkRenameStatus, number> = {
       will_rename: 0,
       unchanged: 0,
@@ -286,6 +303,51 @@ export class BulkRenameService {
     }
 
     return { items: previewItems, totalByStatus, pattern: pattern ?? '', createdAt: Date.now() };
+  }
+
+  /**
+   * A folder is a book in this mode, so the rename refuses to land in a folder held by a different
+   * work. A folder that several renamed books would share is held back as a whole unless they are
+   * all one work, because which of them gets there first depends on the reviewer's selection.
+   */
+  private async markFolderCollisions(libraryId: number, items: BulkRenamePreviewItem[], books: BulkRenameBookData[]): Promise<void> {
+    const bookById = new Map(books.map((book) => [book.bookId, book]));
+    const itemsByFolder = new Map<string, BulkRenamePreviewItem[]>();
+    for (const item of items) {
+      const book = bookById.get(item.bookId);
+      if (item.status !== 'will_rename' || !item.newPath || !book) continue;
+      const folder = dirname(item.newPath);
+      if (folder === book.bookFolderPath) continue;
+      const group = itemsByFolder.get(folder);
+      if (group) group.push(item);
+      else itemsByFolder.set(folder, [item]);
+    }
+    if (itemsByFolder.size === 0) return;
+
+    const owners = await this.fileRenameRepo.findFolderOwners(libraryId, [...itemsByFolder.keys()]);
+    const identityOf = (bookId: number): WorkIdentity => {
+      const book = bookById.get(bookId)!;
+      return { title: book.metadata.title, primaryAuthor: book.authors[0] ?? null };
+    };
+
+    for (const [folder, group] of itemsByFolder) {
+      const owner = owners.get(folder);
+      if (owner) {
+        for (const item of group) {
+          if (isSameWork(identityOf(item.bookId), owner)) continue;
+          item.status = 'collision';
+          item.reason = 'Target folder belongs to another book';
+        }
+        continue;
+      }
+
+      const first = identityOf(group[0].bookId);
+      if (group.length < 2 || group.every((item, index) => index === 0 || isSameWork(identityOf(item.bookId), first))) continue;
+      for (const item of group) {
+        item.status = 'collision';
+        item.reason = 'Multiple books would resolve to the same folder';
+      }
+    }
   }
 
   private computePreviewItem(book: BulkRenameBookData, pattern: string | null, sanitizeForCrossPlatform: boolean): BulkRenamePreviewItem {

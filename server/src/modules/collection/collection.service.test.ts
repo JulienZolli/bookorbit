@@ -1,13 +1,5 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 
-vi.mock('@bookorbit/types', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@bookorbit/types')>();
-  return {
-    ...actual,
-    APP_FEATURES: Object.freeze({ ...actual.APP_FEATURES, podcasts: true }),
-  };
-});
-
 import type { RequestUser } from '../../common/types/request-user';
 import { CollectionService } from './collection.service';
 import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
@@ -36,17 +28,16 @@ function makeCollection(overrides?: Record<string, unknown>) {
   return {
     id: 10,
     userId: 1,
-    mediaType: 'books',
     name: 'Favorites',
     icon: 'FolderOpen',
     description: null,
     isPublic: false,
+    coverAspectRatio: '2/3',
     syncToKobo: false,
     displayOrder: 0,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     bookCount: 0,
-    podcastCount: 0,
     ...overrides,
   };
 }
@@ -62,10 +53,6 @@ function makeService() {
     delete: vi.fn(),
     updateDisplayOrders: vi.fn(),
     addBooks: vi.fn(),
-    addPodcasts: vi.fn(),
-    removePodcasts: vi.fn(),
-    findPodcastMembersPage: vi.fn(),
-    countPodcastMembers: vi.fn(),
     removeBooks: vi.fn(),
     findBookIdsPage: vi.fn(),
     findAllBookIds: vi.fn(),
@@ -73,7 +60,7 @@ function makeService() {
   };
 
   const libraryService = {
-    verifyUserAccess: vi.fn(),
+    verifyAccess: vi.fn(),
     findAccessibleLibraryIds: vi.fn().mockResolvedValue([100]),
   };
 
@@ -91,25 +78,14 @@ function makeService() {
     emit: vi.fn(),
   };
 
-  const podcastAccess = {
-    requirePodcastAccess: vi.fn().mockResolvedValue(undefined),
-    requirePodcastLibrary: vi.fn().mockResolvedValue(undefined),
-    requirePodcastLibraryAccess: vi.fn().mockResolvedValue(undefined),
-  };
-  const podcastCatalogRepo = {
-    listPodcasts: vi.fn(),
-  };
-
   const service = new CollectionService(
     collectionRepo as never,
     libraryService as never,
     queryBuilder as never,
     bookService as never,
     achievementEvents as never,
-    podcastAccess as never,
-    podcastCatalogRepo as never,
   );
-  return { service, collectionRepo, libraryService, queryBuilder, bookService, achievementEvents, podcastAccess, podcastCatalogRepo };
+  return { service, collectionRepo, libraryService, queryBuilder, bookService, achievementEvents };
 }
 
 describe('CollectionService', () => {
@@ -307,6 +283,53 @@ describe('CollectionService', () => {
     });
   });
 
+  describe('grid shape (issue #1926)', () => {
+    it('create persists a square grid shape and returns it', async () => {
+      const { service, collectionRepo } = makeService();
+      const created = makeCollection({ id: 28, userId: 9, coverAspectRatio: '1/1' });
+      collectionRepo.insert.mockResolvedValue([created]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([created]);
+
+      const result = await service.create({ name: 'Listening', icon: 'Headphones', coverAspectRatio: '1/1' }, makeUser({ id: 9 }));
+
+      expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ coverAspectRatio: '1/1' }));
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+    });
+
+    it('create leaves the shape to the column default when the payload omits it', async () => {
+      const { service, collectionRepo } = makeService();
+      collectionRepo.insert.mockResolvedValue([makeCollection()]);
+
+      await service.create({ name: 'Favorites', icon: 'FolderOpen' }, makeUser());
+
+      const [values] = collectionRepo.insert.mock.calls[0] as [Record<string, unknown>];
+      expect(values.coverAspectRatio).toBeUndefined();
+    });
+
+    it('update writes the grid shape and leaves it alone when the payload omits it', async () => {
+      const { service, collectionRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection()]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ coverAspectRatio: '1/1' })]);
+
+      const result = await service.update(10, { coverAspectRatio: '1/1' }, makeUser());
+      await service.update(10, { name: 'Renamed' }, makeUser());
+
+      expect(collectionRepo.update).toHaveBeenNthCalledWith(1, 10, 1, { coverAspectRatio: '1/1' });
+      expect(collectionRepo.update).toHaveBeenNthCalledWith(2, 10, 1, { name: 'Renamed' });
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+    });
+
+    it('reports an unrecognised stored shape as portrait', async () => {
+      const { service, collectionRepo } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection()]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([makeCollection({ coverAspectRatio: '4/5' })]);
+
+      const result = await service.findOne(10, makeUser());
+
+      expect(result).toEqual(expect.objectContaining({ coverAspectRatio: '2/3' }));
+    });
+  });
+
   describe('create/remove', () => {
     it('creates collection for current user and returns hydrated row', async () => {
       const { service, collectionRepo } = makeService();
@@ -336,6 +359,17 @@ describe('CollectionService', () => {
       await service.create({ name: 'Shared', icon: 'Globe', isPublic: true } as never, makeUser({ id: 9 }));
 
       expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ userId: 9, isPublic: true }));
+    });
+
+    it('persists an explicit Kobo sync flag on create', async () => {
+      const { service, collectionRepo } = makeService();
+      const created = makeCollection({ id: 27, userId: 9, syncToKobo: true });
+      collectionRepo.insert.mockResolvedValue([created]);
+      collectionRepo.findByIdForViewer.mockResolvedValue([created]);
+
+      await service.create({ name: 'On Kobo', icon: 'Tablet', syncToKobo: true }, makeUser({ id: 9 }));
+
+      expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ userId: 9, syncToKobo: true }));
     });
 
     it('rejects create when icon is empty after trimming', async () => {
@@ -432,7 +466,7 @@ describe('CollectionService', () => {
 
       await service.addBooks(10, { bookIds: [7, 8] }, makeUser({ id: 42, isSuperuser: true }));
 
-      expect(libraryService.verifyUserAccess).not.toHaveBeenCalled();
+      expect(libraryService.verifyAccess).not.toHaveBeenCalled();
       expect(collectionRepo.addBooks).toHaveBeenCalledWith(10, [7, 8]);
     });
 
@@ -485,7 +519,7 @@ describe('CollectionService', () => {
           sort: [{ field: 'collectionOrder', dir: 'asc' }],
           pagination: { page: 0, size: 50 },
         },
-        { defaultCollectionId: 10 },
+        { defaultCollectionId: 10, viewer: expect.objectContaining({ id: 1 }) },
       );
     });
 
@@ -524,7 +558,7 @@ describe('CollectionService', () => {
           collapseSeries: true,
           q: 'science',
         }),
-        { defaultCollectionId: 10 },
+        { defaultCollectionId: 10, viewer: expect.objectContaining({ id: 1 }) },
       );
       expect(result).toEqual({ items: [{ id: 2 }, { id: 1 }], total: 2, page: 0, size: 50 });
     });
@@ -734,114 +768,6 @@ describe('CollectionService', () => {
       collectionRepo.removeBooks.mockRejectedValue(new Error('remove failed'));
 
       await expect(service.removeBooks(10, { bookIds: [7] }, makeUser())).rejects.toThrow('remove failed');
-    });
-  });
-
-  describe('podcast collections', () => {
-    function podcastCollection(overrides?: Record<string, unknown>) {
-      return makeCollection({ mediaType: 'podcasts', ...overrides });
-    }
-
-    it('adds shows after checking the user can see each one', async () => {
-      const { service, collectionRepo, podcastAccess } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-
-      await service.addPodcasts(10, { podcastIds: [3, 4] }, makeUser());
-
-      expect(podcastAccess.requirePodcastAccess).toHaveBeenCalledTimes(2);
-      expect(collectionRepo.addPodcasts).toHaveBeenCalledWith(10, [3, 4]);
-    });
-
-    it('writes no membership rows when a show is not visible to the user', async () => {
-      const { service, collectionRepo, podcastAccess } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      podcastAccess.requirePodcastAccess.mockRejectedValueOnce(new ForbiddenException());
-
-      await expect(service.addPodcasts(10, { podcastIds: [3] }, makeUser())).rejects.toThrow(ForbiddenException);
-      expect(collectionRepo.addPodcasts).not.toHaveBeenCalled();
-    });
-
-    it('refuses shows on a book collection and books on a podcast collection', async () => {
-      const { service, collectionRepo } = makeService();
-
-      collectionRepo.findById.mockResolvedValue([makeCollection()]);
-      await expect(service.addPodcasts(10, { podcastIds: [3] }, makeUser())).rejects.toThrow(BadRequestException);
-
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      await expect(service.addBooks(10, { bookIds: [1] } as never, makeUser())).rejects.toThrow(BadRequestException);
-      expect(collectionRepo.addBooks).not.toHaveBeenCalled();
-    });
-
-    it('hydrates member shows per library and keeps membership order', async () => {
-      const { service, collectionRepo, podcastCatalogRepo } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      collectionRepo.findPodcastMembersPage.mockResolvedValue([
-        { podcastId: 7, libraryId: 1 },
-        { podcastId: 9, libraryId: 2 },
-        { podcastId: 8, libraryId: 1 },
-      ]);
-      collectionRepo.countPodcastMembers.mockResolvedValue(3);
-      podcastCatalogRepo.listPodcasts.mockImplementation((libraryId: number) =>
-        Promise.resolve({ items: libraryId === 1 ? [{ id: 8 }, { id: 7 }] : [{ id: 9 }], total: 0, page: 1, size: 0 }),
-      );
-
-      const page = await service.getPodcasts(10, makeUser());
-
-      expect(podcastCatalogRepo.listPodcasts).toHaveBeenCalledTimes(2);
-      expect(page.items.map((show) => show.id)).toEqual([7, 9, 8]);
-      expect(page.total).toBe(3);
-    });
-
-    it('filters membership to the libraries the user can still reach', async () => {
-      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
-      collectionRepo.findPodcastMembersPage.mockResolvedValue([{ podcastId: 7, libraryId: 1 }]);
-      collectionRepo.countPodcastMembers.mockResolvedValue(1);
-      podcastCatalogRepo.listPodcasts.mockResolvedValue({ items: [{ id: 7 }], total: 0, page: 1, size: 0 });
-
-      const page = await service.getPodcasts(10, makeUser());
-
-      expect(collectionRepo.findPodcastMembersPage).toHaveBeenCalledWith(10, 0, expect.any(Number), [1]);
-      expect(collectionRepo.countPodcastMembers).toHaveBeenCalledWith(10, [1]);
-      expect(page.items.map((show) => show.id)).toEqual([7]);
-      expect(page.total).toBe(1);
-    });
-
-    it('leaves a superuser unfiltered', async () => {
-      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      collectionRepo.findPodcastMembersPage.mockResolvedValue([{ podcastId: 7, libraryId: 9 }]);
-      collectionRepo.countPodcastMembers.mockResolvedValue(1);
-      podcastCatalogRepo.listPodcasts.mockResolvedValue({ items: [{ id: 7 }], total: 0, page: 1, size: 0 });
-
-      await service.getPodcasts(10, makeUser({ isSuperuser: true }));
-
-      expect(libraryService.findAccessibleLibraryIds).not.toHaveBeenCalled();
-      expect(collectionRepo.countPodcastMembers).toHaveBeenCalledWith(10, undefined);
-    });
-
-    it('returns an empty page rather than throwing when no member library is reachable', async () => {
-      const { service, collectionRepo, libraryService, podcastCatalogRepo } = makeService();
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
-      collectionRepo.findPodcastMembersPage.mockResolvedValue([]);
-      collectionRepo.countPodcastMembers.mockResolvedValue(0);
-
-      const page = await service.getPodcasts(10, makeUser());
-
-      expect(page).toEqual({ items: [], total: 0, page: 0, size: expect.any(Number) });
-      expect(podcastCatalogRepo.listPodcasts).not.toHaveBeenCalled();
-    });
-
-    it('forces syncToKobo off for a podcast collection', async () => {
-      const { service, collectionRepo } = makeService();
-      collectionRepo.insert.mockResolvedValue([podcastCollection()]);
-      collectionRepo.findById.mockResolvedValue([podcastCollection()]);
-
-      await service.create({ name: 'Sci-fi', icon: 'Podcast', mediaType: 'podcasts', syncToKobo: true }, makeUser());
-
-      expect(collectionRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ mediaType: 'podcasts', syncToKobo: false }));
     });
   });
 });

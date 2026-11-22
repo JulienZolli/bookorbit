@@ -10,7 +10,6 @@ vi.mock('@/lib/api', () => ({
 function makeLibrary(overrides: Partial<Library> = {}): Library {
   return {
     id: 3,
-    type: 'books',
     name: 'Main Library',
     icon: null,
     displayOrder: 0,
@@ -40,6 +39,9 @@ function makeLibrary(overrides: Partial<Library> = {}): Library {
     fileWriteKindleMaxFileSizeMb: 100,
     fileWriteAudioEnabled: false,
     fileWriteAudioMaxFileSizeMb: 50,
+    fileWriteAllFiles: false,
+    fileWriteReadAlongEnabled: false,
+    fileWriteReadAlongMaxFileSizeMb: 1000,
     fileRenameEnabled: false,
     folders: [],
     createdAt: '2026-01-01T00:00:00.000Z',

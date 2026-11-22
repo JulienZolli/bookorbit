@@ -173,6 +173,29 @@ describe('extractCbzMetadata', () => {
       expect(r?.authors.map((a) => a.name)).toEqual(['Writer One', 'Writer Two']);
     });
 
+    it('decodes numeric character references before splitting metadata lists', async () => {
+      const xml = `<ComicInfo>
+        <Title>Le r&#234;ve &#x2019;ternel</Title>
+        <Summary>L&#39;histoire d&#233;bute</Summary>
+        <Writer>Thierry M&#233;barki</Writer>
+        <Penciller>Andr&#233; Dupont</Penciller>
+        <Characters>H&#233;ros;Rival</Characters>
+      </ComicInfo>`;
+      mockZipFile(buildZipWithComicInfo(xml));
+
+      const r = await extractCbzMetadata('/book.cbz');
+
+      expect(r).toMatchObject({
+        title: 'Le rêve ’ternel',
+        description: "L'histoire débute",
+        authors: [{ name: 'Thierry Mébarki', sortName: null }],
+        comicMetadata: {
+          pencillers: ['André Dupont'],
+          characters: ['Héros', 'Rival'],
+        },
+      });
+    });
+
     it('extracts Genre and Tags into separate deduplicated lists', async () => {
       const xml = `<ComicInfo><Genre>Superhero,Fantasy</Genre><Tags>Fantasy,Horror</Tags></ComicInfo>`;
       mockZipFile(buildZipWithComicInfo(xml));
@@ -420,6 +443,28 @@ describe('extractCbzMetadata', () => {
 
       const r = await extractCbzMetadata('/book.cbz');
       expect(r?.tags).toEqual(['superhero', 'action']);
+    });
+
+    it('extracts the genre string into deduplicated genres kept apart from tags', async () => {
+      const comment = JSON.stringify({
+        'ComicBookInfo/1.0': { genre: 'Superhero, Science Fiction, Superhero', tags: ['action'], credits: [] },
+      });
+      mockZipFile(buildZipCommentOnly(comment));
+
+      const r = await extractCbzMetadata('/book.cbz');
+      expect(r?.genres).toEqual(['Superhero', 'Science Fiction']);
+      expect(r?.tags).toEqual(['action']);
+    });
+
+    it('leaves genres empty when genre is missing or not a string', async () => {
+      for (const genre of [undefined, null, 42, ['Superhero']]) {
+        const comment = JSON.stringify({ 'ComicBookInfo/1.0': { genre, tags: ['action'], credits: [] } });
+        mockZipFile(buildZipCommentOnly(comment));
+
+        const r = await extractCbzMetadata('/book.cbz');
+        expect(r?.genres, `genre=${JSON.stringify(genre)}`).toEqual([]);
+        expect(r?.tags).toEqual(['action']);
+      }
     });
 
     it('preserves issue 0 as a valid series index (origin issues)', async () => {

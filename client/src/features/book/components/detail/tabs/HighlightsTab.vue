@@ -8,6 +8,7 @@ import { ANNOTATION_HIGHLIGHT_COLORS, READER_OPENABLE_FORMATS, type AnnotationIt
 import { formatDate } from '@/i18n/formatters'
 import { downloadFromUrl } from '@/lib/download'
 import { useDeferredLoading } from '@/composables/useDeferredLoading'
+import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import AnnotationStream from '@/features/annotations/components/shared/AnnotationStream.vue'
 import AnnotationEntry from '@/features/annotations/components/shared/AnnotationEntry.vue'
 import AnnotationEntryDetail from '@/features/annotations/components/shared/AnnotationEntryDetail.vue'
@@ -18,6 +19,7 @@ import { useBookHighlights } from '@/features/book/composables/useBookHighlights
 import { HIGHLIGHT_VIEW_KEYS, type HighlightViewKey } from '@/features/book/lib/highlight-views'
 import HighlightsSideRail from '@/features/book/components/detail/highlights/HighlightsSideRail.vue'
 import HighlightsEmptyStage from '@/features/book/components/detail/highlights/HighlightsEmptyStage.vue'
+import { annotationSourceKey } from '@/features/annotations/lib/source-label'
 
 const props = defineProps<{ book: BookDetail }>()
 
@@ -26,6 +28,7 @@ const router = useRouter()
 const bookIdRef = computed(() => props.book.id)
 const hl = useBookHighlights(bookIdRef)
 const { density } = useDensity()
+const { openHighlightsInPeek } = useDisplaySettings()
 
 /**
  * Same rule as the library hub: the source margin only earns a column when there is room for
@@ -63,7 +66,7 @@ const groups = computed<StreamGroup[]>(() =>
     if (group.mode === 'source') {
       return {
         key: group.key,
-        label: t(`annotations.sources.${group.key}`),
+        label: t(annotationSourceKey(group.key)),
         swatch: `var(--pill-${group.key})`,
         count: group.total,
         items: group.items,
@@ -108,6 +111,7 @@ function handleJump(annotation: AnnotationItem) {
   if (file?.format) query.format = file.format
   if (annotation.cfi) query.cfi = annotation.cfi
   else if (annotation.pageno != null) query.page = String(annotation.pageno)
+  if (openHighlightsInPeek.value) query.mode = 'peek'
   void router.push({ name: 'reader', params: { bookId: annotation.bookId, fileId: annotation.jumpFileId }, query })
 }
 

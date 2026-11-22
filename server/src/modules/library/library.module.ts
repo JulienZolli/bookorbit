@@ -1,3 +1,5 @@
+import { MetadataModule } from '../metadata/metadata.module';
+import { ReadingAttemptEventsModule } from '../user-book-status/reading-attempt-events.module';
 import { Module, forwardRef } from '@nestjs/common';
 
 import { AchievementModule } from '../achievement/achievement.module';
@@ -12,11 +14,14 @@ import { LibraryController } from './library.controller';
 import { LibraryRepository } from './library.repository';
 import { LibraryScanSchedulerService } from './library-scan-scheduler.service';
 import { LibraryService } from './library.service';
+import { LibraryLifecycleService } from './library-lifecycle.service';
 import { LibraryAddedAtService } from './library-added-at.service';
 
 @Module({
   imports: [
+    ReadingAttemptEventsModule,
     ScannerModule,
+    MetadataModule,
     AchievementModule,
     forwardRef(() => BookModule),
     FileWriteModule,
@@ -25,7 +30,7 @@ import { LibraryAddedAtService } from './library-added-at.service';
     PathModule,
   ],
   controllers: [LibraryController],
-  providers: [LibraryService, LibraryRepository, LibraryScanSchedulerService, BulkRenameService, LibraryAddedAtService],
-  exports: [LibraryService, LibraryRepository],
+  providers: [LibraryService, LibraryRepository, LibraryScanSchedulerService, BulkRenameService, LibraryAddedAtService, LibraryLifecycleService],
+  exports: [LibraryService, LibraryRepository, LibraryLifecycleService],
 })
 export class LibraryModule {}

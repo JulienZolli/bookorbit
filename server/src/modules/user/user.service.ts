@@ -1,9 +1,9 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { hash } from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { Permission } from '@bookorbit/types';
-import type { ProvisioningMethod, UserAttentionResponse, UserListSummary, UserSettings } from '@bookorbit/types';
+import type { ProvisioningMethod, UserAttentionResponse, UserLibraryGrant, UserListSummary, UserSettings } from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
@@ -22,6 +22,7 @@ import { UserRepository, type UserListQuery } from './user.repository';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { UserStatisticsService } from '../user-statistics/user-statistics.service';
 import { AuthenticationPolicyService } from '../../common/services/authentication-policy.service';
+import { appConfig } from '../../config/config';
 
 /** The band is a to-do list, not a second roster. */
 const ATTENTION_BAND_LIMIT = 8;
@@ -33,7 +34,7 @@ export class UserService {
 
   constructor(
     private readonly userRepo: UserRepository,
-    private readonly config: ConfigService,
+    @Inject(appConfig.KEY) private readonly appConfiguration: ConfigType<typeof appConfig>,
     private readonly contentFilterRepo: ContentFilterRepository,
     private readonly appSettingsService: AppSettingsService,
     private readonly userStatistics: UserStatisticsService,
@@ -158,7 +159,7 @@ export class UserService {
       await this.userRepo.assignViewerLibraries(user.id, libraryIds);
     }
 
-    const appUrl = this.config.get<string>('app.appUrl') ?? 'http://localhost:5173';
+    const appUrl = this.appConfiguration.appUrl;
     const rawToken = await this.userRepo.generateResetToken(user.id);
     const resetUrl = `${appUrl}/reset-password?token=${rawToken}`;
 
@@ -227,7 +228,14 @@ export class UserService {
     return user;
   }
 
-  async updateMySettings(userId: number, dto: UpdateMeSettingsDto) {
+  async updateMySettings(requestingUser: RequestUser, dto: UpdateMeSettingsDto) {
+    if (
+      requestingUser.permissions.includes(Permission.DemoRestricted) &&
+      Object.prototype.hasOwnProperty.call(dto.settings, 'dashboardShelfConfig')
+    ) {
+      throw new ForbiddenException('Demo-restricted account cannot change dashboard shelf sync settings');
+    }
+    const userId = requestingUser.id;
     // Settings are merged server-side, so the stored row is the only place the outgoing
     // timezone still exists. Read only when this write is the one that can replace it.
     const touchesTimeZone = Object.prototype.hasOwnProperty.call(dto.settings, 'timezone');
@@ -414,6 +422,12 @@ export class UserService {
     return this.userRepo.findLibraryIdsByUserId(userId);
   }
 
+  async getLibraryGrants(userId: number): Promise<UserLibraryGrant[]> {
+    const user = await this.userRepo.findByIdWithPermissions(userId);
+    if (!user) throw new NotFoundException('User not found');
+    return this.userRepo.findLibraryGrantsByUserId(userId);
+  }
+
   async setLibraries(targetUserId: number, libraryIds: number[], requestingUser: RequestUser): Promise<void> {
     const target = await this.userRepo.findByIdWithPermissions(targetUserId);
     if (!target) throw new NotFoundException('User not found');
@@ -423,7 +437,7 @@ export class UserService {
 
     const normalizedLibraryIds = this.uniqueIds(libraryIds);
     await this.assertKnownLibraryIds(normalizedLibraryIds);
-    await this.userRepo.replaceViewerLibraries(targetUserId, normalizedLibraryIds);
+    await this.userRepo.replaceLibraries(targetUserId, normalizedLibraryIds);
   }
 
   async adminResetPassword(targetUserId: number, requestingUser: RequestUser) {
@@ -439,7 +453,7 @@ export class UserService {
     if (target.provisioningMethod === 'shared') {
       throw new BadRequestException('Shared accounts do not have passwords');
     }
-    const appUrl = this.config.get<string>('app.appUrl') ?? 'http://localhost:5173';
+    const appUrl = this.appConfiguration.appUrl;
     const rawToken = await this.userRepo.generateResetToken(targetUserId);
     return { resetUrl: `${appUrl}/reset-password?token=${rawToken}` };
   }
@@ -505,6 +519,7 @@ export class UserService {
       collections: { ...currentPrefs.collections, ...(dto.collections ?? {}) },
       smartScopes: { ...(currentPrefs.smartScopes ?? {}), ...(dto.smartScopes ?? {}) },
       authorPages: dto.authorPages !== undefined ? dto.authorPages : (currentPrefs.authorPages ?? false),
+      taxonomyPages: dto.taxonomyPages !== undefined ? dto.taxonomyPages : (currentPrefs.taxonomyPages ?? false),
     };
 
     // Remove entries set to null (deletion of overrides)

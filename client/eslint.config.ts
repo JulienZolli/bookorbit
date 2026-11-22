@@ -27,11 +27,19 @@ export default defineConfigWithVueTs(
     files: ['src/**/__tests__/*', 'src/**/*.spec.ts', 'src/**/*.test.ts'],
   },
 
-  // Named handlers only: an inline arrow in a template cannot be named, reused or tested, and the
-  // podcast feature was swept clean of them. The rest of the app still carries several hundred, so
-  // widening this is its own task rather than a side effect of one feature's refactor.
+  // Named handlers only: an inline arrow in a template cannot be named, reused or tested. The rest
+  // of the app still carries several hundred, so widening this is its own task rather than a side
+  // effect of one feature's refactor.
   {
-    files: ['src/features/podcast/**/*.vue', 'src/components/FormSheet.vue', 'src/features/collection/components/CollectionMembershipList.vue'],
+    files: [
+      'src/components/FormSheet.vue',
+      'src/features/collection/components/CollectionMembershipList.vue',
+      'src/features/book/components/metadata-match/*.vue',
+      'src/features/book/components/merge/*.vue',
+      'src/features/book/components/link/*.vue',
+      'src/components/browse-header/*.vue',
+      'src/features/api-keys/**/*.vue',
+    ],
     rules: { 'vue/v-on-handler-style': ['error', ['method', 'inline']] },
   },
 
@@ -57,6 +65,49 @@ export default defineConfigWithVueTs(
           selector:
             "CallExpression[callee.property.name='execCommand'][arguments.0.value='copy'], CallExpression[callee.property.value='execCommand'][arguments.0.value='copy']",
           message: "Use copyToClipboard from '@/lib/clipboard' instead of adding another copy fallback.",
+        },
+        {
+          selector: "ImportDeclaration[source.value='@lucide/vue'] > ImportNamespaceSpecifier",
+          message: 'A namespace import puts every Lucide icon on every page. Import icons by name, and render stored icon names with AppIcon.',
+        },
+      ],
+    },
+  },
+
+  // Only AppChart registers the chart types and applies the theme, and keeping echarts behind it is
+  // what keeps the library out of the first page load.
+  {
+    files: ['src/**/*.{vue,ts,mts,tsx}'],
+    ignores: ['src/components/charts/AppChart.vue', 'src/lib/echarts-setup.ts', 'src/**/__tests__/*', 'src/**/*.spec.ts', 'src/**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [{ name: 'vue-echarts', allowTypeImports: true, message: 'Render charts with AppChart from @/components/charts/AppChart.vue.' }],
+          patterns: [
+            {
+              group: ['echarts', 'echarts/*'],
+              allowTypeImports: true,
+              message: 'Render charts with AppChart from @/components/charts/AppChart.vue.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // randomUUID exists only in secure contexts, so a self-hosted install opened over plain HTTP throws
+  // on the first call. A separate rule from the one above, because a second no-restricted-syntax
+  // block would replace that block's options rather than add to them.
+  {
+    files: ['src/**/*.{vue,ts,mts,tsx}'],
+    ignores: ['src/lib/uuid.ts', 'src/**/__tests__/*', 'src/**/*.spec.ts', 'src/**/*.test.ts'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        {
+          property: 'randomUUID',
+          message: "Use createUuid from '@/lib/uuid' so IDs can be created on HTTP/self-hosted origins.",
         },
       ],
     },

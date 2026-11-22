@@ -1,5 +1,5 @@
 {
-  "id": "71eb109b-3a94-499e-aa44-cef239809f66",
+  "id": "eb343249-d6a3-43a5-9515-a9a9a19b4ece",
   "prevId": "ec7ea477-6e96-4a59-bab6-8f0ead7280bd",
   "version": "7",
   "dialect": "postgresql",
@@ -3875,6 +3875,104 @@
         "books_status_chk": {
           "name": "books_status_chk",
           "value": "\"books\".\"status\" in ('present', 'missing', 'processing')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.book_covers": {
+      "name": "book_covers",
+      "schema": "",
+      "columns": {
+        "book_id": {
+          "name": "book_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "medium": {
+          "name": "medium",
+          "type": "varchar(5)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "varchar(9)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "origin": {
+          "name": "origin",
+          "type": "varchar(12)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "width": {
+          "name": "width",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "height": {
+          "name": "height",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "dormant_since": {
+          "name": "dormant_since",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "book_covers_book_id_books_id_fk": {
+          "name": "book_covers_book_id_books_id_fk",
+          "tableFrom": "book_covers",
+          "tableTo": "books",
+          "columnsFrom": ["book_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "book_covers_book_id_medium_pk": {
+          "name": "book_covers_book_id_medium_pk",
+          "columns": ["book_id", "medium"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "book_covers_medium_chk": {
+          "name": "book_covers_medium_chk",
+          "value": "\"book_covers\".\"medium\" in ('ebook', 'audio')"
+        },
+        "book_covers_source_chk": {
+          "name": "book_covers_source_chk",
+          "value": "\"book_covers\".\"source\" in ('extracted', 'custom')"
+        },
+        "book_covers_origin_chk": {
+          "name": "book_covers_origin_chk",
+          "value": "\"book_covers\".\"origin\" in ('embedded', 'folder_image', 'opf', 'provider', 'dock', 'upload', 'legacy')"
+        },
+        "book_covers_width_positive_chk": {
+          "name": "book_covers_width_positive_chk",
+          "value": "\"book_covers\".\"width\" is null or \"book_covers\".\"width\" > 0"
+        },
+        "book_covers_height_positive_chk": {
+          "name": "book_covers_height_positive_chk",
+          "value": "\"book_covers\".\"height\" is null or \"book_covers\".\"height\" > 0"
         }
       },
       "isRLSEnabled": false
@@ -13690,24 +13788,6 @@
         "release_units": {
           "name": "release_units",
           "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "file_index": {
-          "name": "file_index",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "file_selection_pending_since": {
-          "name": "file_selection_pending_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "selected_file_path": {
-          "name": "selected_file_path",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

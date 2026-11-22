@@ -4,20 +4,30 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { Save, Sparkles } from '@lucide/vue'
-import { NOTIFICATION_CATEGORY_IDS, NotificationLevel, resolveNotificationLevel, type NotificationCategory } from '@bookorbit/types'
+import { NOTIFICATION_CATEGORY_IDS, NotificationLevel, Permission, resolveNotificationLevel, type NotificationCategory } from '@bookorbit/types'
 import { useAuth } from '@/features/auth/composables/useAuth'
+import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import { api } from '@/lib/api'
 import SettingsPageHeader from '@/features/settings/SettingsPageHeader.vue'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import NotificationLevelSegmented from './NotificationLevelSegmented.vue'
 import { NOTIFICATION_CATEGORY_GROUPS, NOTIFICATION_CATEGORY_ICONS } from '../lib/notification-category-groups'
+import { useBookRequestVisibility } from '@/features/book-requests/composables/useBookRequestVisibility'
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
 const { t } = useI18n()
 
 const { user, me } = useAuth()
+const { showBookRequests } = useBookRequestVisibility()
+const { hasPermission, isDemoRestrictedAccount } = usePermissions()
+/** Only someone who can start a read-aloud ever receives one of its notifications. */
+const showReadAloud = computed(() => hasPermission(Permission.LibraryGenerateReadAloud) && !isDemoRestrictedAccount.value)
+/** Only someone who can build a story guide ever receives one of its notifications. */
+const showStoryGuides = computed(() => hasPermission(Permission.LibraryGenerateStoryGuide) && !isDemoRestrictedAccount.value)
+/** Every bulk action needs metadata editing, and demo accounts may start none. */
+const showBulkActions = computed(() => hasPermission(Permission.LibraryEditMetadata) && !isDemoRestrictedAccount.value)
 const { popupEnabled, setPopupEnabled, loadPrefs } = useWhatsNew()
 
 const saving = ref(false)
@@ -54,8 +64,23 @@ const hasChanges = computed(() => {
   return NOTIFICATION_CATEGORY_IDS.some((key) => preferences.value[key] !== resolveNotificationLevel(userPrefs?.[key]))
 })
 
-const enabledCount = computed(() => NOTIFICATION_CATEGORY_IDS.filter((key) => preferences.value[key] !== NotificationLevel.Off).length)
-const totalCount = computed(() => NOTIFICATION_CATEGORY_IDS.length)
+function isCategoryVisible(category: NotificationCategory): boolean {
+  if (category === 'bookRequests') return showBookRequests.value
+  if (category === 'readAloud') return showReadAloud.value
+  if (category === 'storyGuides') return showStoryGuides.value
+  if (category === 'bulkActions') return showBulkActions.value
+  return true
+}
+
+const visibleGroups = computed(() =>
+  NOTIFICATION_CATEGORY_GROUPS.map((group) => ({
+    ...group,
+    categories: group.categories.filter(isCategoryVisible),
+  })).filter((group) => group.categories.length > 0),
+)
+const visibleCategoryIds = computed(() => visibleGroups.value.flatMap((group) => group.categories))
+const enabledCount = computed(() => visibleCategoryIds.value.filter((key) => preferences.value[key] !== NotificationLevel.Off).length)
+const totalCount = computed(() => visibleCategoryIds.value.length)
 
 function categoryLabel(category: NotificationCategory): string {
   return t(`notifications.preferences.categories.${category}.label`)
@@ -126,7 +151,7 @@ async function handleSave() {
   </div>
 
   <div class="space-y-4" :class="{ 'mt-5 md:mt-0': !props.embedded }">
-    <section v-for="group in NOTIFICATION_CATEGORY_GROUPS" :key="group.id" :aria-labelledby="`notification-group-${group.id}`" class="space-y-2">
+    <section v-for="group in visibleGroups" :key="group.id" :aria-labelledby="`notification-group-${group.id}`" class="space-y-2">
       <div class="flex items-baseline justify-between gap-3">
         <h2 :id="`notification-group-${group.id}`" class="settings-group-label mb-0">
           {{ t(`notifications.preferences.groups.${group.id}`) }}

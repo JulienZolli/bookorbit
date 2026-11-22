@@ -58,7 +58,12 @@ export interface ParsedCbzMetadata {
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
-const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false });
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  parseTagValue: false,
+  htmlEntities: true,
+});
 
 function splitDelimited(value: string | null | undefined): string[] {
   if (!value) return [];
@@ -259,6 +264,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       .filter((c) => c.role === 'Writer')
       .map((c) => ({ name: c.person, sortName: null }));
 
+    const genres = [...new Set(splitDelimited(typeof cbi['genre'] === 'string' ? cbi['genre'] : null))];
     const tags = ((cbi['tags'] as string[]) ?? []).filter(Boolean);
 
     const publicationYear = parsePublishedYear(cbi['publicationYear']) ?? null;
@@ -286,7 +292,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       isbn10: null,
       isbn13: null,
       authors: writers,
-      genres: [],
+      genres,
       tags,
       googleBooksId: null,
       goodreadsId: null,

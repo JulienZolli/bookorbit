@@ -37,6 +37,7 @@ function makeBook(id: number): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -132,5 +133,40 @@ describe('useGlobalSearch', () => {
     expect(search.results.value[39]?.id).toBe(40)
     expect(search.total.value).toBe(45)
     expect(search.hasMore.value).toBe(true)
+  })
+
+  it('collapses linked books only when asked and counts books from bookTotal', async () => {
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ...pageFor(0, 45), bookTotal: 52 }),
+    })
+    const query = ref('')
+    const search = useGlobalSearch(query, { collapseLinked: true })
+
+    query.value = 'Prey'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(300)
+    await flush()
+
+    expect(requestedBodies()[0]).toMatchObject({ q: 'Prey', collapseLinked: true })
+    expect(search.total.value).toBe(45)
+    expect(search.bookTotal.value).toBe(52)
+  })
+
+  it('leaves linked books apart by default and falls back to total for the book count', async () => {
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(pageFor(0, 45)),
+    })
+    const query = ref('')
+    const search = useGlobalSearch(query)
+
+    query.value = 'Prey'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(300)
+    await flush()
+
+    expect(requestedBodies()[0]).not.toHaveProperty('collapseLinked')
+    expect(search.bookTotal.value).toBe(45)
   })
 })

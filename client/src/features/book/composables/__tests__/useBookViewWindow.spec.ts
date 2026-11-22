@@ -1,4 +1,4 @@
-import { defineComponent, nextTick, ref } from 'vue'
+import { defineComponent, nextTick, ref, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BookCard, BooksPage, GroupRule, JumpBucket, SortSpec } from '@bookorbit/types'
@@ -21,6 +21,14 @@ vi.mock('../useBookEvents', () => ({
     },
   }),
 }))
+
+const elementSizeMock = vi.hoisted(() => ({ height: null as unknown as Ref<number> }))
+
+vi.mock('@vueuse/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@vueuse/core')>()
+  const vue = await import('vue')
+  return { ...actual, useElementSize: () => ({ width: vue.ref(0), height: elementSizeMock.height }) }
+})
 
 import { BOOK_WINDOW_BLOCK_SIZE } from '../useBookWindow'
 import { useBookViewWindow } from '../useBookViewWindow'
@@ -46,6 +54,7 @@ function makeBook(id: number): BookCard {
     readStatus: null,
     addedAt: '2024-01-01T00:00:00Z',
     updatedAt: null,
+    coverVersion: 'legacy:2024-01-01T00:00:00Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -100,6 +109,7 @@ function setup(
     railEnabled?: boolean
     enabled?: boolean
     defaultSort?: SortSpec[]
+    collapseLinked?: boolean
   } = {},
 ) {
   const scopeId = ref<number | null>(options.scope === undefined ? 1 : options.scope)
@@ -120,6 +130,7 @@ function setup(
     q,
     enabled,
     defaultSort: options.defaultSort,
+    collapseLinked: options.collapseLinked,
   })
   return { win, scopeId, viewMode, railEnabled, enabled, collapsePreference, selectionMode, collapseEnabled, q }
 }
@@ -144,6 +155,8 @@ describe('useBookViewWindow', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     bookEventsMock.progressChangedCallback = null
+    // Each test's views stay alive, so each gets its own height to move.
+    elementSizeMock.height = ref(0)
   })
 
   afterEach(() => {
@@ -292,6 +305,22 @@ describe('useBookViewWindow', () => {
     })
   })
 
+  it('asks the server to collapse linked books only when the view opts in', async () => {
+    mockApi(120)
+    const collapsed = setup({ collapseLinked: true })
+    await flush()
+
+    expect(collapsed.win.query.value).toMatchObject({ collapseLinked: true })
+    expect(listRequestBodies()[0]).toMatchObject({ collapseLinked: true, pagination: { page: 0 } })
+
+    fetchMock.mockClear()
+    const plain = setup()
+    await flush()
+
+    expect(plain.win.query.value).not.toHaveProperty('collapseLinked')
+    expect(listRequestBodies()[0]).not.toHaveProperty('collapseLinked')
+  })
+
   it('reloads uncollapsed books for selection mode and restores collapse afterward', async () => {
     mockApi(120)
     const { win, collapsePreference, selectionMode } = setup({ collapse: true })
@@ -403,6 +432,42 @@ describe('useBookViewWindow', () => {
     expect(listRequests()).toContain(1)
 
     win.releaseRailGutter()
+  })
+
+  it('asks for no buckets while a kept-alive view is hidden, and asks once when a resize settles', async () => {
+    vi.useFakeTimers()
+    elementSizeMock.height.value = 800
+    mockApi(250, [bucket('A', 0), bucket('B', 120)])
+    setup({ viewMode: 'grid' })
+    await flush()
+    await flush()
+    expect(jumpRequestCount()).toBe(1)
+
+    elementSizeMock.height.value = 0
+    await flush()
+    vi.advanceTimersByTime(1000)
+    await flush()
+    elementSizeMock.height.value = 800
+    await flush()
+    vi.advanceTimersByTime(1000)
+    await flush()
+    expect(jumpRequestCount()).toBe(1)
+
+    for (const height of [760, 720, 680, 640]) {
+      elementSizeMock.height.value = height
+      await flush()
+      vi.advanceTimersByTime(50)
+    }
+    await flush()
+    expect(jumpRequestCount()).toBe(1)
+
+    vi.advanceTimersByTime(300)
+    await flush()
+    expect(jumpRequestCount()).toBe(2)
+    const jumpBodies = fetchMock.mock.calls
+      .filter(([url]) => url.includes('jump-buckets'))
+      .map(([, init]) => JSON.parse(String(init?.body)) as { maxBuckets: number })
+    expect(jumpBodies.map((body) => body.maxBuckets)).toEqual([33, 26])
   })
 
   it('omits the shuffle seed until a sort tier is random', async () => {

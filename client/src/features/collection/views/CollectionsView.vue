@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { FolderOpen } from '@lucide/vue'
 import EntityIndexView from '@/components/entity-index/EntityIndexView.vue'
 import CreateCollectionDialog from '@/features/collection/components/CreateCollectionDialog.vue'
 import { useCollections } from '@/features/collection/composables/useCollections'
@@ -8,7 +9,7 @@ import { useCollections } from '@/features/collection/composables/useCollections
 defineOptions({ name: 'CollectionsView' })
 
 const { t } = useI18n()
-const { bookCollections, loading, fetchCollections } = useCollections()
+const { collections, loading, fetchCollections } = useCollections()
 
 const createOpen = ref(false)
 
@@ -30,9 +31,9 @@ onMounted(() => {
     <CreateCollectionDialog :open="createOpen" @close="closeCreate" />
     <EntityIndexView
       :title="t('titles.collections')"
-      title-icon="FolderOpen"
-      fallback-icon="FolderOpen"
-      :items="bookCollections"
+      :title-icon="FolderOpen"
+      :fallback-icon="FolderOpen"
+      :items="collections"
       route-name="collection"
       :loading="loading"
       :search-placeholder="t('components.sidebar.filterCollectionsPlaceholder')"

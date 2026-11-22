@@ -56,7 +56,8 @@ export interface HardcoverBookWithEditions {
   featured_book_series?: {
     series?: {
       name?: string;
-      books_count?: number;
+      primary_books_count?: number | null;
+      latest_released?: { position?: number | null }[];
     };
     position?: number | null;
   };
@@ -101,4 +102,6 @@ export interface HardcoverCachedContributor {
 
 export interface HardcoverImage {
   url?: string;
+  width?: number | null;
+  height?: number | null;
 }

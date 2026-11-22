@@ -2,6 +2,10 @@ vi.mock('./lib/walk');
 vi.mock('./lib/hash');
 vi.mock('../../common/utils/fs-stability.utils', () => ({ waitForStability: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../common/utils/path-identity.utils', () => ({ pathsReferToSameEntry: vi.fn() }));
+vi.mock('../reader/epub/epub-media-overlay-capability', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../reader/epub/epub-media-overlay-capability')>();
+  return { ...actual, inspectEpubMediaOverlayFields: vi.fn(actual.inspectEpubMediaOverlayFields) };
+});
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
   return {
@@ -17,6 +21,7 @@ import type { MockedFunction } from 'vitest';
 import type { Dirent } from 'fs';
 import { readdir, stat } from 'fs/promises';
 
+import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
 import { ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { ScannerService } from './scanner.service';
@@ -26,6 +31,7 @@ import type { BookCandidate, FileStat } from './lib/walk';
 import { findBookCandidates, findLooseFileCandidates, buildSingleBookCandidate } from './lib/walk';
 import { computeFileHash } from './lib/hash';
 import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 import * as assembleBookCardsModule from '../book/utils/assemble-book-cards';
 
 const mockFindCandidates = findBookCandidates as MockedFunction<typeof findBookCandidates>;
@@ -33,6 +39,7 @@ const mockFindLooseCandidates = findLooseFileCandidates as MockedFunction<typeof
 const mockBuildSingleCandidate = buildSingleBookCandidate as MockedFunction<typeof buildSingleBookCandidate>;
 const mockFingerprint = computeFileHash as MockedFunction<typeof computeFileHash>;
 const mockPathsReferToSameEntry = pathsReferToSameEntry as MockedFunction<typeof pathsReferToSameEntry>;
+const mockInspectMediaOverlayFields = vi.mocked(inspectEpubMediaOverlayFields);
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockStat = stat as MockedFunction<typeof stat>;
 
@@ -75,7 +82,7 @@ function makeBookFile(overrides: Record<string, unknown> = {}) {
 }
 
 function makeRepo(overrides: Record<string, unknown> = {}) {
-  return {
+  const repo: Record<string, unknown> = {
     failAllRunningJobs: vi.fn().mockResolvedValue(undefined),
     findRecentScanJobs: vi.fn().mockResolvedValue([]),
     findLatestScanJobs: vi.fn().mockResolvedValue([]),
@@ -119,6 +126,9 @@ function makeRepo(overrides: Record<string, unknown> = {}) {
     findBooksByFolderPath: vi.fn().mockResolvedValue([]),
     findBookFilesByBookId: vi.fn().mockResolvedValue([]),
     findBookFilesByBookIds: vi.fn().mockResolvedValue([]),
+    findBookFileFormats: vi.fn().mockResolvedValue([]),
+    remapAudioPositions: vi.fn().mockResolvedValue({ bookmarks: 0, progress: 0 }),
+    realignAudioTrackOrder: vi.fn().mockResolvedValue(0),
     findBookById: vi.fn().mockResolvedValue(null),
     findBooksByIds: vi.fn().mockResolvedValue([]),
     findBookCardData: vi.fn().mockResolvedValue({ rows: [], authorRows: [], fileRows: [], genreRows: [] }),
@@ -129,6 +139,10 @@ function makeRepo(overrides: Record<string, unknown> = {}) {
     clearDirScanState: vi.fn().mockResolvedValue(1),
     ...overrides,
   };
+  // Every library's folders, which a test sets up through the one library it scans.
+  repo.findAllLibraryRoots ??= vi.fn(async () => (await (repo.findLibraryFolders as () => Promise<unknown[]>)()) ?? []);
+  repo.findBooksToClaim ??= vi.fn().mockResolvedValue([]);
+  return repo;
 }
 
 const mockGateway = {
@@ -144,8 +158,11 @@ const mockGateway = {
 
 const mockMetadata = {
   extractAndSave: vi.fn().mockResolvedValue(undefined),
+  extractAndSaveWithRegex: vi.fn().mockResolvedValue(undefined),
+  applyRegexMetadataRules: vi.fn().mockResolvedValue('unchanged'),
   refreshCoverForBook: vi.fn().mockResolvedValue(false),
   extractAudioFileDuration: vi.fn().mockResolvedValue(undefined),
+  measureAudioFile: vi.fn().mockResolvedValue(null),
   aggregateAudioDuration: vi.fn().mockResolvedValue(undefined),
   extractAudioChaptersAndNarrators: vi.fn().mockResolvedValue(undefined),
   extractMergedAudioChapters: vi.fn().mockResolvedValue(undefined),
@@ -154,11 +171,16 @@ const mockMetadata = {
 function makeService(
   repo: ReturnType<typeof makeRepo>,
   autoFetchOrchestrator?: { scheduleImportedBooksIfEligible: (...args: unknown[]) => Promise<number> },
+  coverStore: { enrichCardFaces: (cards: unknown[]) => Promise<void> } = { enrichCardFaces: vi.fn().mockResolvedValue(undefined) },
+  coverReconciler?: { enqueue: (...args: unknown[]) => Promise<void>; enqueueExpiredDormant?: (libraryId: number) => Promise<void> },
 ) {
   const jobStore = new ScanJobStore();
   const notificationService = { notify: vi.fn().mockResolvedValue(undefined) };
   const achievementEvents = { emit: vi.fn() };
   const selfWriteRegistry = new SelfWriteRegistry();
+  const regexMetadata = { evaluate: vi.fn() };
+  const libraryGate = new LibraryOperationGate();
+  const jobChanges = { notify: vi.fn() };
   const service = new ScannerService(
     repo as any,
     mockMetadata as any,
@@ -166,10 +188,15 @@ function makeService(
     mockGateway as any,
     notificationService as any,
     selfWriteRegistry,
+    coverStore as any,
+    regexMetadata as any,
+    libraryGate,
+    jobChanges as any,
     autoFetchOrchestrator as any,
     achievementEvents as any,
+    coverReconciler as any,
   );
-  return { service, jobStore, notificationService, achievementEvents, selfWriteRegistry };
+  return { service, jobStore, notificationService, achievementEvents, selfWriteRegistry, regexMetadata, libraryGate, jobChanges };
 }
 
 /**
@@ -202,6 +229,7 @@ beforeEach(() => {
   mockPathsReferToSameEntry.mockResolvedValue(false);
   mockReaddir.mockResolvedValue([]);
   mockStat.mockResolvedValue({ isFile: () => true, ino: 2001n, size: 1024, mtime: new Date('2024-01-01') } as any);
+  mockMetadata.measureAudioFile.mockResolvedValue(null);
   delete (mockMetadata as Record<string, unknown>).extractAndSaveIfAvailable;
 });
 
@@ -268,6 +296,53 @@ describe('scan history', () => {
   });
 });
 
+describe('Jobs area changes', () => {
+  const stateChange = { type: 'library-scan', ownerId: null, state: true };
+  const progressChange = { type: 'library-scan', ownerId: null, state: false };
+
+  it('tells the Jobs area when a scan starts and when it completes', async () => {
+    const repo = makeRepo();
+    const done = awaitScan(repo);
+    const { service, jobChanges } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    await vi.waitFor(() => expect(jobChanges.notify).toHaveBeenCalledTimes(3));
+    expect(jobChanges.notify.mock.calls.map(([change]) => change)).toEqual([stateChange, stateChange, stateChange]);
+  });
+
+  it('reports a scan moving along as progress only, through the store throttle', async () => {
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [makeFileStat()])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = makeRepo();
+    const done = awaitScan(repo);
+    const { service, jobChanges } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    await vi.waitFor(() => expect(jobChanges.notify).toHaveBeenLastCalledWith(stateChange));
+    expect(jobChanges.notify).toHaveBeenCalledWith(progressChange);
+  });
+
+  it('tells the Jobs area when a scan fails', async () => {
+    const repo = makeRepo({ findAllLibraryRoots: vi.fn().mockRejectedValue(new Error('roots unavailable')) });
+    const done = awaitScan(repo);
+    const { service, jobChanges } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    await vi.waitFor(() =>
+      expect(mockGateway.emitProgress).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorMessage: 'roots unavailable' })),
+    );
+    expect(jobChanges.notify).toHaveBeenLastCalledWith(stateChange);
+    expect(jobChanges.notify).not.toHaveBeenCalledWith(progressChange);
+  });
+});
+
 describe('startScan — preconditions', () => {
   it('throws ConflictException when a scan is already running for the library', async () => {
     const repo = makeRepo();
@@ -291,6 +366,83 @@ describe('startScan — preconditions', () => {
 
     const result = await service.startScan(1, 'manual');
     expect(result).toHaveProperty('jobId', 100);
+  });
+
+  it('refuses to start while another operation holds the library, and leaves that holder in place', async () => {
+    const repo = makeRepo();
+    const { service, libraryGate } = makeService(repo);
+    const releaseMove = libraryGate.tryAcquire(1, 'book_move')!;
+
+    await expect(service.startScan(1, 'manual')).rejects.toThrow(ConflictException);
+    expect(libraryGate.current(1)).toBe('book_move');
+    expect(repo.createScanJob).not.toHaveBeenCalled();
+
+    releaseMove();
+  });
+
+  it('holds the library for the whole scan and frees it when the scan finishes', async () => {
+    const repo = makeRepo();
+    const done = awaitScan(repo);
+    const { service, libraryGate } = makeService(repo);
+
+    await service.startScan(1, 'manual');
+    expect(libraryGate.current(1)).toBe('scan');
+
+    await done;
+    await vi.waitFor(() => expect(libraryGate.isHeld(1)).toBe(false));
+  });
+
+  it('frees the library when the scan fails to start after taking it', async () => {
+    const repo = makeRepo({ findLibraryFolders: vi.fn().mockResolvedValue([]) });
+    const { service, libraryGate } = makeService(repo);
+
+    await expect(service.startScan(1, 'manual')).rejects.toThrow(NotFoundException);
+    expect(libraryGate.isHeld(1)).toBe(false);
+  });
+});
+
+describe('library operation gate: deferred scans', () => {
+  it('defers a watcher full scan until the operation releases the library', async () => {
+    const repo = makeRepo();
+    const { service, libraryGate } = makeService(repo);
+    const startScanSpy = vi.spyOn(service, 'startScan').mockResolvedValue({ jobId: 1 });
+    const release = libraryGate.tryAcquire(1, 'book_merge')!;
+
+    service.startScanAsync(1);
+    service.startScanAsync(1);
+    expect(startScanSpy).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(startScanSpy).toHaveBeenCalledTimes(1));
+  });
+
+  it('runs a targeted directory scan after a move, exactly once, instead of dropping it', async () => {
+    const repo = makeRepo();
+    const { service, libraryGate } = makeService(repo);
+    const scanDirectory = vi.spyOn(service as any, 'scanBookDirectory').mockResolvedValue(undefined);
+    const release = libraryGate.tryAcquire(1, 'book_move')!;
+
+    service.scanBookDirectoryAsync('/library/Book', 1);
+    service.scanBookDirectoryAsync('/library/Book', 1);
+    service.scanBookDirectoryAsync('/library/Other', 2);
+    await vi.waitFor(() => expect(scanDirectory).toHaveBeenCalledWith('/library/Other', 2));
+    expect(scanDirectory).not.toHaveBeenCalledWith('/library/Book', 1);
+
+    release();
+    await vi.waitFor(() => expect(scanDirectory).toHaveBeenCalledWith('/library/Book', 1));
+    expect(scanDirectory.mock.calls.filter(([path]) => path === '/library/Book')).toHaveLength(1);
+  });
+
+  it('does not defer targeted scans behind a full scan, which keeps its own skip rule', async () => {
+    const repo = makeRepo();
+    const { service, libraryGate } = makeService(repo);
+    const scanDirectory = vi.spyOn(service as any, 'scanBookDirectory').mockResolvedValue(undefined);
+    const release = libraryGate.tryAcquire(1, 'scan')!;
+
+    service.scanBookDirectoryAsync('/library/Book', 1);
+    await vi.waitFor(() => expect(scanDirectory).toHaveBeenCalledWith('/library/Book', 1));
+
+    release();
   });
 });
 
@@ -662,7 +814,7 @@ describe('excludePatterns', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockFindCandidates).toHaveBeenCalledWith('/library', ['#recycle', '*.bak'], expect.any(Function), undefined);
+    expect(mockFindCandidates).toHaveBeenCalledWith('/library', ['#recycle', '*.bak'], expect.any(Function), undefined, new Set());
   });
 });
 
@@ -777,6 +929,52 @@ describe('genuinely new primary file', () => {
 
     expect(order).toEqual(['extract', 'promote', 'schedule']);
     expect(autoFetchOrchestrator.scheduleImportedBooksIfEligible).toHaveBeenCalledWith(1, [1]);
+  });
+
+  it('registers books one at a time in discovery order but reads several at once', async () => {
+    const folders = Array.from({ length: 6 }, (_, index) => `/library/Author/Book ${index + 1}`);
+    const candidates = folders.map((folderPath, index) =>
+      makeCandidate(folderPath, [
+        makeFileStat({ absolutePath: `${folderPath}/book.epub`, relPath: `Author/Book ${index + 1}/book.epub`, ino: BigInt(2001 + index) }),
+      ]),
+    );
+    mockFindCandidates.mockResolvedValue({ candidates, skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+
+    const registered: number[] = [];
+    let registering = 0;
+    let reading = 0;
+    let peakReading = 0;
+    let nextFileId = 500;
+    const repo = makeRepo({
+      createBook: vi.fn().mockImplementation(async ({ folderPath }: { folderPath: string }) => {
+        registering++;
+        expect(registering).toBe(1);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        registering--;
+        const id = folders.indexOf(folderPath) + 1;
+        registered.push(id);
+        return { id, status: 'processing', libraryFolderId: 1, folderPath, libraryId: 1 };
+      }),
+      createBookFile: vi.fn().mockImplementation((data: Record<string, unknown>) => Promise.resolve(makeBookFile({ ...data, id: nextFileId++ }))),
+    });
+    // Earlier books read slower, so reads finish in the reverse of discovery order.
+    mockMetadata.extractAndSave.mockImplementation(async (bookId: number) => {
+      reading++;
+      peakReading = Math.max(peakReading, reading);
+      await new Promise((resolve) => setTimeout(resolve, (7 - bookId) * 5));
+      reading--;
+    });
+    const autoFetchOrchestrator = { scheduleImportedBooksIfEligible: vi.fn().mockResolvedValue(6) };
+    const done = awaitScan(repo);
+    const { service } = makeService(repo, autoFetchOrchestrator);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(registered).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(peakReading).toBe(4);
+    expect(repo.promoteProcessingBookToPresent).toHaveBeenCalledTimes(6);
+    expect(autoFetchOrchestrator.scheduleImportedBooksIfEligible).toHaveBeenCalledWith(1, [1, 2, 3, 4, 5, 6]);
   });
 
   it('does not extract metadata for non-primary files', async () => {
@@ -1173,6 +1371,46 @@ describe('file identity resolution', () => {
     expect(repo.createBookFile).not.toHaveBeenCalled();
   });
 
+  it('promotes an unchanged file whose format became a content format, such as DjVu stored as a supplement', async () => {
+    const mtime = new Date('2024-01-01');
+    const epub = makeFileStat({ mtime });
+    const djvu = makeFileStat({ absolutePath: '/library/Author/Book/scan.djvu', relPath: 'Author/Book/scan.djvu', ino: 1002n, mtime });
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([
+        makeBookFile({ mtime, sizeBytes: epub.sizeBytes, mediaOverlayCheckedAt: mtime }),
+        makeBookFile({
+          id: 2,
+          absolutePath: djvu.absolutePath,
+          relPath: djvu.relPath,
+          ino: djvu.ino,
+          mtime,
+          sizeBytes: djvu.sizeBytes,
+          format: 'djvu',
+          role: 'supplement',
+          sortOrder: 1,
+        }),
+      ]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [epub, djvu])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookFile).toHaveBeenCalledWith(2, expect.objectContaining({ format: 'djvu', role: 'content' }));
+    expect(repo.updateBookFile).not.toHaveBeenCalledWith(1, expect.objectContaining({ role: expect.anything() }));
+    expect(repo.createBookFile).not.toHaveBeenCalled();
+  });
+
   it('repairs a stale relPath when the absolute path and file state are unchanged', async () => {
     const mtime = new Date('2024-01-01');
     const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/new.epub', relPath: 'Author/Book/new.epub', mtime });
@@ -1232,6 +1470,11 @@ describe('file identity resolution', () => {
   });
 
   it('backfills media-overlay capability when an unchanged EPUB has not been checked', async () => {
+    mockInspectMediaOverlayFields.mockResolvedValueOnce({
+      mediaOverlayAvailable: false,
+      mediaOverlayDurationSeconds: null,
+      mediaOverlayCheckedAt: new Date(),
+    });
     const mtime = new Date('2024-01-01T00:00:00Z');
     const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/book.epub', sizeBytes: 1024, mtime });
     const repo = makeRepo({
@@ -1591,6 +1834,34 @@ describe('format priority', () => {
 
     expect(repo.updateBookPrimaryFile).toHaveBeenCalledWith(1, 12);
   });
+
+  it('keeps the current primary when another file of the same format is listed first', async () => {
+    const merged = makeFileStat({ absolutePath: '/library/Book/a-merged-copy.epub', relPath: 'Book/a-merged-copy.epub', ino: 21n });
+    const current = makeFileStat({ absolutePath: '/library/Book/book.epub', relPath: 'Book/book.epub', ino: 22n });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Book', [merged, current])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi.fn().mockResolvedValue([{ id: 1, status: 'present', folderPath: '/library/Book', primaryFileId: 22 }]),
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([
+          makeBookFile({ id: 21, absolutePath: merged.absolutePath, relPath: merged.relPath, ino: merged.ino }),
+          makeBookFile({ id: 22, absolutePath: current.absolutePath, relPath: current.relPath, ino: current.ino, sortOrder: 1 }),
+        ]),
+    });
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.updateBookPrimaryFile).toHaveBeenCalledWith(1, 22);
+  });
 });
 
 // ── allowedFormats filtering ──────────────────────────────────────────────────
@@ -1648,7 +1919,7 @@ describe('audio multi-file audiobook', () => {
     expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-01.mp3', 'mp3');
   });
 
-  it('calls extractAudioFileDuration for ALL new audio files including the winner', async () => {
+  it('calls measureAudioFile for ALL new audio files including the winner', async () => {
     const file1 = makeFileStat({ absolutePath: '/library/Book/chapter-01.mp3', relPath: 'Book/chapter-01.mp3' });
     const file2 = makeFileStat({ absolutePath: '/library/Book/chapter-02.mp3', relPath: 'Book/chapter-02.mp3', ino: 1002n });
     const file3 = makeFileStat({ absolutePath: '/library/Book/chapter-03.mp3', relPath: 'Book/chapter-03.mp3', ino: 1003n });
@@ -1663,10 +1934,10 @@ describe('audio multi-file audiobook', () => {
 
     // All 3 files including the first (winner) must get per-file duration so
     // aggregateAudioDuration can sum them all correctly.
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledTimes(3);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-01.mp3');
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-02.mp3');
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-03.mp3');
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledTimes(3);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-01.mp3');
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-02.mp3');
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), '/library/Book/chapter-03.mp3');
   });
 
   it('calls aggregateAudioDuration after processing audio files', async () => {
@@ -1684,7 +1955,7 @@ describe('audio multi-file audiobook', () => {
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
-  it('calls extractAudioFileDuration once and aggregates for a single-file m4b', async () => {
+  it('calls measureAudioFile once and aggregates for a single-file m4b', async () => {
     const file1 = makeFileStat({ absolutePath: '/library/Book/book.m4b', relPath: 'Book/book.m4b' });
     const candidate = makeCandidate('/library/Book', [file1]);
     mockFindCandidates.mockResolvedValue({ candidates: [candidate], skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
@@ -1696,8 +1967,8 @@ describe('audio multi-file audiobook', () => {
     await done;
 
     expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(expect.any(Number), '/library/Book/book.m4b', 'm4b');
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledTimes(1);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), '/library/Book/book.m4b');
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledTimes(1);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), '/library/Book/book.m4b');
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -1730,7 +2001,37 @@ describe('audio multi-file audiobook', () => {
     expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(
       expect.any(Number),
       ['/library/Book/Book - 01.m4b', '/library/Book/Book - 02.m4b', '/library/Book/Book - 10.m4b'],
-      { filesChanged: true },
+      { filesChanged: true, probes: expect.any(Map) },
+    );
+  });
+
+  it('hands the chapter merge what each duration probe read, so no file is probed twice', async () => {
+    const file1 = makeFileStat({ absolutePath: '/library/Book/01.mp3', relPath: 'Book/01.mp3', format: 'mp3', role: 'content' });
+    const file2 = makeFileStat({ absolutePath: '/library/Book/02.mp3', relPath: 'Book/02.mp3', ino: 1002n, format: 'mp3', role: 'content' });
+    const unreadable = makeFileStat({ absolutePath: '/library/Book/03.mp3', relPath: 'Book/03.mp3', ino: 1003n, format: 'mp3', role: 'content' });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Book', [file1, file2, unreadable])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const probeFor = (absolutePath: string) => ({ durationSeconds: 60, durationMs: 60_000, chapters: [{ title: absolutePath, startMs: 0 }] });
+    mockMetadata.measureAudioFile.mockImplementation((_bookId: number, absolutePath: string) =>
+      Promise.resolve(absolutePath === unreadable.absolutePath ? null : probeFor(absolutePath)),
+    );
+
+    const repo = makeRepo();
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    const [, , options] = mockMetadata.extractMergedAudioChapters.mock.calls[0]!;
+    expect(options.probes).toEqual(
+      new Map([
+        [file1.absolutePath, probeFor(file1.absolutePath)],
+        [file2.absolutePath, probeFor(file2.absolutePath)],
+      ]),
     );
   });
 
@@ -1758,6 +2059,7 @@ describe('audio multi-file audiobook', () => {
     expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(expect.any(Number), '/library/Book/01.mp3', 'mp3');
     expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(expect.any(Number), ['/library/Book/01.mp3', '/library/Book/02.mp3'], {
       filesChanged: true,
+      probes: expect.any(Map),
     });
   });
 
@@ -1791,6 +2093,277 @@ describe('audio multi-file audiobook', () => {
     expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
     expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(expect.any(Number), ['/library/Book/01.m4b', '/library/Book/02.m4b'], {
       filesChanged: false,
+      probes: expect.any(Map),
+    });
+  });
+
+  describe('stored track order', () => {
+    const tracks = [
+      makeFileStat({ absolutePath: '/library/Book/Part 01.mp3', relPath: 'Book/Part 01.mp3', ino: 1001n }),
+      makeFileStat({ absolutePath: '/library/Book/Part 02.mp3', relPath: 'Book/Part 02.mp3', ino: 1002n }),
+    ];
+
+    async function scan(repo: ReturnType<typeof makeRepo>, files: FileStat[]) {
+      mockFindCandidates.mockResolvedValue({
+        candidates: [makeCandidate('/library/Book', files)],
+        skippedDirs: new Set(),
+        unchangedDirs: new Set(),
+        dirMtimes: new Map(),
+      });
+      const done = awaitScan(repo);
+      const { service } = makeService(repo);
+      await service.startScan(1, 'manual');
+      await done;
+    }
+
+    it('realigns the stored track order once every file of the book is registered', async () => {
+      const repo = makeRepo();
+
+      await scan(repo, tracks);
+
+      expect(repo.realignAudioTrackOrder).toHaveBeenCalledTimes(1);
+      expect(repo.realignAudioTrackOrder).toHaveBeenCalledWith(1);
+      // Numbering written by another scan in the meantime is only seen after this one is done writing.
+      const realignedAt = repo.realignAudioTrackOrder.mock.invocationCallOrder[0]!;
+      expect(Math.max(...repo.createBookFile.mock.invocationCallOrder)).toBeLessThan(realignedAt);
+      expect(realignedAt).toBeLessThan(repo.updateBookPrimaryFile.mock.invocationCallOrder[0]!);
+    });
+
+    it('realigns after a rescan that renumbered existing tracks, without disturbing the bookmark remap', async () => {
+      const repo = makeRepo({
+        findBooksByLibraryFolder: vi
+          .fn()
+          .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Book', status: 'present' }]),
+        findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(
+          tracks.map((track, index) =>
+            makeBookFile({
+              id: 11 + index,
+              bookId: 1,
+              absolutePath: track.absolutePath,
+              relPath: track.relPath,
+              ino: track.ino,
+              format: 'mp3',
+              sortOrder: 1 - index,
+              durationSeconds: 60,
+            }),
+          ),
+        ),
+        findBookFileFormats: vi.fn().mockResolvedValue([
+          { id: 11, format: 'mp3' },
+          { id: 12, format: 'mp3' },
+        ]),
+      });
+
+      await scan(repo, tracks);
+
+      expect(repo.updateBookFile).toHaveBeenCalledWith(11, { sortOrder: 0 });
+      expect(repo.updateBookFile).toHaveBeenCalledWith(12, { sortOrder: 1 });
+      expect(repo.realignAudioTrackOrder).toHaveBeenCalledWith(1);
+      expect(repo.remapAudioPositions).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a book alone when the scan did not renumber any of its tracks', async () => {
+      const repo = makeRepo({
+        findBooksByLibraryFolder: vi
+          .fn()
+          .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Book', status: 'present' }]),
+        findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(
+          tracks.map((track, index) =>
+            makeBookFile({
+              id: 11 + index,
+              bookId: 1,
+              absolutePath: track.absolutePath,
+              relPath: track.relPath,
+              ino: track.ino,
+              format: 'mp3',
+              sortOrder: index,
+              durationSeconds: 60,
+            }),
+          ),
+        ),
+      });
+
+      await scan(repo, tracks);
+
+      expect(repo.updateBookFile).not.toHaveBeenCalled();
+      expect(repo.realignAudioTrackOrder).not.toHaveBeenCalled();
+    });
+
+    it('leaves the order of a book without audio alone', async () => {
+      const repo = makeRepo();
+
+      await scan(repo, [makeFileStat(), makeFileStat({ absolutePath: '/library/Book/book.pdf', relPath: 'Book/book.pdf', ino: 1003n })]);
+
+      expect(repo.realignAudioTrackOrder).not.toHaveBeenCalled();
+    });
+
+    it('logs how many tracks it renumbered', async () => {
+      const repo = makeRepo({ realignAudioTrackOrder: vi.fn().mockResolvedValue(2) });
+
+      await scan(repo, tracks);
+
+      expect(Logger.prototype.log).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[scanner\.realign_track_order\] \[end\] bookId=1 durationMs=\d+ renumbered=2 - /),
+      );
+    });
+
+    it('still finishes the scan when the realignment fails', async () => {
+      const repo = makeRepo({ realignAudioTrackOrder: vi.fn().mockRejectedValue(new Error('deadlock detected')) });
+
+      await scan(repo, tracks);
+
+      expect(repo.updateBookPrimaryFile).toHaveBeenCalled();
+      expect(repo.completeScanJob).toHaveBeenCalled();
+      expect(repo.failScanJob).not.toHaveBeenCalled();
+      expect(Logger.prototype.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[scanner\.realign_track_order\] \[fail\] bookId=1 durationMs=\d+ errorClass=Error error="deadlock detected" - /),
+      );
+    });
+
+    it('realigns after a targeted scan of a book folder, the scan the watcher runs for each new file', async () => {
+      mockBuildSingleCandidate.mockResolvedValue(makeCandidate('/library/Book', tracks));
+      const repo = makeRepo();
+      const { service } = makeService(repo);
+
+      await (service as any).scanBookFolder('/library/Book/Part 02.mp3', 1);
+
+      expect(repo.realignAudioTrackOrder).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('disc folders reordered by a rescan', () => {
+    // Stored under the old file-name order, which interleaved the discs.
+    const tracks = [
+      { id: 20, path: '/library/Book/CD 1/01.mp3', ino: 9101n, oldOrder: 0, duration: 100 },
+      { id: 21, path: '/library/Book/CD 2/01.mp3', ino: 9102n, oldOrder: 1, duration: 200 },
+      { id: 22, path: '/library/Book/CD 1/02.mp3', ino: 9103n, oldOrder: 2, duration: 300 },
+      { id: 23, path: '/library/Book/CD 2/02.mp3', ino: 9104n, oldOrder: 3, duration: 400 },
+    ];
+    const pathOrder = ['/library/Book/CD 1/01.mp3', '/library/Book/CD 1/02.mp3', '/library/Book/CD 2/01.mp3', '/library/Book/CD 2/02.mp3'];
+
+    function stat(track: (typeof tracks)[number]) {
+      return makeFileStat({
+        absolutePath: track.path,
+        relPath: track.path.slice('/library/'.length),
+        ino: track.ino,
+        format: 'mp3',
+        role: 'content',
+      });
+    }
+
+    function reorderRepo(overrides: Record<string, unknown> = {}) {
+      return makeRepo({
+        findBooksByLibraryFolder: vi
+          .fn()
+          .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Book', status: 'present' }]),
+        findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(
+          tracks.map((track) =>
+            makeBookFile({
+              id: track.id,
+              bookId: 1,
+              absolutePath: track.path,
+              relPath: track.path.slice('/library/'.length),
+              ino: track.ino,
+              format: 'mp3',
+              sortOrder: track.oldOrder,
+              durationSeconds: track.duration,
+            }),
+          ),
+        ),
+        findBookFileFormats: vi.fn().mockResolvedValue(tracks.map((track) => ({ id: track.id, format: 'mp3' }))),
+        ...overrides,
+      });
+    }
+
+    async function scan(repo: ReturnType<typeof makeRepo>, files = pathOrder.map((path) => stat(tracks.find((track) => track.path === path)!))) {
+      mockFindCandidates.mockResolvedValue({
+        candidates: [makeCandidate('/library/Book', files)],
+        skippedDirs: new Set(),
+        unchangedDirs: new Set(),
+        dirMtimes: new Map(),
+      });
+      const done = awaitScan(repo);
+      const { service } = makeService(repo);
+      await service.startScan(1, 'manual');
+      await done;
+    }
+
+    it('moves bookmarks to the same moment of the same track and rebuilds chapters in disc order', async () => {
+      const repo = reorderRepo();
+      await scan(repo);
+
+      expect(repo.remapAudioPositions).toHaveBeenCalledTimes(1);
+      const [bookId, remap, percentageAt] = repo.remapAudioPositions.mock.calls[0] as [
+        number,
+        (seconds: number) => number | null,
+        (fileId: number, offset: number) => number | null,
+      ];
+      expect(bookId).toBe(1);
+      // 350 s was 50 s into CD 1/02, which followed CD 1/01 and CD 2/01; it now follows CD 1/01 only.
+      expect(remap(350)).toBe(150);
+      // 120 s was 20 s into CD 2/01, which now follows both CD 1 tracks.
+      expect(remap(120)).toBe(420);
+      expect(percentageAt(21, 20)).toBe(42);
+      expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(1, pathOrder, { filesChanged: true, probes: expect.any(Map) });
+    });
+
+    it('leaves positions alone when the order did not change', async () => {
+      const repo = reorderRepo({
+        findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(
+          pathOrder.map((path, index) => {
+            const track = tracks.find((candidate) => candidate.path === path)!;
+            return makeBookFile({
+              id: track.id,
+              bookId: 1,
+              absolutePath: path,
+              relPath: path.slice('/library/'.length),
+              ino: track.ino,
+              format: 'mp3',
+              sortOrder: index,
+            });
+          }),
+        ),
+      });
+      await scan(repo);
+
+      expect(repo.remapAudioPositions).not.toHaveBeenCalled();
+      expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(1, pathOrder, { filesChanged: false, probes: expect.any(Map) });
+    });
+
+    it('leaves positions alone when a track is new, because they cannot be placed', async () => {
+      const repo = reorderRepo();
+      const added = makeFileStat({
+        absolutePath: '/library/Book/CD 1/03.mp3',
+        relPath: 'Book/CD 1/03.mp3',
+        ino: 9105n,
+        format: 'mp3',
+        role: 'content',
+      });
+      await scan(repo, [
+        ...pathOrder.slice(0, 2).map((path) => stat(tracks.find((track) => track.path === path)!)),
+        added,
+        ...pathOrder.slice(2).map((path) => stat(tracks.find((track) => track.path === path)!)),
+      ]);
+
+      expect(repo.findBookFileFormats).not.toHaveBeenCalled();
+      expect(repo.remapAudioPositions).not.toHaveBeenCalled();
+    });
+
+    it('leaves positions alone when a stored track is no longer in the folder, but still rebuilds chapters', async () => {
+      const repo = reorderRepo({
+        findBookFileFormats: vi.fn().mockResolvedValue([...tracks.map((track) => ({ id: track.id, format: 'mp3' })), { id: 29, format: 'mp3' }]),
+      });
+      await scan(repo);
+
+      expect(repo.remapAudioPositions).not.toHaveBeenCalled();
+      expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(1, pathOrder, { filesChanged: true, probes: expect.any(Map) });
+    });
+
+    it('still rebuilds chapters when remapping positions fails', async () => {
+      const repo = reorderRepo({ remapAudioPositions: vi.fn().mockRejectedValue(new Error('deadlock detected')) });
+      await scan(repo);
+
+      expect(mockMetadata.extractMergedAudioChapters).toHaveBeenCalledWith(1, pathOrder, { filesChanged: true, probes: expect.any(Map) });
     });
   });
 
@@ -1910,9 +2483,9 @@ describe('audio multi-file audiobook', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledTimes(2);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), mp3a.absolutePath);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), mp3b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledTimes(2);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), mp3a.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), mp3b.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -1930,8 +2503,8 @@ describe('audio multi-file audiobook', () => {
 
     expect(mockMetadata.extractAndSave).toHaveBeenCalledTimes(1);
     expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(expect.any(Number), mp3a.absolutePath, 'mp3');
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), mp3a.absolutePath);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), mp3b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), mp3a.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), mp3b.absolutePath);
   });
 });
 
@@ -1998,7 +2571,7 @@ describe('multi-format metadata source routing', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -2026,7 +2599,7 @@ describe('multi-format metadata source routing', () => {
     expect(mockMetadata.extractAudioChaptersAndNarrators).toHaveBeenCalledTimes(1);
     expect(mockMetadata.extractAudioChaptersAndNarrators).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath, 'm4b');
     // per-file duration + aggregate
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -2054,9 +2627,9 @@ describe('multi-format metadata source routing', () => {
     expect(mockMetadata.extractAudioChaptersAndNarrators).toHaveBeenCalledTimes(1);
     expect(mockMetadata.extractAudioChaptersAndNarrators).toHaveBeenCalledWith(expect.any(Number), m4b1.absolutePath, 'm4b');
     // per-file duration for both m4b files
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledTimes(2);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), m4b1.absolutePath);
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), m4b2.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledTimes(2);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), m4b1.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), m4b2.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -2149,7 +2722,7 @@ describe('incremental scan — no re-extraction on unchanged winner', () => {
     expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
     // epub is not audio — no audio extraction either
     expect(mockMetadata.extractAudioChaptersAndNarrators).not.toHaveBeenCalled();
-    expect(mockMetadata.extractAudioFileDuration).not.toHaveBeenCalled();
+    expect(mockMetadata.measureAudioFile).not.toHaveBeenCalled();
     expect(mockMetadata.aggregateAudioDuration).not.toHaveBeenCalled();
   });
 
@@ -2180,7 +2753,7 @@ describe('incremental scan — no re-extraction on unchanged winner', () => {
     expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
     // m4b is new audio and winner is not audio — extract audio-specific fields
     expect(mockMetadata.extractAudioChaptersAndNarrators).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath, 'm4b');
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(expect.any(Number), m4b.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(expect.any(Number));
   });
 
@@ -2231,8 +2804,8 @@ describe('incremental scan — no re-extraction on unchanged winner', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledOnce();
-    expect(mockMetadata.extractAudioFileDuration).toHaveBeenCalledWith(1, m4b.absolutePath);
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledOnce();
+    expect(mockMetadata.measureAudioFile).toHaveBeenCalledWith(1, m4b.absolutePath);
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(1);
   });
 
@@ -2272,6 +2845,100 @@ describe('incremental scan — no re-extraction on unchanged winner', () => {
     }
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledOnce();
     expect(mockMetadata.aggregateAudioDuration).toHaveBeenCalledWith(1);
+  });
+});
+
+describe('unchecked read-along EPUBs in unchanged folders', () => {
+  const READ_ALONG = '/library/Author/Book/readaloud.epub';
+  const MEASURED = {
+    mediaOverlayAvailable: true,
+    mediaOverlayDurationSeconds: 21103.35,
+    mediaOverlayCheckedAt: new Date('2026-10-01T00:00:00.000Z'),
+  };
+
+  async function scanUnchangedFolder(files: ReturnType<typeof makeBookFile>[], repoOverrides: Record<string, unknown> = {}) {
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue(files),
+      ...repoOverrides,
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(['/library/Author/Book']),
+      dirMtimes: new Map(),
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+    return repo;
+  }
+
+  function readAlongFile(overrides: Record<string, unknown> = {}) {
+    return makeBookFile({
+      id: 7,
+      absolutePath: READ_ALONG,
+      relPath: 'Author/Book/readaloud.epub',
+      durationSeconds: null,
+      mediaOverlayAvailable: true,
+      mediaOverlayDurationSeconds: null,
+      mediaOverlayCheckedAt: null,
+      ...overrides,
+    });
+  }
+
+  it('measures a read-along EPUB whose check was cleared, even though the incremental scan skips its folder', async () => {
+    mockInspectMediaOverlayFields.mockResolvedValueOnce(MEASURED);
+
+    const repo = await scanUnchangedFolder([readAlongFile()]);
+
+    expect(mockInspectMediaOverlayFields).toHaveBeenCalledOnce();
+    expect(mockInspectMediaOverlayFields).toHaveBeenCalledWith(READ_ALONG, 'epub', expect.any(Function));
+    expect(repo.updateBookFile).toHaveBeenCalledWith(7, MEASURED);
+    expect(repo.completeScanJob).toHaveBeenCalled();
+  });
+
+  it('leaves checked read-along EPUBs, never-checked plain EPUBs and other formats unopened', async () => {
+    await scanUnchangedFolder([
+      readAlongFile({ mediaOverlayCheckedAt: new Date('2026-09-30T00:00:00.000Z') }),
+      makeBookFile({ id: 8, absolutePath: '/library/Author/Book/plain.epub', mediaOverlayAvailable: false, mediaOverlayCheckedAt: null }),
+      makeBookFile({ id: 9, absolutePath: '/library/Author/Book/book.m4b', format: 'm4b', mediaOverlayAvailable: true, mediaOverlayCheckedAt: null }),
+    ]);
+
+    expect(mockInspectMediaOverlayFields).not.toHaveBeenCalled();
+  });
+
+  it('leaves a read-along EPUB outside the unchanged folders to the regular scan', async () => {
+    await scanUnchangedFolder([readAlongFile({ bookId: 2, absolutePath: '/library/Other/Book/readaloud.epub' })]);
+
+    expect(mockInspectMediaOverlayFields).not.toHaveBeenCalled();
+  });
+
+  it('does not demote a read-along EPUB the repair cannot read', async () => {
+    mockInspectMediaOverlayFields.mockResolvedValueOnce({
+      mediaOverlayAvailable: false,
+      mediaOverlayDurationSeconds: null,
+      mediaOverlayCheckedAt: new Date('2026-10-01T00:00:00.000Z'),
+    });
+
+    const repo = await scanUnchangedFolder([readAlongFile()]);
+
+    expect(mockInspectMediaOverlayFields).toHaveBeenCalledOnce();
+    expect(repo.updateBookFile).not.toHaveBeenCalled();
+  });
+
+  it('finishes the scan when storing a repaired capability fails', async () => {
+    mockInspectMediaOverlayFields.mockResolvedValueOnce(MEASURED);
+
+    const repo = await scanUnchangedFolder([readAlongFile()], { updateBookFile: vi.fn().mockRejectedValue(new Error('connection reset')) });
+
+    expect(repo.completeScanJob).toHaveBeenCalled();
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining('[scanner.media_overlay_repair] [fail] fileId=7'));
   });
 });
 
@@ -2323,6 +2990,207 @@ describe('missing book restoration', () => {
 });
 
 describe('cross-library transfer', () => {
+  it('creates a destination book when only some tracks moved out of an existing source book', async () => {
+    const movedTrack = makeFileStat({
+      absolutePath: '/library/Topic/moved.mp3',
+      relPath: 'Topic/moved.mp3',
+      ino: 4242n,
+      format: 'mp3',
+    });
+    const remainingTrack = makeFileStat({
+      absolutePath: '/library/Source/remaining.mp3',
+      relPath: 'Source/remaining.mp3',
+      ino: 4343n,
+      format: 'mp3',
+    });
+    const oldMovedTrack = makeBookFile({
+      id: 500,
+      bookId: 42,
+      absolutePath: '/library/Source/moved.mp3',
+      relPath: 'Source/moved.mp3',
+      ino: 4242n,
+      format: 'mp3',
+    });
+    const oldRemainingTrack = makeBookFile({
+      id: 501,
+      bookId: 42,
+      absolutePath: remainingTrack.absolutePath,
+      relPath: remainingTrack.relPath,
+      ino: remainingTrack.ino,
+      format: 'mp3',
+    });
+
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 42, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Source', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([oldMovedTrack, oldRemainingTrack]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([oldMovedTrack, oldRemainingTrack]),
+      findBookFileWithContextByIno: vi.fn().mockResolvedValue({
+        file: oldMovedTrack,
+        libraryId: 1,
+        bookStatus: 'present',
+        folderPath: '/library/Source',
+        libraryFolderPath: '/library',
+      }),
+      createBook: vi.fn().mockResolvedValue({
+        id: 99,
+        libraryId: 1,
+        libraryFolderId: 1,
+        folderPath: '/library/Topic',
+        status: 'processing',
+      }),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Topic', [movedTrack]), makeCandidate('/library/Source', [remainingTrack])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockImplementation((path) => {
+      if (String(path) === oldMovedTrack.absolutePath) {
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      }
+      return Promise.resolve({ isFile: () => true, ino: 4343n, size: 1024, mtime: new Date('2024-01-01') } as any);
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalledWith(expect.objectContaining({ folderPath: '/library/Topic' }));
+    expect(repo.updateBookFile).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({
+        bookId: 99,
+        absolutePath: '/library/Topic/moved.mp3',
+        relPath: 'Topic/moved.mp3',
+      }),
+    );
+  });
+
+  it('does not transfer a partially moved source book through the hash fallback', async () => {
+    const movedTrack = makeFileStat({
+      absolutePath: '/library/Topic/moved.mp3',
+      relPath: 'Topic/moved.mp3',
+      ino: 9999n,
+      format: 'mp3',
+    });
+    const oldMovedTrack = makeBookFile({
+      id: 500,
+      bookId: 42,
+      absolutePath: '/library/Source/moved.mp3',
+      relPath: 'Source/moved.mp3',
+      ino: 4242n,
+      fileHash: 'transfer-hash',
+      format: 'mp3',
+    });
+    const remainingTrack = makeBookFile({
+      id: 501,
+      bookId: 42,
+      absolutePath: '/library/Source/remaining.mp3',
+      relPath: 'Source/remaining.mp3',
+      ino: 4343n,
+      format: 'mp3',
+    });
+    const repo = makeRepo({
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 42, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Source', status: 'present' }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([oldMovedTrack, remainingTrack]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([oldMovedTrack, remainingTrack]),
+      findBookFileWithContextByHash: vi.fn().mockResolvedValue({
+        file: oldMovedTrack,
+        libraryId: 1,
+        bookStatus: 'present',
+        folderPath: '/library/Source',
+        libraryFolderPath: '/library',
+      }),
+      findBookFileByHash: vi.fn().mockResolvedValue(oldMovedTrack),
+      createBook: vi.fn().mockResolvedValue({
+        id: 99,
+        libraryId: 1,
+        libraryFolderId: 1,
+        folderPath: '/library/Topic',
+        status: 'processing',
+      }),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [
+        makeCandidate('/library/Topic', [movedTrack]),
+        makeCandidate('/library/Source', [
+          makeFileStat({
+            absolutePath: remainingTrack.absolutePath,
+            relPath: remainingTrack.relPath,
+            ino: remainingTrack.ino,
+            format: 'mp3',
+          }),
+        ]),
+      ],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockFingerprint.mockResolvedValue('transfer-hash');
+    mockStat.mockImplementation((path) => {
+      if (String(path) === oldMovedTrack.absolutePath) {
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      }
+      return Promise.resolve({ isFile: () => true, ino: 4343n, size: 1024, mtime: new Date('2024-01-01') } as any);
+    });
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.createBook).toHaveBeenCalledWith(expect.objectContaining({ folderPath: '/library/Topic' }));
+  });
+
+  it('does not transfer a source book when its old content cannot be checked', async () => {
+    const destinationFile = makeFileStat({
+      absolutePath: '/dest/Inbox/book.epub',
+      relPath: 'Inbox/book.epub',
+      ino: 4343n,
+    });
+    const sourceFile = makeBookFile({
+      id: 510,
+      bookId: 55,
+      libraryFolderId: 10,
+      absolutePath: '/source/Book/book.epub',
+      relPath: 'Book/book.epub',
+      ino: 4343n,
+    });
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([{ id: 22, path: '/dest', libraryId: 2 }]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
+      findBookFileWithContextByIno: vi.fn().mockResolvedValue({
+        file: sourceFile,
+        libraryId: 1,
+        bookStatus: 'present',
+        folderPath: '/source/Book',
+        libraryFolderPath: '/source',
+      }),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/dest/Inbox', [destinationFile])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    mockStat.mockRejectedValue(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+    await service.startScan(2, 'manual');
+    await done;
+
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+  });
+
   it('transfers a missing source book into the destination library via inode match', async () => {
     const destinationFile = makeFileStat({
       absolutePath: '/dest/Inbox/book.epub',
@@ -2343,6 +3211,7 @@ describe('cross-library transfer', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 20, path: '/dest', libraryId: 2 }]),
       findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue({
         file: sourceFile,
         libraryId: 1,
@@ -2409,6 +3278,7 @@ describe('cross-library transfer', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 22, path: '/dest', libraryId: 2 }]),
       findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
       findBookFileWithContextByIno: vi.fn().mockResolvedValue({
         file: sourceFile,
@@ -2468,6 +3338,7 @@ describe('cross-library transfer', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 22, path: '/dest', libraryId: 2 }]),
       findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
       findBookFileWithContextByIno: vi.fn().mockResolvedValue({
         file: sourceFile,
@@ -2519,6 +3390,7 @@ describe('cross-library transfer', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 21, path: '/dest', libraryId: 3 }]),
       findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
       findMissingBookFileWithContextByHash: vi.fn().mockResolvedValue({
         file: sourceFile,
@@ -2585,6 +3457,7 @@ describe('cross-library transfer', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 20, path: '/dest', libraryId: 2 }]),
       findBooksByLibraryFolder: vi.fn().mockResolvedValue([]),
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue({
         file: sourceFile,
         libraryId: 1,
@@ -3159,7 +4032,7 @@ describe('targeted book scan', () => {
     await (service as any).scanBookDirectory('/library/AJ Carter', 1);
 
     expect(mockBuildSingleCandidate).toHaveBeenCalledWith('/library/AJ Carter', '/library', expect.any(Array), expect.any(Function));
-    expect(mockFindCandidates).toHaveBeenCalledWith('/library/AJ Carter', expect.any(Array), expect.any(Function));
+    expect(mockFindCandidates).toHaveBeenCalledWith('/library/AJ Carter', expect.any(Array), expect.any(Function), undefined, new Set());
     expect(repo.createBook).toHaveBeenCalledWith(expect.objectContaining({ folderPath: '/library/AJ Carter/Book', libraryId: 1 }));
     expect(repo.createBookFile).toHaveBeenCalledWith(expect.objectContaining({ relPath: 'AJ Carter/Book/book.epub' }));
   });
@@ -3183,7 +4056,7 @@ describe('book_per_file mode — runScan', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockFindLooseCandidates).toHaveBeenCalledWith('/library', [], expect.any(Function), undefined);
+    expect(mockFindLooseCandidates).toHaveBeenCalledWith('/library', [], expect.any(Function), undefined, new Set());
     expect(mockFindCandidates).not.toHaveBeenCalled();
   });
 
@@ -3213,7 +4086,7 @@ describe('book_per_file mode — runScan', () => {
     await service.startScan(1, 'manual');
     await done;
 
-    expect(mockFindLooseCandidates).toHaveBeenCalledWith('/library', ['samples', '*.bak'], expect.any(Function), undefined);
+    expect(mockFindLooseCandidates).toHaveBeenCalledWith('/library', ['samples', '*.bak'], expect.any(Function), undefined, new Set());
   });
 
   it('creates one book per loose-file candidate', async () => {
@@ -3373,6 +4246,13 @@ describe('book_per_file mode — scanBookFolder', () => {
       relPath: 'Moved/Alpha.epub',
       ino: 3001n,
     });
+    const sourceFile = makeBookFile({
+      id: 9,
+      bookId: 7,
+      absolutePath: '/library/Alpha.epub',
+      relPath: 'Alpha.epub',
+      ino: 3001n,
+    });
     const repo = makeRepo({
       findLibrarySettings: vi.fn().mockResolvedValue({
         allowedFormats: [],
@@ -3384,17 +4264,10 @@ describe('book_per_file mode — scanBookFolder', () => {
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 1, path: '/library', libraryId: 1 }]),
       findBooksByFolderPath: vi.fn().mockResolvedValue([]),
       findBookFilesByBookIds: vi.fn().mockResolvedValue([]),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([sourceFile]),
       findMissingBookFileWithContextByIno: vi.fn().mockResolvedValue(null),
       findBookFileWithContextByIno: vi.fn().mockResolvedValue({
-        file: {
-          id: 9,
-          bookId: 7,
-          absolutePath: '/library/Alpha.epub',
-          ino: 3001n,
-          sizeBytes: 1024,
-          mtime: new Date('2024-01-01'),
-          fileHash: null,
-        },
+        file: sourceFile,
         libraryId: 1,
         bookStatus: 'present',
         folderPath: '/library/Alpha.epub',
@@ -3516,9 +4389,31 @@ describe('bootstrap, wrappers, and cover refresh', () => {
 
     expect(mockMetadata.refreshCoverForBook).toHaveBeenNthCalledWith(1, 1, '/library/Book/book.epub', 'epub');
     expect(mockMetadata.refreshCoverForBook).toHaveBeenNthCalledWith(2, 3, '/library/Book/book.pdf', 'pdf');
-    expect(mockGateway.emitCoverRefreshed).toHaveBeenCalledWith({ bookId: 1, libraryId: 1 });
+    expect(mockGateway.emitCoverRefreshed).not.toHaveBeenCalled();
     expect(mockGateway.emitCoverRefreshProgress).toHaveBeenNthCalledWith(1, { libraryId: 1, processed: 0, total: 2, status: 'running' });
     expect(mockGateway.emitCoverRefreshProgress).toHaveBeenNthCalledWith(2, { libraryId: 1, processed: 2, total: 2, status: 'completed' });
+  });
+
+  it('re-extracts every slot the book files can fill, then reconciles the book', async () => {
+    const repo = makeRepo({
+      findPrimaryBookFilesByLibrary: vi.fn().mockResolvedValue([{ bookId: 4, absolutePath: '/library/Book/book.epub', format: 'epub' }]),
+      findLibrarySettings: vi.fn().mockResolvedValue({ formatPriority: ['epub', 'm4b'] }),
+      findBookFilesByBookIds: vi.fn().mockResolvedValue([
+        { id: 40, bookId: 4, absolutePath: '/library/Book/book.epub', format: 'epub', role: 'content', sizeBytes: 10, mediaOverlayAvailable: false },
+        { id: 41, bookId: 4, absolutePath: '/library/Book/book.m4b', format: 'm4b', role: 'content', sizeBytes: 10, mediaOverlayAvailable: false },
+        { id: 42, bookId: 4, absolutePath: '/library/Book/cover.jpg', format: 'jpg', role: 'cover', sizeBytes: 10, mediaOverlayAvailable: false },
+      ]),
+    });
+    const coverReconciler = { enqueue: vi.fn().mockResolvedValue(undefined) };
+    mockMetadata.refreshCoverForBook.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const { service } = makeService(repo, undefined, undefined, coverReconciler);
+
+    await expect(service.refreshCovers(1)).resolves.toEqual({ queued: 1 });
+    await vi.waitFor(() => expect(coverReconciler.enqueue).toHaveBeenCalledWith([4]));
+
+    expect(mockMetadata.refreshCoverForBook).toHaveBeenCalledTimes(2);
+    expect(mockMetadata.refreshCoverForBook).toHaveBeenNthCalledWith(1, 4, '/library/Book/book.epub', 'epub', 'ebook');
+    expect(mockMetadata.refreshCoverForBook).toHaveBeenNthCalledWith(2, 4, '/library/Book/book.m4b', 'm4b', 'audio');
   });
 
   it('rethrows refreshCovers query failures', async () => {
@@ -3697,7 +4592,7 @@ describe('incremental scan — dir state', () => {
     await done;
 
     expect(repo.findDirScanStateSnapshot).toHaveBeenCalledWith(1);
-    expect(mockFindCandidates).toHaveBeenCalledWith('/library', [], expect.any(Function), storedMtimes);
+    expect(mockFindCandidates).toHaveBeenCalledWith('/library', [], expect.any(Function), storedMtimes, new Set());
   });
 
   it('persists dir mtimes after successful scan', async () => {
@@ -3877,5 +4772,601 @@ describe('incremental scan — settings invalidation', () => {
     await done;
 
     expect(repo.clearDirScanState).not.toHaveBeenCalled();
+  });
+});
+
+// ── Cover slot reconcile ─────────────────────────────────────────────────────
+
+describe('cover slot reconcile after a scan', () => {
+  function makeReconciler() {
+    return { enqueue: vi.fn().mockResolvedValue(undefined), enqueueExpiredDormant: vi.fn().mockResolvedValue(undefined) };
+  }
+
+  it('reconciles a book whose files changed, and lets dormant slots expire, before the job completes', async () => {
+    const candidate = makeCandidate('/library/Book', [makeFileStat({ absolutePath: '/library/Book/book.epub', relPath: 'Book/book.epub' })]);
+    mockFindCandidates.mockResolvedValue({ candidates: [candidate], skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const repo = makeRepo();
+    const reconciler = makeReconciler();
+    const done = awaitScan(repo);
+    const { service } = makeService(repo, undefined, undefined, reconciler);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(reconciler.enqueue).toHaveBeenCalledWith([1], { filesChanged: true });
+    expect(reconciler.enqueueExpiredDormant).toHaveBeenCalledWith(1);
+    expect(reconciler.enqueue.mock.invocationCallOrder[0]).toBeLessThan(repo.completeScanJob.mock.invocationCallOrder[0]!);
+  });
+
+  it('leaves a book with unchanged files alone', async () => {
+    const mtime = new Date('2024-01-01');
+    const fileStat = makeFileStat({ mtime });
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes, mediaOverlayCheckedAt: new Date('2024-01-01') })]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const reconciler = makeReconciler();
+    const done = awaitScan(repo);
+    const { service } = makeService(repo, undefined, undefined, reconciler);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(reconciler.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('reconciles the book a file was taken from as well as the book it joined', async () => {
+    const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/book.m4b', relPath: 'Author/Book/book.m4b', ino: 1001n, format: 'm4b' });
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ id: 5, bookId: 999, absolutePath: fileStat.absolutePath, ino: fileStat.ino, format: 'm4b' })]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const reconciler = makeReconciler();
+    const done = awaitScan(repo);
+    const { service } = makeService(repo, undefined, undefined, reconciler);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(reconciler.enqueue).toHaveBeenCalledWith(expect.arrayContaining([1, 999]), { filesChanged: true });
+  });
+
+  it('reconciles a book whose EPUB turned out to carry read-along audio', async () => {
+    const mtime = new Date('2024-01-01T00:00:00Z');
+    const fileStat = makeFileStat({ absolutePath: '/library/Author/Book/book.epub', sizeBytes: 1024, mtime });
+    const repo = makeRepo({
+      findBookFilesByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([makeBookFile({ mtime, sizeBytes: fileStat.sizeBytes, mediaOverlayCheckedAt: null, mediaOverlayAvailable: false })]),
+      findBooksByLibraryFolder: vi
+        .fn()
+        .mockResolvedValue([{ id: 1, libraryId: 1, libraryFolderId: 1, folderPath: '/library/Author/Book', status: 'present' }]),
+    });
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [fileStat])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const reconciler = makeReconciler();
+    const done = awaitScan(repo);
+    const { service } = makeService(repo, undefined, undefined, reconciler);
+    vi.spyOn(service as unknown as { inspectMediaOverlayFields: () => Promise<unknown> }, 'inspectMediaOverlayFields').mockResolvedValue({
+      mediaOverlayAvailable: true,
+      mediaOverlayDurationSeconds: 60,
+      mediaOverlayCheckedAt: new Date(),
+    });
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(reconciler.enqueue).toHaveBeenCalledWith([1], { filesChanged: true });
+  });
+});
+
+describe('regex metadata scan integration', () => {
+  const regexConfig = { rules: [{ pattern: '(?<series>[^/]+)/[^/]+$', flags: '' }] };
+  function regexRepo(overrides: Record<string, unknown> = {}) {
+    return makeRepo({
+      findLibrarySettings: vi.fn().mockResolvedValue({
+        allowedFormats: [],
+        formatPriority: DEFAULT_FORMAT_PRIORITY,
+        metadataPrecedence: ['regex', 'embedded', 'opfFile'],
+        regexMetadata: regexConfig,
+        excludePatterns: [],
+        organizationMode: 'book_per_folder',
+      }),
+      ...overrides,
+    });
+  }
+
+  it('passes the primary relative path and precedence to the shared extraction flow', async () => {
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [makeFileStat()])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = regexRepo();
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { seriesName: 'Book' }, diagnostics: [] });
+    await service.startScan(1, 'manual');
+    await done;
+    expect(regexMetadata.evaluate).toHaveBeenCalledWith(regexConfig, 'Author/Book/book.epub');
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenCalledWith(
+      1,
+      [{ key: 'embedded', absolutePath: '/library/Author/Book/book.epub', format: 'epub' }],
+      { seriesName: 'Book' },
+      ['regex', 'embedded', 'opfFile'],
+    );
+    expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+  });
+
+  it.each(['book_per_folder', 'book_per_file'])('refreshes renamed primary paths in %s mode without content changes', async (organizationMode) => {
+    const file = makeFileStat({ absolutePath: '/library/Author/Book/renamed.epub', relPath: 'Author/Book/renamed.epub' });
+    const folderPath = organizationMode === 'book_per_file' ? file.absolutePath : '/library/Author/Book';
+    const walk = { candidates: [makeCandidate(folderPath, [file])], skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() };
+    mockFindCandidates.mockResolvedValue(walk);
+    mockFindLooseCandidates.mockResolvedValue(walk);
+    mockStat.mockRejectedValue(Object.assign(new Error('missing old path'), { code: 'ENOENT' }));
+    const repo = regexRepo({
+      findLibrarySettings: vi.fn().mockResolvedValue({
+        allowedFormats: [],
+        formatPriority: DEFAULT_FORMAT_PRIORITY,
+        metadataPrecedence: ['regex', 'embedded'],
+        regexMetadata: regexConfig,
+        excludePatterns: [],
+        organizationMode,
+      }),
+      findBooksByLibraryFolder: vi.fn().mockResolvedValue([
+        {
+          id: 1,
+          status: 'present',
+          folderPath: organizationMode === 'book_per_file' ? '/library/Author/Book/book.epub' : folderPath,
+          primaryFileId: 1,
+        },
+      ]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile()]),
+    });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { title: 'renamed' }, diagnostics: [] });
+    await service.startScan(1, 'manual', true);
+    await done;
+    expect(regexMetadata.evaluate).toHaveBeenCalledWith(regexConfig, file.relPath);
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenCalledWith(1, expect.any(Array), { title: 'renamed' }, ['regex', 'embedded']);
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('refreshes a changed primary identity unless a self write is active (%s)', async (suppressed) => {
+    const file = makeFileStat();
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [file])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = regexRepo({
+      findBooksByLibraryFolder: vi.fn().mockResolvedValue([{ id: 1, status: 'present', folderPath: '/library/Author/Book', primaryFileId: 2 }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile()]),
+    });
+    const done = awaitScan(repo);
+    const { service, regexMetadata, selfWriteRegistry } = makeService(repo);
+    if (suppressed) selfWriteRegistry.begin([file.absolutePath]);
+    await service.startScan(1, 'manual', true);
+    await done;
+    expect(regexMetadata.evaluate).toHaveBeenCalledTimes(suppressed ? 0 : 1);
+    selfWriteRegistry.end([file.absolutePath]);
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+  });
+
+  it.each(['file extraction failed', 'scoring failed after metadata was saved'])('continues later books without retry after %s', async (message) => {
+    mockFindCandidates.mockResolvedValue({
+      candidates: [
+        makeCandidate('/library/Author/Book', [makeFileStat()]),
+        makeCandidate('/library/Author/Other', [
+          makeFileStat({ absolutePath: '/library/Author/Other/book.epub', relPath: 'Author/Other/book.epub', ino: 2002n }),
+        ]),
+      ],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = regexRepo();
+    repo.createBook
+      .mockResolvedValueOnce({ id: 1, status: 'present', folderPath: '/library/Author/Book' })
+      .mockResolvedValueOnce({ id: 2, status: 'present', folderPath: '/library/Author/Other' });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { title: 'Regex title' }, diagnostics: [] });
+    mockMetadata.extractAndSaveWithRegex.mockRejectedValueOnce(new Error(message));
+    await service.startScan(1, 'manual');
+    await done;
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenCalledTimes(2);
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenNthCalledWith(2, 2, expect.any(Array), { title: 'Regex title' }, [
+      'regex',
+      'embedded',
+      'opfFile',
+    ]);
+    expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+    expect(repo.completeScanJob).toHaveBeenCalled();
+    expect(repo.promoteProcessingBookToPresent).toHaveBeenCalledWith(1);
+    expect(repo.promoteProcessingBookToPresent).toHaveBeenCalledWith(2);
+  });
+
+  it('still uses file metadata when regex evaluation throws before persistence', async () => {
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [makeFileStat()])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = regexRepo();
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockRejectedValue(new Error('worker unavailable'));
+    await service.startScan(1, 'manual');
+    await done;
+    expect(mockMetadata.extractAndSaveWithRegex).not.toHaveBeenCalled();
+    expect(mockMetadata.extractAndSave).toHaveBeenCalledTimes(1);
+    expect(repo.failScanJob).not.toHaveBeenCalled();
+  });
+
+  it('does not re-extract unchanged books on a full scan after changing rules', async () => {
+    mockFindCandidates.mockResolvedValue({
+      candidates: [makeCandidate('/library/Author/Book', [makeFileStat()])],
+      skippedDirs: new Set(),
+      unchangedDirs: new Set(),
+      dirMtimes: new Map(),
+    });
+    const repo = regexRepo({
+      findBooksByLibraryFolder: vi.fn().mockResolvedValue([{ id: 1, status: 'present', folderPath: '/library/Author/Book', primaryFileId: 1 }]),
+      findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([makeBookFile()]),
+    });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    await service.startScan(1, 'manual', true);
+    await done;
+    expect(regexMetadata.evaluate).not.toHaveBeenCalled();
+    expect(mockMetadata.extractAndSaveWithRegex).not.toHaveBeenCalled();
+    expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+  });
+
+  function candidatesFor(count: number) {
+    return Array.from({ length: count }, (_, index) =>
+      makeCandidate(`/library/Author/Book${index}`, [
+        makeFileStat({ absolutePath: `/library/Author/Book${index}/book.epub`, relPath: `Author/Book${index}/book.epub`, ino: BigInt(3000 + index) }),
+      ]),
+    );
+  }
+
+  it('falls back per book after a pool failure and skips regex once failures reach the limit', async () => {
+    mockFindCandidates.mockResolvedValue({ candidates: candidatesFor(4), skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const repo = regexRepo();
+    for (let index = 0; index < 4; index++)
+      repo.createBook.mockResolvedValueOnce({ id: index + 1, status: 'present', folderPath: `/library/Author/Book${index}` });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockResolvedValue({ matched: false, metadata: {}, diagnostics: [{ code: 'timeout' }] });
+    await service.startScan(1, 'manual');
+    await done;
+    expect(regexMetadata.evaluate).toHaveBeenCalledTimes(3);
+    expect(mockMetadata.extractAndSave).toHaveBeenCalledTimes(4);
+    expect(mockMetadata.extractAndSaveWithRegex).not.toHaveBeenCalled();
+  });
+
+  it('keeps applying regex to later books after one book hits a pool failure', async () => {
+    mockFindCandidates.mockResolvedValue({ candidates: candidatesFor(2), skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const repo = regexRepo();
+    repo.createBook
+      .mockResolvedValueOnce({ id: 1, status: 'present', folderPath: '/library/Author/Book0' })
+      .mockResolvedValueOnce({ id: 2, status: 'present', folderPath: '/library/Author/Book1' });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate
+      .mockResolvedValueOnce({ matched: false, metadata: {}, diagnostics: [{ code: 'busy' }] })
+      .mockResolvedValueOnce({ matched: true, metadata: { seriesName: 'Book1' }, diagnostics: [] });
+    await service.startScan(1, 'manual');
+    await done;
+    expect(mockMetadata.extractAndSave).toHaveBeenCalledTimes(1);
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenCalledWith(2, expect.any(Array), { seriesName: 'Book1' }, [
+      'regex',
+      'embedded',
+      'opfFile',
+    ]);
+  });
+
+  it('skips regex for the rest of the scan as soon as the rules themselves fail', async () => {
+    mockFindCandidates.mockResolvedValue({ candidates: candidatesFor(2), skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const repo = regexRepo();
+    repo.createBook
+      .mockResolvedValueOnce({ id: 1, status: 'present', folderPath: '/library/Author/Book0' })
+      .mockResolvedValueOnce({ id: 2, status: 'present', folderPath: '/library/Author/Book1' });
+    const done = awaitScan(repo);
+    const { service, regexMetadata } = makeService(repo);
+    regexMetadata.evaluate.mockResolvedValue({ matched: false, metadata: {}, diagnostics: [{ code: 'invalid_pattern', ruleIndex: 0 }] });
+    await service.startScan(1, 'manual');
+    await done;
+    expect(regexMetadata.evaluate).toHaveBeenCalledTimes(1);
+    expect(mockMetadata.extractAndSave).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('regex metadata outside a scan', () => {
+  const regexConfig = { rules: [{ pattern: '^(?<series>[^/]+)/', flags: '' }] };
+  const book = { id: 7, libraryId: 1, primaryFileId: 11, status: 'present', folderPath: '/library/Series/Book' };
+  const primary = {
+    id: 11,
+    bookId: 7,
+    format: 'epub',
+    role: 'content',
+    absolutePath: '/library/Series/Book/book.epub',
+    relPath: 'Series/Book/book.epub',
+    sizeBytes: 10,
+    durationSeconds: null,
+    mediaOverlayAvailable: false,
+    sortOrder: 0,
+  };
+  function rulesRepo(regexMetadata: unknown) {
+    return makeRepo({
+      findBookById: vi.fn().mockResolvedValue(book),
+      findBookFilesByBookId: vi.fn().mockResolvedValue([primary]),
+      findLibrarySettings: vi.fn().mockResolvedValue({ metadataPrecedence: ['regex', 'embedded'], regexMetadata }),
+    });
+  }
+
+  it('leaves books in libraries without rules to the caller', async () => {
+    const repo = rulesRepo(null);
+    const { service, regexMetadata } = makeService(repo);
+    await expect(service.extractMetadataWithLibraryRules(7)).resolves.toBe(false);
+    expect(repo.findBookFilesByBookId).not.toHaveBeenCalled();
+    expect(regexMetadata.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('applies the rules to the primary file path with the library precedence', async () => {
+    const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+    regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { seriesName: 'Series' }, diagnostics: [] });
+    await expect(service.extractMetadataWithLibraryRules(7)).resolves.toBe(true);
+    expect(regexMetadata.evaluate).toHaveBeenCalledWith(regexConfig, 'Series/Book/book.epub');
+    expect(mockMetadata.extractAndSaveWithRegex).toHaveBeenCalledWith(
+      7,
+      [{ key: 'embedded', absolutePath: '/library/Series/Book/book.epub', format: 'epub' }],
+      { seriesName: 'Series' },
+      ['regex', 'embedded'],
+    );
+    expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+  });
+
+  it('falls back to file metadata when no rule matches the path', async () => {
+    const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+    regexMetadata.evaluate.mockResolvedValue({ matched: false, metadata: {}, diagnostics: [] });
+    await expect(service.extractMetadataWithLibraryRules(7)).resolves.toBe(true);
+    expect(mockMetadata.extractAndSaveWithRegex).not.toHaveBeenCalled();
+    expect(mockMetadata.extractAndSave).toHaveBeenCalledWith(7, '/library/Series/Book/book.epub', 'epub');
+  });
+
+  it('does not read a book this instance is writing', async () => {
+    const { service, regexMetadata, selfWriteRegistry } = makeService(rulesRepo(regexConfig));
+    selfWriteRegistry.begin([primary.absolutePath]);
+    await expect(service.extractMetadataWithLibraryRules(7)).resolves.toBe(true);
+    selfWriteRegistry.end([primary.absolutePath]);
+    expect(regexMetadata.evaluate).not.toHaveBeenCalled();
+    expect(mockMetadata.extractAndSave).not.toHaveBeenCalled();
+  });
+
+  describe('applying saved rules to a book already in the library', () => {
+    const rules = { config: regexConfig, precedence: ['embedded', 'regex'] };
+
+    it('writes only rule-decided fields through the metadata service', async () => {
+      const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+      regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { seriesName: 'Series' }, diagnostics: [] });
+      mockMetadata.applyRegexMetadataRules.mockResolvedValueOnce('updated');
+
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('updated');
+      expect(regexMetadata.evaluate).toHaveBeenCalledWith(regexConfig, 'Series/Book/book.epub');
+      expect(mockMetadata.applyRegexMetadataRules).toHaveBeenCalledWith(
+        7,
+        [{ key: 'embedded', absolutePath: '/library/Series/Book/book.epub', format: 'epub' }],
+        { seriesName: 'Series' },
+        ['embedded', 'regex'],
+      );
+      expect(mockMetadata.extractAndSaveWithRegex).not.toHaveBeenCalled();
+    });
+
+    it('reports an unchanged book when the rules decide what it already has', async () => {
+      const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+      regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { seriesName: 'Series' }, diagnostics: [] });
+
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('unchanged');
+    });
+
+    it('reports a book whose files could not be read', async () => {
+      const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+      regexMetadata.evaluate.mockResolvedValue({ matched: true, metadata: { seriesName: 'Series' }, diagnostics: [] });
+      mockMetadata.applyRegexMetadataRules.mockResolvedValueOnce('unreadable');
+
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('file_unavailable');
+    });
+
+    it('skips a book no rule matches, one without a primary file, and one being written', async () => {
+      const { service, regexMetadata, selfWriteRegistry } = makeService(rulesRepo(regexConfig));
+      regexMetadata.evaluate.mockResolvedValue({ matched: false, metadata: {}, diagnostics: [] });
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('skipped');
+      await expect(service.applyLibraryRulesToBook({ ...book, primaryFileId: null }, [primary] as never, rules)).resolves.toBe('skipped');
+      selfWriteRegistry.begin([primary.absolutePath]);
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('skipped');
+      selfWriteRegistry.end([primary.absolutePath]);
+      expect(regexMetadata.evaluate).toHaveBeenCalledTimes(1);
+      expect(mockMetadata.applyRegexMetadataRules).not.toHaveBeenCalled();
+    });
+
+    it('tells a pool failure apart from rules that cannot run', async () => {
+      const { service, regexMetadata } = makeService(rulesRepo(regexConfig));
+      regexMetadata.evaluate.mockResolvedValueOnce({ matched: false, metadata: {}, diagnostics: [{ code: 'timeout' }] });
+      regexMetadata.evaluate.mockResolvedValueOnce({ matched: false, metadata: {}, diagnostics: [{ code: 'invalid_pattern', ruleIndex: 0 }] });
+
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('rules_unavailable');
+      await expect(service.applyLibraryRulesToBook(book, [primary] as never, rules)).resolves.toBe('rules_invalid');
+    });
+  });
+});
+
+// ── Nested library folders ────────────────────────────────────────────────────
+
+describe('nested library folders', () => {
+  const outer = { id: 1, path: '/library', libraryId: 1 };
+  const inner = { id: 2, path: '/library/comics', libraryId: 2 };
+
+  it('walks the outer folder without the folder of the library nested inside it', async () => {
+    const repo = makeRepo({ findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]) });
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+
+    await service.startScan(1, 'manual');
+    await done;
+
+    expect(mockFindCandidates).toHaveBeenCalledWith('/library', [], expect.any(Function), undefined, new Set(['/library/comics']));
+    expect(repo.findBooksToClaim).not.toHaveBeenCalled();
+  });
+
+  it('moves a book the outer library filed under the nested folder into the nested library before scanning it', async () => {
+    const candidate = makeCandidate('/library/comics/Saga', [
+      makeFileStat({ absolutePath: '/library/comics/Saga/saga.cbz', relPath: 'Saga/saga.cbz', format: 'cbz' }),
+    ]);
+    mockFindCandidates.mockResolvedValue({ candidates: [candidate], skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const order: string[] = [];
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([inner]),
+      findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]),
+      findBooksToClaim: vi.fn().mockResolvedValue([{ id: 42, libraryId: 1, folderPath: '/library/comics/Saga' }]),
+      moveBookToLibrary: vi.fn().mockImplementation(() => {
+        order.push('claim');
+        return Promise.resolve({
+          id: 42,
+          libraryId: 2,
+          libraryFolderId: 2,
+          folderPath: '/library/comics/Saga',
+          status: 'present',
+          primaryFileId: 7,
+          previousLibraryId: 1,
+          libraryChanged: true,
+        });
+      }),
+      findBooksByLibraryFolder: vi.fn().mockImplementation(() => {
+        order.push('load');
+        return Promise.resolve([]);
+      }),
+    });
+    const done = awaitScan(repo);
+    const { service } = makeService(repo);
+
+    await service.startScan(2, 'manual');
+    await done;
+
+    expect(repo.findBooksToClaim).toHaveBeenCalledWith([1], 2, ['/library/comics/Saga']);
+    expect(repo.moveBookToLibrary).toHaveBeenCalledWith(42, 2, 2, '/library/comics/Saga');
+    expect(order).toEqual(['claim', 'load']);
+    expect(mockGateway.emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [42] });
+  });
+
+  it('leaves a book alone while another operation holds the outer library, and skips its folder this scan', async () => {
+    const candidate = makeCandidate('/library/comics/Saga', [
+      makeFileStat({ absolutePath: '/library/comics/Saga/saga.cbz', relPath: 'Saga/saga.cbz', format: 'cbz' }),
+    ]);
+    mockFindCandidates.mockResolvedValue({ candidates: [candidate], skippedDirs: new Set(), unchangedDirs: new Set(), dirMtimes: new Map() });
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([inner]),
+      findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]),
+      findBooksToClaim: vi.fn().mockResolvedValue([{ id: 42, libraryId: 1, folderPath: '/library/comics/Saga' }]),
+    });
+    const done = awaitScan(repo);
+    const { service, libraryGate } = makeService(repo);
+    const release = libraryGate.tryAcquire(1, 'book_merge');
+
+    await service.startScan(2, 'manual');
+    await done;
+    release?.();
+
+    expect(repo.moveBookToLibrary).not.toHaveBeenCalled();
+    expect(repo.createBook).not.toHaveBeenCalled();
+  });
+
+  it('ignores a targeted scan of a path that a nested library owns', async () => {
+    const repo = makeRepo({
+      findLibraryFolders: vi.fn().mockResolvedValue([outer]),
+      findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]),
+    });
+    const { service } = makeService(repo);
+
+    await (service as any).scanBookFolder('/library/comics/Saga/saga.cbz', 1);
+    await (service as any).scanBookDirectory('/library/comics/Saga', 1);
+
+    expect(mockBuildSingleCandidate).not.toHaveBeenCalled();
+    expect(mockFindCandidates).not.toHaveBeenCalled();
+    expect(repo.createBook).not.toHaveBeenCalled();
+  });
+
+  it('answers whether a library owns a path, reading the folders once for a burst of events', async () => {
+    const repo = makeRepo({ findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]) });
+    const { service } = makeService(repo);
+
+    await expect(Promise.all([service.ownsPath(1, '/library/Dune/dune.epub'), service.ownsPath(1, '/library/Emma/emma.epub')])).resolves.toEqual([
+      true,
+      true,
+    ]);
+    await expect(service.ownsPath(2, '/library/comics/Saga/saga.cbz')).resolves.toBe(true);
+    expect(repo.findAllLibraryRoots).toHaveBeenCalledTimes(1);
+
+    service.forgetLibraryRoots();
+    await service.ownsPath(1, '/library/Dune/dune.epub');
+    expect(repo.findAllLibraryRoots).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops an event under a folder another library owns only after reading the folders again', async () => {
+    const repo = makeRepo({ findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]) });
+    const { service } = makeService(repo);
+    await service.ownsPath(1, '/library/Dune/dune.epub');
+
+    await expect(service.ownsPath(1, '/library/comics/Saga/saga.cbz')).resolves.toBe(false);
+    expect(repo.findAllLibraryRoots).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an event for its library when the remembered folders are out of date', async () => {
+    const replacement = { id: 3, path: '/library/comics', libraryId: 3 };
+    const repo = makeRepo({
+      findAllLibraryRoots: vi.fn().mockResolvedValueOnce([outer, inner]).mockResolvedValue([outer, replacement]),
+    });
+    const { service } = makeService(repo);
+    await service.ownsPath(1, '/library/Dune/dune.epub');
+
+    await expect(service.ownsPath(3, '/library/comics/Saga/saga.cbz')).resolves.toBe(true);
+    await expect(service.ownsPath(2, '/library/comics/Saga/saga.cbz')).resolves.toBe(false);
+  });
+
+  it('leaves a path under no known library folder to the library that saw it', async () => {
+    const repo = makeRepo({ findAllLibraryRoots: vi.fn().mockResolvedValue([outer, inner]) });
+    const { service } = makeService(repo);
+
+    await expect(service.ownsPath(1, '/private/library/Dune/dune.epub')).resolves.toBe(true);
+    expect(repo.findAllLibraryRoots).toHaveBeenCalledTimes(1);
   });
 });

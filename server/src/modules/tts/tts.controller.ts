@@ -2,7 +2,9 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Post, Put
 import type { FastifyReply } from 'fastify';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { ResolvesMergedBook } from '../../common/decorators/resolves-merged-book.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { PreviewVoiceDto, SynthesizeDto } from './dto/synthesize.dto';
 import { UpdateTtsPreferencesDto } from './dto/tts-preferences.dto';
 import { SaveTtsPositionDto } from './dto/tts-position.dto';
@@ -13,10 +15,26 @@ import { TtsService } from './tts.service';
 export class TtsController {
   constructor(private readonly ttsService: TtsService) {}
 
+  /**
+   * A reader that skips ahead or changes voice drops the request, and the provider call is cancelled
+   * with it. Not `request.signal`: Fastify aborts that once the request body has been read.
+   */
   @Post('synthesize')
   async synthesize(@Body() dto: SynthesizeDto, @Res() reply: FastifyReply) {
-    const buffer = await this.ttsService.synthesize(dto);
-    void reply.header('Content-Type', ttsContentType(dto.format)).header('Content-Length', buffer.length).send(buffer);
+    const disconnected = new AbortController();
+    const handleClose = () => {
+      if (!reply.raw.writableEnded) disconnected.abort();
+    };
+    reply.raw.on('close', handleClose);
+    try {
+      const buffer = await this.ttsService.synthesize(dto, disconnected.signal);
+      void reply.header('Content-Type', ttsContentType(dto.format)).header('Content-Length', buffer.length).send(buffer);
+    } catch (err) {
+      if (disconnected.signal.aborted) return;
+      throw err;
+    } finally {
+      reply.raw.off('close', handleClose);
+    }
   }
 
   /**
@@ -25,6 +43,7 @@ export class TtsController {
    * that do not need them.
    */
   @Post('synthesize/captioned')
+  @RequireAppAttest()
   @HttpCode(200)
   synthesizeCaptioned(@Body() dto: SynthesizeDto) {
     return this.ttsService.synthesizeCaptioned(dto);
@@ -57,17 +76,20 @@ export class TtsController {
     return this.ttsService.saveUserPreferences(user.id, dto);
   }
 
+  @ResolvesMergedBook({ params: ['bookId'] })
   @Get('preferences/book/:bookId')
   getBookPreferences(@Param('bookId', ParseIntPipe) bookId: number, @CurrentUser() user: RequestUser) {
     return this.ttsService.getEffectiveBookPreferences(user.id, bookId, user);
   }
 
+  @ResolvesMergedBook({ params: ['bookId'] })
   @Put('preferences/book/:bookId')
   @HttpCode(200)
   saveBookPreferences(@Param('bookId', ParseIntPipe) bookId: number, @Body() dto: UpdateTtsPreferencesDto, @CurrentUser() user: RequestUser) {
     return this.ttsService.saveBookPreferences(user.id, bookId, dto, user);
   }
 
+  @ResolvesMergedBook({ params: ['bookId'] })
   @Delete('preferences/book/:bookId')
   @HttpCode(204)
   async deleteBookPreferences(@Param('bookId', ParseIntPipe) bookId: number, @CurrentUser() user: RequestUser) {

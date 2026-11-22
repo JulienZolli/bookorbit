@@ -48,7 +48,7 @@ import type {
 import { isUniqueViolation } from '../../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import type { RequestUser } from '../../../common/types/request-user';
-import type { BookRequestDownloadRow, BookRequestRow } from '../../../db/schema';
+import type { BookRequestDownloadRow, BookRequestRow, NewBookRequestRow } from '../../../db/schema';
 import { BOOK_REQUEST_DOWNLOAD_FAILED, BookRequestEventsService } from '../book-request-events.service';
 import { BookRequestGateway } from '../book-request.gateway';
 import { BookRequestNotifier } from '../book-request-notifier.service';
@@ -60,6 +60,7 @@ import { DownloadClientRegistry } from '../download-clients/download-client-regi
 import { ADD_PATH_MAPPING_HINT } from '../download-clients/path-mapping.service';
 import {
   IndexerSearchException,
+  IndexerRetryExhaustedException,
   type IndexerAdapter,
   type ReleaseCandidate,
   type ReleaseFile,
@@ -96,6 +97,12 @@ const UNSEARCHABLE: BookRequestStatus[] = ['rejected', 'cancelled'];
 
 /** Tracker conditions that pass on their own, so the same release is worth another attempt later. */
 const RETRYABLE_INDEXER_FAILURES: IndexerSearchFailure[] = ['timeout', 'unreachable', 'throttled'];
+
+/** The stable code a failure is recorded with beside its English reason, and the code's parameters. */
+export interface ClassifiedRequestFailure {
+  code: BookRequestHandbackCode;
+  meta?: BookRequestFailureMeta;
+}
 
 function normalizeReleaseSearchOverrides(dto: SearchBookRequestReleasesDto): ReleaseSearchOverrides {
   const overrides: ReleaseSearchOverrides = {};
@@ -267,6 +274,8 @@ export class RequestFulfillmentService {
         automated: user === null,
         releaseTitle: grab.releaseTitle,
         releaseGuid: grab.releaseGuid ?? null,
+        releaseInfoUrl: grab.releaseInfoUrl ?? null,
+        holdForReview: dto.holdForReview === true,
         releaseSizeBytes: grab.releaseSizeBytes,
         releaseSeeders: grab.releaseSeeders ?? null,
         releaseFormat: grab.releaseFormat ?? null,
@@ -335,10 +344,12 @@ export class RequestFulfillmentService {
         `[book_request.grab] [fail] requestId=${requestId} downloadId=${download.id} clientId=${client?.id ?? 'direct'} error="${sanitizeLogValue(message)}" - the download could not be started`,
       );
       // Which half refused decides what another attempt should do: a client that is down refuses
-      // every torrent alike, while a file BookOrbit fetches itself was refused by the source.
+      // every torrent alike, while a file BookOrbit fetches itself was refused by the source. The
+      // client's configured name lets the picker say which one, in the reader's language.
       throw withGrabCode(
         error,
         client === null ? 'GRAB_SOURCE_REFUSED' : isServiceUnavailable(error) ? 'GRAB_CLIENT_UNAVAILABLE' : 'GRAB_CLIENT_REFUSED',
+        client === null ? undefined : { client: client.name },
       );
     }
 
@@ -360,7 +371,9 @@ export class RequestFulfillmentService {
     try {
       return await run();
     } catch (error) {
-      if (!automated || !isTransientGrabFailure(error)) throw error;
+      if (!automated || !isTransientGrabFailure(error) || (error instanceof HttpException && error.cause instanceof IndexerRetryExhaustedException)) {
+        throw error;
+      }
 
       const code = grabFailureCode(error) ?? (phase === 'client' ? 'GRAB_CLIENT_UNAVAILABLE' : 'GRAB_SOURCE_UNAVAILABLE');
       this.logger.warn(
@@ -397,6 +410,7 @@ export class RequestFulfillmentService {
         automated: user === null,
         releaseTitle: release.title.slice(0, 500),
         releaseGuid,
+        releaseInfoUrl: release.infoUrl ?? null,
         releaseSizeBytes: release.sizeBytes,
         releaseSeeders: release.seeders,
         releaseFormat: resolveFormat(release)?.slice(0, 20) ?? null,
@@ -445,7 +459,7 @@ export class RequestFulfillmentService {
     requestId: number,
     status: BookRequestStatus,
     statusReason?: string | null,
-    failure?: { code: BookRequestHandbackCode; meta?: BookRequestFailureMeta } | null,
+    failure?: ClassifiedRequestFailure | null,
     from: readonly BookRequestStatus[] = WORKER_WRITABLE_BOOK_REQUEST_STATUSES,
   ): Promise<boolean> {
     const updated = await this.requests.updateIf(requestId, from, {
@@ -459,9 +473,10 @@ export class RequestFulfillmentService {
 
   /**
    * The single way an attempt ends badly, so every caller produces the same request state, the
-   * same audit trail and the same approver notification.
+   * same audit trail and the same approver notification. `reason` is always recorded; `failure`
+   * only adds a code a client can translate, so a client that does not know it still has the prose.
    */
-  async failDownload(download: BookRequestDownloadRow, reason: string): Promise<void> {
+  async failDownload(download: BookRequestDownloadRow, reason: string, failure?: ClassifiedRequestFailure): Promise<void> {
     // Removed before the attempt is marked failed, because failing it is what can start an automatic
     // retry: a torrent still waiting on its file selection wants every file, and a retry of the same
     // pack would adopt it and download the whole of it.
@@ -493,7 +508,12 @@ export class RequestFulfillmentService {
     ) {
       return;
     }
-    if (!(await this.requests.updateIf(download.requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, { status: 'failed', statusReason: reason }))) {
+    const failed: Partial<NewBookRequestRow> = {
+      status: 'failed',
+      statusReason: reason,
+      ...(failure ? { failureCode: failure.code, failureMeta: failure.meta ?? null } : {}),
+    };
+    if (!(await this.requests.updateIf(download.requestId, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, failed))) {
       this.logger.log(
         `[book_request.download] [end] requestId=${download.requestId} downloadId=${download.id} - the attempt failed after the request was settled, so the request was left alone`,
       );
@@ -692,6 +712,7 @@ export class RequestFulfillmentService {
       indexerAdapterType: indexer.adapterType,
       releaseGuid: release.guid,
       releaseTitle: release.title.slice(0, 500),
+      releaseInfoUrl: release.infoUrl ?? null,
       releaseSizeBytes: release.sizeBytes,
       releaseSeeders: release.seeders,
       // The resolved format, not the raw field: most indexers state none and it is read off the
@@ -832,7 +853,7 @@ export class RequestFulfillmentService {
     }
 
     const client = await this.clients.findOne(requestedId);
-    if (!client.enabled) throw grabError('GRAB_CLIENT_REFUSED', `Download client "${client.name}" is disabled`);
+    if (!client.enabled) throw grabError('GRAB_CLIENT_REFUSED', `Download client "${client.name}" is disabled`, { client: client.name });
     this.assertClientCanDeliver(client, source);
     this.assertClientCanImport(client);
     return client;
@@ -842,13 +863,24 @@ export class RequestFulfillmentService {
    * A client with no path mapping declares no directory the import is allowed to read out of, so
    * the attempt would seed for hours and then be refused the moment it finished. Rows that predate
    * mappings being mandatory are what reaches this; refusing now says so while somebody is looking.
+   *
+   * A client that stages its own files is the exception: it lands them under a root BookOrbit owns,
+   * so it has no import root to declare and is saved without mappings by design.
    */
-  private assertClientCanImport(client: { name: string; pathMappings: readonly unknown[] }): void {
-    if (client.pathMappings.length > 0) return;
+  private assertClientCanImport(client: {
+    name: string;
+    adapterType: keyof typeof DOWNLOAD_CLIENT_DELIVERY;
+    pathMappings: readonly unknown[];
+  }): void {
+    if (client.pathMappings.length > 0 || this.stagesLocally(client.adapterType)) return;
     throw grabError(
       'GRAB_CLIENT_REFUSED',
       `Download client "${client.name}" has no path mapping, so nothing it downloads could be imported. ${ADD_PATH_MAPPING_HINT}`,
     );
+  }
+
+  private stagesLocally(adapterType: keyof typeof DOWNLOAD_CLIENT_DELIVERY): boolean {
+    return typeof this.registry.find(adapterType)?.stage === 'function';
   }
 
   /**
@@ -927,7 +959,10 @@ async function resolveReleaseFile(adapter: IndexerAdapter, release: ReleaseCandi
  */
 function indexerRefusal(error: IndexerSearchException, release: ReleaseCandidate): HttpException {
   if (RETRYABLE_INDEXER_FAILURES.includes(error.failure)) {
-    return grabUnavailable('GRAB_SOURCE_UNAVAILABLE', error.message);
+    return new ServiceUnavailableException(
+      { message: error.message, errorCode: 'GRAB_SOURCE_UNAVAILABLE' satisfies GrabFailureCode, statusCode: HttpStatus.SERVICE_UNAVAILABLE },
+      { cause: error },
+    );
   }
   return grabError(release.vipOnly === true ? 'GRAB_VIP_REQUIRED' : 'GRAB_SOURCE_REFUSED', error.message);
 }
@@ -943,16 +978,16 @@ function errorCodeOf(error: unknown): string {
   return typeof code === 'string' ? code : 'UNKNOWN';
 }
 
-function grabError(errorCode: GrabFailureCode, message: string): BadRequestException {
-  return new BadRequestException({ message, errorCode, statusCode: HttpStatus.BAD_REQUEST });
+function grabError(errorCode: GrabFailureCode, message: string, errorMeta?: BookRequestFailureMeta): BadRequestException {
+  return new BadRequestException({ message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: HttpStatus.BAD_REQUEST });
 }
 
-function grabUnavailable(errorCode: GrabFailureCode, message: string): ServiceUnavailableException {
-  return new ServiceUnavailableException({ message, errorCode, statusCode: HttpStatus.SERVICE_UNAVAILABLE });
+function grabUnavailable(errorCode: GrabFailureCode, message: string, errorMeta?: BookRequestFailureMeta): ServiceUnavailableException {
+  return new ServiceUnavailableException({ message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: HttpStatus.SERVICE_UNAVAILABLE });
 }
 
-function grabConflict(errorCode: GrabFailureCode, message: string): ConflictException {
-  return new ConflictException({ message, errorCode, statusCode: HttpStatus.CONFLICT });
+function grabConflict(errorCode: GrabFailureCode, message: string, errorMeta?: BookRequestFailureMeta): ConflictException {
+  return new ConflictException({ message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: HttpStatus.CONFLICT });
 }
 
 /**
@@ -974,14 +1009,14 @@ export class RequestAlreadyClaimedException extends ConflictException {
  * Anything that is not an HTTP failure is handed back untouched: an unexpected error is a fault
  * on our side, and dressing it as a refusal would let the failover route around a real bug.
  */
-function withGrabCode(error: unknown, errorCode: GrabFailureCode): unknown {
+function withGrabCode(error: unknown, errorCode: GrabFailureCode, errorMeta?: BookRequestFailureMeta): unknown {
   if (!(error instanceof HttpException)) return error;
 
   const status = error.getStatus();
-  if (status === (HttpStatus.SERVICE_UNAVAILABLE as number)) return grabUnavailable(errorCode, error.message);
-  if (status === (HttpStatus.CONFLICT as number)) return grabConflict(errorCode, error.message);
-  if (status === (HttpStatus.BAD_REQUEST as number)) return grabError(errorCode, error.message);
-  return new HttpException({ message: error.message, errorCode, statusCode: status }, status);
+  if (status === (HttpStatus.SERVICE_UNAVAILABLE as number)) return grabUnavailable(errorCode, error.message, errorMeta);
+  if (status === (HttpStatus.CONFLICT as number)) return grabConflict(errorCode, error.message, errorMeta);
+  if (status === (HttpStatus.BAD_REQUEST as number)) return grabError(errorCode, error.message, errorMeta);
+  return new HttpException({ message: error.message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: status }, status);
 }
 
 function isServiceUnavailable(error: unknown): boolean {
@@ -1023,6 +1058,8 @@ interface ResolvedGrab extends ParsedGrab {
   indexerName?: string;
   indexerAdapterType?: string;
   releaseGuid?: string;
+  /** Vetted by the search that produced the release, so it is safe to keep and show. */
+  releaseInfoUrl?: string | null;
   releaseSeeders?: number | null;
   releaseFormat?: string | null;
   freeleech?: boolean;

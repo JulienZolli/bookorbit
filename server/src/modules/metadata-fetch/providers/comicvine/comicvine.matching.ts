@@ -1,8 +1,55 @@
+import { parseSeriesIndex, type MetadataCandidate } from '@bookorbit/types';
+
+import { normalizeTitleText, scoreTitleMatch } from '../../../../common/text-match/title-match';
+import { splitSeriesRunYear } from '../../../../common/utils/series-run-year.utils';
+import type { MetadataSearchParams } from '../metadata-search-params';
 import { ComicVineVolume } from './comicvine.types';
 
 const LEADING_ARTICLE = /^(?:the|a|an)\s+/;
-const NON_ALPHANUMERIC = /[^a-z0-9]+/g;
 const LEADING_ZEROS = /^0+(?=\d)/;
+const ISSUE_PATTERN = /^(.*?)\s*#(\d[\d.]*)(.*)$/;
+
+interface ParsedIssueTitle {
+  seriesName: string;
+  issueNumber: string;
+  /** The run's start year when the series was named "Title (Year)". */
+  startYear?: number;
+}
+
+/** An explicit issue target wins; a typed series overrides the stored series but keeps its issue. */
+export function resolveComicVineIssueQuery(params: MetadataSearchParams): ParsedIssueTitle | null {
+  const match = params.title ? ISSUE_PATTERN.exec(params.title.trim()) : null;
+  if (match?.[1].trim()) return issueQuery(match[1], match[2]);
+
+  const issueNumber = parseSeriesIndex(params.seriesIndex);
+  const typedSeriesName = params.titleIsExplicitQuery ? params.title?.trim() : undefined;
+  if (typedSeriesName) return issueNumber ? issueQuery(typedSeriesName, issueNumber) : null;
+
+  const seriesName = params.seriesName?.trim();
+  return seriesName && issueNumber ? issueQuery(seriesName, issueNumber) : null;
+}
+
+/**
+ * ComicVine names a run without its year and `filter=name:` is a substring match, so a series
+ * folder named "Batman (2016)" would find nothing. The year moves into ranking instead.
+ */
+function issueQuery(seriesName: string, issueNumber: string): ParsedIssueTitle {
+  const trimmed = seriesName.trim();
+  const run = splitSeriesRunYear(trimmed);
+  return run
+    ? { seriesName: run.base, issueNumber: normalizeIssueNumber(issueNumber), startYear: run.year }
+    : { seriesName: trimmed, issueNumber: normalizeIssueNumber(issueNumber) };
+}
+
+/** An issue subtitle is not evidence that a different run is a better series/number match. */
+export function scoreComicVineIssue(candidate: MetadataCandidate, params: MetadataSearchParams): number | null {
+  const query = resolveComicVineIssueQuery(params);
+  const seriesName = candidate.comicMetadata?.volumeName ?? candidate.seriesName;
+  const issueNumber = candidate.comicMetadata?.issueNumber ?? parseSeriesIndex(candidate.seriesIndex);
+  if (!query || !seriesName || !issueNumber) return null;
+  if (normalizeIssueNumber(issueNumber) !== query.issueNumber) return 0;
+  return scoreTitleMatch(normalizeName(query.seriesName), normalizeName(seriesName));
+}
 
 /**
  * ComicVine stores issue numbers unpadded, so a padded number lifted from a filename
@@ -14,7 +61,7 @@ export function normalizeIssueNumber(raw: string): string {
 }
 
 function normalizeName(name: string): string {
-  return name.toLowerCase().replace(LEADING_ARTICLE, '').replace(NON_ALPHANUMERIC, ' ').trim();
+  return normalizeTitleText(name).replace(LEADING_ARTICLE, '');
 }
 
 /**
@@ -43,22 +90,24 @@ function holdsIssuePlausibly(volume: ComicVineVolume, issueNumber: string): bool
   return volume.count_of_issues >= target;
 }
 
-function startYear(volume: ComicVineVolume): number {
+function volumeStartYear(volume: ComicVineVolume): number {
   const year = volume.start_year ? parseInt(volume.start_year, 10) : NaN;
   return Number.isFinite(year) ? year : 0;
 }
 
-function score(volume: ComicVineVolume, seriesName: string, issueNumber: string): number {
-  return nameScore(volume.name, seriesName) * 2 + (holdsIssuePlausibly(volume, issueNumber) ? 1 : 0);
+export function volumeMatchScore(volume: ComicVineVolume, seriesName: string, issueNumber: string, startYear?: number): number {
+  const yearMatches = startYear !== undefined && startYear === volumeStartYear(volume);
+  return nameScore(volume.name, seriesName) * 4 + (yearMatches ? 2 : 0) + (holdsIssuePlausibly(volume, issueNumber) ? 1 : 0);
 }
 
 /**
  * Orders candidate volumes by how likely each is to hold the wanted issue: name match first, then
- * whether the volume ran long enough, then the most recent run. Stable within equal scores.
+ * the run year the series was named with, then whether the volume ran long enough, then the most
+ * recent run. Stable within equal scores.
  */
-export function rankVolumes(volumes: ComicVineVolume[], seriesName: string, issueNumber: string): ComicVineVolume[] {
+export function rankVolumes(volumes: ComicVineVolume[], seriesName: string, issueNumber: string, startYear?: number): ComicVineVolume[] {
   return volumes
-    .map((volume, index) => ({ volume, index, score: score(volume, seriesName, issueNumber) }))
-    .sort((a, b) => b.score - a.score || startYear(b.volume) - startYear(a.volume) || a.index - b.index)
+    .map((volume, index) => ({ volume, index, score: volumeMatchScore(volume, seriesName, issueNumber, startYear) }))
+    .sort((a, b) => b.score - a.score || volumeStartYear(b.volume) - volumeStartYear(a.volume) || a.index - b.index)
     .map((entry) => entry.volume);
 }

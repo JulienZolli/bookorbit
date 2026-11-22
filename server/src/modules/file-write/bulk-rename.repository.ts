@@ -26,6 +26,7 @@ export interface BulkRenameBookData {
     subtitle: string | null;
     publisher: string | null;
     language: string | null;
+    isbn10: string | null;
     isbn13: string | null;
     publishedYear: number | null;
     seriesName: string | null;
@@ -62,6 +63,7 @@ export class BulkRenameRepository {
         subtitle: bookMetadata.subtitle,
         publisher: bookMetadata.publisher,
         language: bookMetadata.language,
+        isbn10: bookMetadata.isbn10,
         isbn13: bookMetadata.isbn13,
         publishedYear: bookMetadata.publishedYear,
         seriesName: bookMetadata.seriesName,
@@ -106,6 +108,7 @@ export class BulkRenameRepository {
           format: bookFiles.format,
           role: bookFiles.role,
           sortOrder: bookFiles.sortOrder,
+          mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         })
         .from(bookFiles)
         .where(inArray(bookFiles.bookId, libraryBookIds))
@@ -120,6 +123,7 @@ export class BulkRenameRepository {
         format: row.format,
         role: row.role,
         sortOrder: row.sortOrder,
+        mediaOverlayAvailable: row.mediaOverlayAvailable,
       };
       const existing = filesByBook.get(row.bookId);
       if (existing) existing.push(entry);
@@ -159,6 +163,7 @@ export class BulkRenameRepository {
         subtitle: row.subtitle,
         publisher: row.publisher,
         language: row.language,
+        isbn10: row.isbn10,
         isbn13: row.isbn13,
         publishedYear: row.publishedYear,
         seriesName: row.seriesName,

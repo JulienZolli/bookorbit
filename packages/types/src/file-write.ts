@@ -187,12 +187,46 @@ export function getBookFileWriteFormatFields(format: string | null | undefined):
   return BOOK_FILE_WRITE_FORMAT_FIELDS[key as keyof typeof BOOK_FILE_WRITE_FORMAT_FIELDS] ?? [];
 }
 
+export type WriteResultFileCounts = {
+  processed: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+};
+
 export type WriteResult = {
   status: "success" | "skipped" | "failed";
   fieldsWritten: string[];
   durationMs: number;
   reason?: string;
+  /** Per-file outcome counts, present when a book wrote to more than one file. `status` stays the aggregate. */
+  fileCounts?: WriteResultFileCounts;
 };
+
+/** Why embedding a book's audiobook cover in its read-along EPUBs did what it did, for copy a client localizes. */
+export const AUDIO_COVER_EMBED_CODES = [
+  "embedded",
+  "unchanged",
+  "no_read_along_file",
+  "no_audio_cover",
+  "write_disabled",
+  "over_size_limit",
+  "unsupported",
+  "failed",
+] as const;
+
+export type AudioCoverEmbedCode = (typeof AUDIO_COVER_EMBED_CODES)[number];
+
+export type AudioCoverEmbedResult = WriteResult & { code: AudioCoverEmbedCode };
+
+/**
+ * One event of the stream that embeds audiobook covers into the read-along EPUBs of a selection of
+ * books. `started` comes first and counts the books that hold one, which is fewer than were selected.
+ */
+export type AudioCoverEmbedProgressEvent =
+  | { started: true; total: number }
+  | { bookId: number; status: "success" | "failed" | "skipped"; reason?: string }
+  | { done: true; processed: number; succeeded: number; failed: number; skipped: number; cancelled: boolean };
 
 export type LibraryFileSyncProgressEvent =
   | { bookId: number; status: "success" | "failed" | "skipped"; reason?: string }

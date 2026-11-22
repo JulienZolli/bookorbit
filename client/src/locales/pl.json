@@ -16,7 +16,14 @@
     "yes": "Tak",
     "no": "Nie",
     "show": "Pokaż",
-    "hide": "Ukryj"
+    "hide": "Ukryj",
+    "undo": "Cofnij",
+    "pagination": {
+      "pageOf": "Strona {page} z {totalPages}",
+      "previousPage": "Poprzednia strona",
+      "nextPage": "Następna strona",
+      "goToPage": "Przejdź do strony {page}"
+    }
   },
   "settings": {
     "privacySharing": {
@@ -99,9 +106,24 @@
       },
       "theme": {
         "title": "Motyw",
+        "style": {
+          "label": "Styl",
+          "hint": "Ogólny wygląd aplikacji. Tryb, akcent, narożniki i tło zachowują swoje ustawienia.",
+          "bookorbit": {
+            "label": "BookOrbit"
+          }
+        },
         "colorScheme": {
           "label": "Schemat kolorów",
           "hint": "Jasny lub ciemny interfejs"
+        },
+        "surfacePalette": {
+          "palettes": {
+            "onyx": "Onyx"
+          }
+        },
+        "topGlow": {
+          "value": "{value}%"
         },
         "accents": {
           "grey": "Szary",
@@ -175,7 +197,12 @@
         },
         "cornerRadius": {
           "label": "Promień narożnika",
-          "hint": "Zaokrąglenie kart i elementów interfejsu użytkownika"
+          "hint": "Zaokrąglenie kart i elementów interfejsu użytkownika",
+          "options": {
+            "sharp": "Ostre",
+            "default": "Domyślne",
+            "rounded": "Zaokrąglone"
+          }
         },
         "surfaceBrightness": {
           "label": "Jasność powierzchni",
@@ -194,7 +221,8 @@
           "structural": "Strukturalny",
           "ambient": "Otoczenie",
           "refractive": "Refrakcyjne"
-        }
+        },
+        "syncSaveFailed": "Nie udało się zapisać ustawień motywu"
       },
       "storage": {
         "title": "Gdzie zapisać preferencje wyglądu",
@@ -419,6 +447,11 @@
         "collapseSeries": {
           "label": "Domyślnie zwiń serię",
           "hint": "Grupuj książki z tej samej serii w jedną kartę w widokach biblioteki i kolekcji"
+        },
+        "bookRequests": {
+          "label": "Pokaż zapytania o książkę",
+          "hint": "Pokaż strony zapytań, komunikaty i ustawienia na tym koncie. Istniejące żądania nadal pracują w tle.",
+          "saveFailed": "Nie można zaktualizować widoczności zapytań o książkę"
         }
       },
       "icons": {
@@ -732,6 +765,8 @@
       "test": {
         "connected": "Połączono - {issuer}",
         "connectionFailed": "Połączenie nie powiodło się",
+        "privateIssuerAddress": "Adres URL wystawcy wskazuje na adres z prywatnej lub lokalnej sieci, dlatego serwer odmówił połączenia. Aby na to zezwolić, ustaw zmienną OIDC_ALLOW_LOCAL_ISSUERS=true na serwerze BookOrbit.",
+        "tlsCertificateUntrusted": "BookOrbit nie mógł zweryfikować certyfikatu TLS dostawcy OIDC. Jeśli dostawca korzysta z prywatnego urzędu certyfikacji, zamontuj plik PEM zawierający certyfikaty CA, ustaw zmienną NODE_EXTRA_CA_CERTS na ścieżkę do tego pliku wewnątrz kontenera, a następnie uruchom ponownie BookOrbit.",
         "hide": "Ukryj",
         "details": "Szczegóły",
         "supported": "obsługiwane",
@@ -789,6 +824,7 @@
         "migrationCompleted": "Migracja zakończona",
         "migrationFailed": "Migracja nie powiodła się",
         "importDescription": "Jednorazowy import książek, metadanych i postępu czytania z poprzedniej instalacji Booklore.",
+        "migrationDescription": "Jednorazowy import książek, metadanych i postępu czytania z innej aplikacji bibliotecznej.",
         "configuredDescription": "Źródło: {name}. Nie przeprowadzono jeszcze migracji - kontynuuj konfigurację, aby uruchomić import.",
         "runningDescription": "Etap: {stage} - rozpoczęty {started}",
         "completedDescription": "Od {name} - ukończono {date}",
@@ -830,6 +866,7 @@
       "migration": {
         "title": "Migracja",
         "subtitle": "Jednorazowy import Booklore: podłącz źródło, zmapuj użytkowników, wykonaj próbę próbną, rozpocznij migrację i wyeksportuj raport.",
+        "genericSubtitle": "Jednorazowy import biblioteki: połącz źródło, przyporządkuj użytkowników, uruchom próbę migracji, rozpocznij migrację i wyeksportuj raport.",
         "progress": "Postęp",
         "stepSourceConnection": "Połączenie źródłowe",
         "stepUserPathMapping": "Mapowanie użytkowników i ścieżek",
@@ -1112,6 +1149,7 @@
         "filterClear": "Wyczyść filtry",
         "sortLabel": "Sortuj",
         "neverScanned": "Nigdy nie skanowane",
+        "neverScannedHint": "Uruchom skan, aby zindeksować foldery",
         "scanFailedAt": "Nieudane {time}",
         "scanningPercent": "Skanowanie {pct}%",
         "scanCounting": "Liczenie plików",
@@ -1186,6 +1224,7 @@
           "historyEmpty": "Ta biblioteka nigdy nie została zeskanowana.",
           "historyFailed": "Nie udało się załadować historii skanowania dla tej biblioteki."
         },
+        "scannedAt": "Zeskanowano {time}",
         "detailRegion": "Szczegóły dotyczące {name}"
       },
       "authorEnrichment": {
@@ -4743,18 +4782,6 @@
       "seeAllLibraries": "Zobacz wszystkie biblioteki ({count})",
       "seeAllSmartScopes": "Zobacz wszystkie inteligentne zakresy ({count})",
       "seeAllCollections": "Zobacz wszystkie kolekcje ({count})",
-      "podcasts": "Podcasts",
-      "newPodcastLibrary": "New Podcast Library",
-      "noPodcastLibraries": "No podcast libraries yet",
-      "filterPodcastLibraries": "Filter podcast libraries",
-      "filterPodcastLibrariesPlaceholder": "Filter podcast libraries...",
-      "seeAllPodcastLibraries": "See all podcast libraries ({count})",
-      "queue": "Queue",
-      "mode": {
-        "books": "Books",
-        "podcasts": "Podcasts",
-        "switcherAria": "Switch between books and podcasts"
-      },
       "updateAvailable": "Aktualizuj {version}",
       "zones": {
         "browse": "Przeglądaj"
@@ -4849,11 +4876,6 @@
       "description": "Ten {entity} nie istnieje lub został usunięty.",
       "goBack": "Wróć"
     },
-    "media": {
-      "volume": "Volume",
-      "mute": "Mute",
-      "unmute": "Unmute"
-    },
     "themePicker": {
       "light": "Światło",
       "dark": "Ciemny",
@@ -4879,8 +4901,7 @@
       "sort": {
         "custom": "Kolejność niestandardowa",
         "name": "Nazwa",
-        "bookCount": "Liczba książek",
-        "showCount": "Show count"
+        "bookCount": "Liczba książek"
       },
       "ascending": "Rosnąco",
       "descending": "Malejąco",
@@ -4889,9 +4910,7 @@
       "noMatches": "Brak dopasowań",
       "noMatchesHint": "Spróbuj innego wyszukiwanego hasła.",
       "bookCount": "Książki: {count}",
-      "showCount": "Shows: {count}",
       "librariesEmptyHint": "Utwórz bibliotekę, aby zacząć dodawać książki.",
-      "podcastLibrariesEmptyHint": "Create a podcast library to start following shows.",
       "smartScopesEmptyHint": "Inteligentne zakresy zapisują zestaw często używanych filtrów.",
       "collectionsEmptyHint": "Kolekcje grupują książki wybrane ręcznie."
     }
@@ -5254,15 +5273,7 @@
     }
   },
   "errors": {
-    "network": "Could not reach BookOrbit. Check your connection, then try again.",
-    "codes": {
-      "PODCAST_LOCAL_NO_REFRESH": "This show has no feed, so there is nothing to refresh.",
-      "PODCAST_LOCAL_NO_DOWNLOAD": "This episode is one of your own files, so there is nothing to download. Your copy is already the only one.",
-      "PODCAST_LOCAL_FILE_NOT_REMOVABLE": "This episode is one of your own files, so BookOrbit will not delete it. Remove it from the folder yourself.",
-      "PODCAST_LOCAL_MEDIA_MISSING": "The only copy of this episode is no longer on disk, so it cannot be played.",
-      "PODCAST_LOCAL_FOLDER_EMPTY": "This folder holds no audio BookOrbit can import, so it cannot become a show.",
-      "PODCAST_STORAGE_FULL": "This podcast library is out of storage. Free some space or raise its quota, then try again. Files that belong to local shows are never removed to make room."
-    }
+    "network": "Could not reach BookOrbit. Check your connection, then try again."
   },
   "hardcover": {
     "settings": {
@@ -5498,9 +5509,7 @@
         "browseDescription": "Wybierz jeden lub więcej folderów bez opuszczania przeglądarki.",
         "selectedTitle": "Wybrane foldery",
         "addFolders": "Dodaj foldery",
-        "manualEntry": "Wprowadź ścieżkę ręcznie",
         "absolutePath": "Bezwzględna ścieżka serwera",
-        "addFolder": "Dodaj folder",
         "removeFolder": "Usuń {folder}",
         "manualCheckHint": "Ręczne ścieżki są sprawdzane razem z resztą wybranych folderów.",
         "pathPlaceholder": "/ścieżka/do/książek",
@@ -6654,6 +6663,10 @@
         "title": "Wybierz bibliotekę, aby rozpocząć",
         "description": "Wybierz bibliotekę powyżej, aby wyświetlić podgląd zmian zmiany nazwy, filtrować według stanu i zastosować zbiorczą zmianę nazwy.",
         "chooseLibrary": "Wybierz Bibliotekę"
+      },
+      "confirmDialog": {
+        "title": "{count, plural, few {Zmienić nazwę # pliki na dysku?} many {Zmienić nazwę # pliku na dysku?} one {Zmienić nazwę # pliku na dysku?} other {Zmienić nazwę # plików na dysku?}}",
+        "body": "Ta operacja przenosi rzeczywiste pliki wewnątrz {library}. BookOrbit rejestruje każde przeniesienie, ale cofnięcie oznacza ponowne zmienienie nazw."
       }
     },
     "bookDuplicates": {
@@ -6849,7 +6862,6 @@
       "retry": "Spróbuj ponownie"
     },
     "bookView": {
-      "sort": "Sortuj",
       "sortOn": "Włączone",
       "resetSort": "Zresetuj sortowanie do ustawień domyślnych",
       "shuffle": "Losowo",
@@ -7026,7 +7038,6 @@
   "titles": {
     "dashboard": "Pulpit nawigacyjny",
     "libraries": "Biblioteki",
-    "podcastLibraries": "Podcast Libraries",
     "opds": "OPDS",
     "koboSync": "Kobo Synchronizacja",
     "koreaderSync": "KOReader Synchronizacja",

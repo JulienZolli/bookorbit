@@ -6,27 +6,31 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 
 import {
+  aiConfig,
   appConfig,
   audiolessEpubConfig,
+  audioToolsConfig,
   authConfig,
   bookRequestConfig,
+  coverSlotsConfig,
   dbConfig,
+  djvuConfig,
   emailConfig,
   fileWriteConfig,
   migrationConfig,
   oidcRuntimeConfig,
-  podcastConfig,
+  readAloudConfig,
+  bulkRunsConfig,
   storageConfig,
 } from './config/config';
 import { validateEnv } from './config/env.validation';
 import { loggerConfig } from './common/logger.config';
 import { CommonModule } from './common/common.module';
+import { LibraryScopeModule } from './common/library-scope/library-scope.module';
 import { SeriesIdentityModule } from './common/series-identity.module';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
-import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
-import { LibraryAccessGuard } from './common/guards/library-access.guard';
-import { PermissionGuard } from './common/guards/permission.guard';
-import { SensitiveEndpointThrottlerGuard } from './common/guards/sensitive-endpoint-throttler.guard';
+import { MergedBookAliasInterceptor } from './common/interceptors/merged-book-alias.interceptor';
+import { GLOBAL_GUARDS } from './common/guards/global-guards';
 import { DbModule } from './db/db.module';
 import { AnnotationModule } from './modules/annotation/annotation.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
@@ -35,8 +39,12 @@ import { AppSettingsModule } from './modules/app-settings/app-settings.module';
 import { CollectionModule } from './modules/collection/collection.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { CbzModule } from './modules/reader/cbz/cbz.module';
+import { DjvuModule } from './modules/reader/djvu/djvu.module';
 import { BookmarkModule } from './modules/bookmark/bookmark.module';
+import { BookJournalModule } from './modules/book-journal/book-journal.module';
+import { NotebookModule } from './modules/notebook/notebook.module';
 import { BookModule } from './modules/book/book.module';
+import { BookAliasModule } from './modules/book-alias/book-alias.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { CoverModule } from './modules/cover/cover.module';
 import { KoboModule } from './modules/kobo/kobo.module';
@@ -46,6 +54,7 @@ import { OpdsModule } from './modules/opds/opds.module';
 import { PathModule } from './modules/path/path.module';
 import { MetadataFetchModule } from './modules/metadata-fetch/metadata-fetch.module';
 import { MetadataPreferencesModule } from './modules/metadata-preferences/metadata-preferences.module';
+import { MetadataHttpProviderModule } from './modules/metadata-http-provider/metadata-http-provider.module';
 import { MetadataModule } from './modules/metadata/metadata.module';
 import { NarratorModule } from './modules/narrator/narrator.module';
 import { ReaderPreferencesModule } from './modules/reader-preferences/reader-preferences.module';
@@ -65,6 +74,7 @@ import { BookMetadataFetchModule } from './modules/book-metadata-fetch/book-meta
 import { MetadataScoreModule } from './modules/metadata-score/metadata-score.module';
 import { StatisticsModule } from './modules/statistics/statistics.module';
 import { UserStatisticsModule } from './modules/user-statistics/user-statistics.module';
+import { ReadingHistoryModule } from './modules/reading-history/reading-history.module';
 import { ReadingSessionModule } from './modules/reading-session/reading-session.module';
 import { ReadingStateModule } from './modules/reading-state/reading-state.module';
 import { UserBookStatusModule } from './modules/user-book-status/user-book-status.module';
@@ -72,6 +82,7 @@ import { AuditModule } from './modules/audit/audit.module';
 import { MigrationModule } from './modules/migration/migration.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { SeriesModule } from './modules/series/series.module';
+import { TaxonomyModule } from './modules/taxonomy/taxonomy.module';
 import { EntityManagerModule } from './modules/entity-manager/entity-manager.module';
 import { FontModule } from './modules/font/font.module';
 import { ServerFontModule } from './modules/server-font/server-font.module';
@@ -88,12 +99,28 @@ import { AccountActivityModule } from './modules/account-activity/account-activi
 import { SharedReadingInsightsModule } from './modules/shared-reading-insights/shared-reading-insights.module';
 import { BookDuplicatesModule } from './modules/book-duplicates/book-duplicates.module';
 import { MaintenanceModule } from './modules/maintenance/maintenance.module';
+import { BookLinkModule } from './modules/book-link/book-link.module';
+import { BookMergeModule } from './modules/book-merge/book-merge.module';
 import { BookMoveModule } from './modules/book-move/book-move.module';
 import { AudiobookModule } from './modules/audiobook/audiobook.module';
+import { ChapterEditorModule } from './modules/chapter-editor/chapter-editor.module';
+import { ChapterHealthModule } from './modules/chapter-health/chapter-health.module';
 import { TtsModule } from './modules/tts/tts.module';
+import { AiModule } from './modules/ai/ai.module';
 import { SearchModule } from './modules/search/search.module';
 import { WatchDownloadModule } from './modules/watch-download/watch-download.module';
-import { PodcastModule } from './modules/podcast/podcast.module';
+import { AppAttestModule } from './modules/app-attest/app-attest.module';
+import { ReadAloudModule } from './modules/read-aloud/read-aloud.module';
+import { PageLocatorModule } from './modules/page-locator/page-locator.module';
+import { YearReviewModule } from './modules/year-review/year-review.module';
+import { VisualMatchModule } from './modules/visual-match/visual-match.module';
+import { VisionScanModule } from './modules/vision-scan/vision-scan.module';
+import { ReadingHelpModule } from './modules/reading-help/reading-help.module';
+import { StoryEditsModule } from './modules/story-edits/story-edits.module';
+import { StoryGuidesModule } from './modules/story-guides/story-guides.module';
+import { JobsModule } from './modules/jobs/jobs.module';
+import { SetupOverviewModule } from './modules/setup-overview/setup-overview.module';
+import { BulkRunsModule } from './modules/bulk-runs/bulk-runs.module';
 
 @Module({
   imports: [
@@ -106,13 +133,18 @@ import { PodcastModule } from './modules/podcast/podcast.module';
         dbConfig,
         authConfig,
         storageConfig,
+        coverSlotsConfig,
         fileWriteConfig,
         emailConfig,
         migrationConfig,
         bookRequestConfig,
+        aiConfig,
         oidcRuntimeConfig,
-        podcastConfig,
         audiolessEpubConfig,
+        djvuConfig,
+        readAloudConfig,
+        bulkRunsConfig,
+        audioToolsConfig,
       ],
     }),
     ScheduleModule.forRoot(),
@@ -129,6 +161,7 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     DbModule,
     SeriesIdentityModule,
     CommonModule,
+    LibraryScopeModule,
     SeedModule,
     AuthModule,
     AppSettingsModule,
@@ -137,8 +170,11 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     BookMetadataFetchModule,
     LibraryModule,
     PathModule,
+    BookAliasModule,
     BookModule,
     AudiobookModule,
+    ChapterEditorModule,
+    ChapterHealthModule,
     CatalogModule,
     CoverModule,
     CollectionModule,
@@ -149,16 +185,20 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     UploadModule,
     MetadataFetchModule,
     MetadataPreferencesModule,
+    MetadataHttpProviderModule,
     CustomMetadataModule,
     CustomIconModule,
     RecommendationModule,
     KoboModule,
     OpdsModule,
     BookmarkModule,
+    BookJournalModule,
     AnnotationModule,
+    NotebookModule,
     DashboardModule,
     HealthModule,
     CbzModule,
+    DjvuModule,
     ReaderPreferencesModule,
     UserPreferencesModule,
     EpubModule,
@@ -168,6 +208,7 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     MetadataScoreModule,
     StatisticsModule,
     UserStatisticsModule,
+    ReadingHistoryModule,
     ReadingSessionModule,
     ReadingStateModule,
     UserBookStatusModule,
@@ -175,6 +216,7 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     MigrationModule,
     NotificationModule,
     SeriesModule,
+    TaxonomyModule,
     EntityManagerModule,
     FontModule,
     ServerFontModule,
@@ -190,18 +232,31 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     BookDuplicatesModule,
     MaintenanceModule,
     BookMoveModule,
+    BookMergeModule,
+    BookLinkModule,
     BrowseCountsModule,
     TtsModule,
+    AiModule,
     SearchModule,
     WatchDownloadModule,
-    PodcastModule,
+    AppAttestModule,
+    ReadAloudModule,
+    PageLocatorModule,
+    YearReviewModule,
+    VisualMatchModule,
+    VisionScanModule,
+    ReadingHelpModule,
+    StoryEditsModule,
+    StoryGuidesModule,
+    JobsModule,
+    SetupOverviewModule,
+    BulkRunsModule,
   ],
   providers: [
+    // Before the audit interceptor, so an audited route records the book the request now lands on.
+    { provide: APP_INTERCEPTOR, useClass: MergedBookAliasInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
-    { provide: APP_GUARD, useClass: SensitiveEndpointThrottlerGuard },
-    { provide: APP_GUARD, useClass: JwtAuthGuard },
-    { provide: APP_GUARD, useClass: PermissionGuard },
-    { provide: APP_GUARD, useClass: LibraryAccessGuard },
+    ...GLOBAL_GUARDS.map((useClass) => ({ provide: APP_GUARD, useClass })),
   ],
 })
 export class AppModule {}

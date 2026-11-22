@@ -105,6 +105,51 @@ describe('AppSettingsService', () => {
       await expect(service.update(key, 'anything')).rejects.toThrow(BadRequestException);
       expect(repo.updateByKey).not.toHaveBeenCalled();
     });
+
+    it.each(['ai.slots', 'ai.features', 'ai.budget', 'ai.privacy', 'ai.slot_health'])(
+      'rejects %s so it cannot bypass the AI settings validation',
+      async (key) => {
+        await expect(service.update(key, '{}')).rejects.toThrow(BadRequestException);
+        expect(repo.updateByKey).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('API key settings', () => {
+    it('defaults to keys on with no lifetime limit when nothing is stored', async () => {
+      repo.findMany.mockResolvedValue([] as never);
+      await expect(service.getApiKeySettings()).resolves.toEqual({ enabled: true, maxLifetimeDays: null });
+    });
+
+    it('reads a stored limit and ignores an invalid one', async () => {
+      repo.findMany.mockResolvedValue([
+        { key: 'api_keys_enabled', value: 'false' },
+        { key: 'api_keys_max_lifetime_days', value: '30' },
+      ] as never);
+      await expect(service.getApiKeySettings()).resolves.toEqual({ enabled: false, maxLifetimeDays: 30 });
+
+      repo.findMany.mockResolvedValue([{ key: 'api_keys_max_lifetime_days', value: 'soon' }] as never);
+      await service.updateApiKeySettings({ enabled: true, maxLifetimeDays: null });
+      await expect(service.getApiKeySettings()).resolves.toEqual({ enabled: true, maxLifetimeDays: null });
+    });
+
+    it('writes both values together, drops the cached copy, and refuses an out-of-range limit', async () => {
+      repo.findMany.mockResolvedValue([] as never);
+      await service.getApiKeySettings();
+      repo.findMany.mockResolvedValue([{ key: 'api_keys_max_lifetime_days', value: '365' }] as never);
+
+      await expect(service.updateApiKeySettings({ enabled: true, maxLifetimeDays: 365 })).resolves.toEqual({ enabled: true, maxLifetimeDays: 365 });
+      expect(repo.upsertMany).toHaveBeenCalledWith([
+        { key: 'api_keys_enabled', value: 'true' },
+        { key: 'api_keys_max_lifetime_days', value: '365' },
+      ]);
+      await expect(service.updateApiKeySettings({ enabled: true, maxLifetimeDays: 0 })).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('keeps the generic setting route away from the API key settings', async () => {
+      await expect(service.update('api_keys_enabled', 'false')).rejects.toBeInstanceOf(BadRequestException);
+      expect(repo.updateByKey).not.toHaveBeenCalled();
+    });
   });
 
   describe('isBookDockAutoFetchEnabled', () => {
@@ -436,6 +481,8 @@ describe('AppSettingsService', () => {
         autoFinalizeLibraryId: null,
         autoFinalizeFolderId: null,
         autoFinalizeMetadataMode: 'safe_merge',
+        unsortedAutoJoin: false,
+        unsortedKeepOriginal: false,
       });
     });
 
@@ -447,6 +494,8 @@ describe('AppSettingsService', () => {
         { key: 'book_dock_auto_finalize_library_id', value: '7' },
         { key: 'book_dock_auto_finalize_folder_id', value: '11' },
         { key: 'book_dock_auto_finalize_metadata_mode', value: 'embedded_only' },
+        { key: 'book_dock_unsorted_auto_join', value: 'true' },
+        { key: 'book_dock_unsorted_keep_original', value: 'true' },
       ] as never);
 
       await expect(service.getBookDockSettings()).resolves.toMatchObject({
@@ -456,6 +505,8 @@ describe('AppSettingsService', () => {
         autoFinalizeLibraryId: 7,
         autoFinalizeFolderId: 11,
         autoFinalizeMetadataMode: 'embedded_only',
+        unsortedAutoJoin: true,
+        unsortedKeepOriginal: true,
       });
     });
 
@@ -481,6 +532,31 @@ describe('AppSettingsService', () => {
         { key: 'book_dock_auto_finalize_metadata_mode', value: 'fetched_only' },
       ]);
       expect(repo.findMany).toHaveBeenCalledAfter(repo.upsertMany);
+    });
+
+    it("writes Unsorted's toggles only when the request carries them", async () => {
+      repo.findMany.mockResolvedValue([]);
+      const base = {
+        autoFetchMetadata: true,
+        autoFinalizeEnabled: false,
+        autoFinalizeThreshold: 85,
+        autoFinalizeLibraryId: null,
+        autoFinalizeFolderId: null,
+        autoFinalizeMetadataMode: 'safe_merge' as const,
+      };
+
+      await service.updateBookDockSettings({ ...base, unsortedAutoJoin: true, unsortedKeepOriginal: false });
+      expect(repo.upsertMany).toHaveBeenLastCalledWith(
+        expect.arrayContaining([
+          { key: 'book_dock_unsorted_auto_join', value: 'true' },
+          { key: 'book_dock_unsorted_keep_original', value: 'false' },
+        ]),
+      );
+
+      await service.updateBookDockSettings(base);
+      const keys = (repo.upsertMany.mock.lastCall?.[0] as Array<{ key: string }>).map((entry) => entry.key);
+      expect(keys).not.toContain('book_dock_unsorted_auto_join');
+      expect(keys).not.toContain('book_dock_unsorted_keep_original');
     });
   });
 
@@ -620,9 +696,9 @@ describe('AppSettingsService', () => {
   });
 
   describe('getMaxUploadSizeMb', () => {
-    it('returns 500 by default when setting is absent', async () => {
+    it('returns 4096 by default when setting is absent', async () => {
       repo.findByKey.mockResolvedValue(undefined);
-      expect(await service.getMaxUploadSizeMb()).toBe(500);
+      expect(await service.getMaxUploadSizeMb()).toBe(4096);
     });
 
     it('returns parsed integer value when valid', async () => {
@@ -630,9 +706,14 @@ describe('AppSettingsService', () => {
       expect(await service.getMaxUploadSizeMb()).toBe(1024);
     });
 
-    it('returns 500 when value is invalid or <= 0', async () => {
-      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '-50' } as never);
+    it('preserves an existing 500 MB limit', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '500' } as never);
       expect(await service.getMaxUploadSizeMb()).toBe(500);
+    });
+
+    it('returns 4096 when value is invalid or <= 0', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '-50' } as never);
+      expect(await service.getMaxUploadSizeMb()).toBe(4096);
     });
   });
 
@@ -649,6 +730,21 @@ describe('AppSettingsService', () => {
       await expect(service.update('max_upload_size_mb', 'invalid')).rejects.toThrow(BadRequestException);
       await expect(service.update('max_upload_size_mb', '-10')).rejects.toThrow(BadRequestException);
       await expect(service.update('max_upload_size_mb', '0')).rejects.toThrow(BadRequestException);
+      expect(repo.updateByKey).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update audit_retention_days validation', () => {
+    it('stores a whole number of days', async () => {
+      repo.updateByKey.mockResolvedValue({ key: 'audit_retention_days', value: '365' } as never);
+      await service.update('audit_retention_days', ' 365 ');
+      expect(repo.updateByKey).toHaveBeenCalledWith('audit_retention_days', '365');
+    });
+
+    it('rejects anything that is not between 1 and 3650 days', async () => {
+      for (const value of ['0', '-1', '3651', '12.5', '90 days', 'forever']) {
+        await expect(service.update('audit_retention_days', value)).rejects.toThrow(BadRequestException);
+      }
       expect(repo.updateByKey).not.toHaveBeenCalled();
     });
   });

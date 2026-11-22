@@ -1,7 +1,23 @@
-import { Body, Controller, DefaultValuePipe, Get, HttpCode, HttpStatus, Param, ParseEnumPipe, ParseIntPipe, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  DefaultValuePipe,
+  Get,
+  Header,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseEnumPipe,
+  ParseIntPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
+import type { Locale } from '@bookorbit/types';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RequestLocale } from '../../common/decorators/request-locale.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { DashboardService } from './dashboard.service';
 import { DashboardWidgetService } from './dashboard-widget.service';
 import { DashboardScrollerBatchDto } from './dto/dashboard-scroller-batch.dto';
@@ -33,27 +49,32 @@ export class DashboardController {
 
   @Post('widgets/batch')
   @HttpCode(HttpStatus.OK)
-  getWidgets(@CurrentUser() user: RequestUser, @Body() dto: DashboardWidgetBatchDto) {
-    return this.widgetService.getWidgets([...new Set(dto.widgets)], user);
+  @Header('Vary', 'Accept-Language')
+  getWidgets(@CurrentUser() user: RequestUser, @Body() dto: DashboardWidgetBatchDto, @RequestLocale() locale: Locale) {
+    return this.widgetService.getWidgets([...new Set(dto.widgets)], user, locale);
   }
 
   @Post('refresh')
+  @RequireAppAttest()
   @HttpCode(HttpStatus.NO_CONTENT)
   refresh(@CurrentUser() user: RequestUser) {
     this.widgetService.clearCacheForUser(user.id);
   }
 
   @Get('widgets/reading-goal')
+  @RequireAppAttest()
   getReadingGoal(@CurrentUser() user: RequestUser) {
     return this.widgetService.getReadingGoal(user);
   }
 
   @Get('widgets/currently-reading')
+  @RequireAppAttest()
   getCurrentlyReading(@CurrentUser() user: RequestUser) {
     return this.widgetService.getCurrentlyReading(user);
   }
 
   @Get('widgets/reading-streak')
+  @RequireAppAttest()
   getReadingStreak(@CurrentUser() user: RequestUser) {
     return this.widgetService.getReadingStreak(user);
   }
@@ -64,16 +85,26 @@ export class DashboardController {
   }
 
   @Get('widgets/highlight-of-the-day')
+  @RequireAppAttest()
   getHighlightOfTheDay(@CurrentUser() user: RequestUser) {
     return this.widgetService.getHighlightOfTheDay(user);
   }
 
+  @Get('widgets/highlights')
+  @RequireAppAttest()
+  getHighlights(@CurrentUser() user: RequestUser) {
+    return this.widgetService.getHighlights(user);
+  }
+
   @Get('widgets/monthly-challenge')
-  getMonthlyChallenge(@CurrentUser() user: RequestUser) {
-    return this.widgetService.getMonthlyChallenge(user);
+  @RequireAppAttest()
+  @Header('Vary', 'Accept-Language')
+  getMonthlyChallenge(@CurrentUser() user: RequestUser, @RequestLocale() locale: Locale) {
+    return this.widgetService.getMonthlyChallenge(user, locale);
   }
 
   @Get('widgets/year-projection')
+  @RequireAppAttest()
   getYearProjection(@CurrentUser() user: RequestUser) {
     return this.widgetService.getYearProjection(user);
   }
@@ -99,6 +130,7 @@ export class DashboardController {
   }
 
   @Get('widgets/reading-rhythm')
+  @RequireAppAttest()
   getReadingRhythm(@CurrentUser() user: RequestUser) {
     return this.widgetService.getReadingRhythm(user);
   }

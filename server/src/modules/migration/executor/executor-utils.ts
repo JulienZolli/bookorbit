@@ -1,5 +1,6 @@
 import * as schema from '../../../db/schema';
 import { isAudioFormat, isComicFormat } from '@bookorbit/types';
+import { chapterProvenance, normalizeAudiobookChapters } from '../../../common/utils/audiobook-chapters.utils';
 import { normalizeMetadataText, normalizeMetadataTextKey } from '../../../common/utils/metadata-text-normalize.utils';
 import type { SourceBookFile } from '../adapters/source-adapter.types';
 import { applyPathMappings } from '../planner/matching.service';
@@ -203,6 +204,7 @@ export function buildMetadataPatch(sourceBook: {
   comicvineId?: string | null;
   durationSeconds?: number | null;
   abridged?: boolean | null;
+  chapters?: readonly unknown[] | null;
   presentFields?: string[];
 }): Partial<typeof schema.bookMetadata.$inferInsert> {
   const field = <T>(name: string, value: T | undefined): T | undefined =>
@@ -230,7 +232,16 @@ export function buildMetadataPatch(sourceBook: {
     comicvineId: field('comicvineId', truncateNullableText(sourceBook.comicvineId, 50)),
     durationSeconds: field('durationSeconds', sanitizeNonNegativeInteger(sourceBook.durationSeconds)),
     abridged: field('abridged', sourceBook.abridged === undefined ? undefined : (sourceBook.abridged ?? false)),
+    ...migratedChapters(field('chapters', sourceBook.chapters)),
   });
+}
+
+// Only a non-empty list is carried over: a source with no chapters must not erase the ones
+// BookOrbit read from the files.
+function migratedChapters(chapters: readonly unknown[] | null | undefined): Partial<typeof schema.bookMetadata.$inferInsert> {
+  const normalized = chapters?.length ? normalizeAudiobookChapters(chapters) : [];
+  if (normalized.length === 0) return {};
+  return { chapters: normalized, ...chapterProvenance(normalized, 'migration') };
 }
 
 function sanitizeBoundedInteger(value: number | null | undefined, min: number, max: number): number | null | undefined {
@@ -340,6 +351,16 @@ export function toDate(value: string | null): Date | null {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// user_book_status rejects a finish before its start, and sources produce one: Audiobookshelf
+// reports a progress row's creation time as its start while clients set the finish date freely.
+// The finish date is the one readers care about, so it is kept and the start dropped.
+export function toReadingDates(startedAt: string | null, finishedAt: string | null): { startedAt: Date | null; finishedAt: Date | null } {
+  const started = toDate(startedAt);
+  const finished = toDate(finishedAt);
+  if (started && finished && finished.getTime() < started.getTime()) return { startedAt: null, finishedAt: finished };
+  return { startedAt: started, finishedAt: finished };
 }
 
 export function clampPercent(value: number | null): number {

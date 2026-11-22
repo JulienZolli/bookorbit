@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Tag } from '@lucide/vue'
 
-import { useThemeStore } from '@/stores/theme'
-import { getThemePalette, readCssColor } from '@/lib/echarts'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { useGenreDistribution } from '../../composables/useGenreDistribution'
 import ChartCard from '../ChartCard.vue'
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useGenreDistribution()
@@ -20,8 +19,8 @@ const option = shallowRef({})
 watchEffect(() => {
   if (!data.value.items.length) return
 
-  const palette = getThemePalette(themeStore.resolvedTheme, themeStore.accent, 0.85, 0.85)
-  const background = readCssColor('--background')
+  const palette = chartTokens.value.palette(0.85, 0.85)
+  const background = chartTokens.value.color('--background')
 
   option.value = {
     tooltip: {
@@ -83,6 +82,6 @@ watchEffect(() => {
     :empty="!data.items.length"
     :unknown-count="data.unknownCount"
   >
-    <VChart :option autoresize style="height: 100%" />
+    <AppChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

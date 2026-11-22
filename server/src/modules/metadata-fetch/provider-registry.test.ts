@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { ConcreteBookMediaKind, MetadataProviderKey } from '@bookorbit/types';
 
+import type { HttpProviderClient } from '../metadata-http-provider/http-provider.client';
+import { MetadataHttpProviderCatalog, type ActiveHttpProvider } from '../metadata-http-provider/metadata-http-provider.catalog';
 import { ProviderRegistry } from './provider-registry';
 import { MetadataProvider } from './providers/metadata-provider';
 
@@ -88,5 +90,91 @@ describe('ProviderRegistry', () => {
 
     expect(registry.find(MetadataProviderKey.GOOGLE)).toBe(google);
     expect(registry.find(MetadataProviderKey.AMAZON)).toBeUndefined();
+  });
+
+  it('keeps comic specialists wherever there is an ebook, and audiobook specialists only with audio', () => {
+    const registry = new ProviderRegistry([
+      createProvider(MetadataProviderKey.GOOGLE),
+      createProvider(MetadataProviderKey.COMICVINE, 'ComicVine', ['comic']),
+      createProvider(MetadataProviderKey.AUDIBLE, 'Audible', ['audiobook']),
+    ]);
+    const keys = [MetadataProviderKey.GOOGLE, MetadataProviderKey.COMICVINE, MetadataProviderKey.AUDIBLE];
+
+    expect(registry.keysForMedia(keys, { hasEbook: true, hasAudio: false })).toEqual([MetadataProviderKey.GOOGLE, MetadataProviderKey.COMICVINE]);
+    expect(registry.keysForMedia(keys, { hasEbook: false, hasAudio: true })).toEqual([MetadataProviderKey.GOOGLE, MetadataProviderKey.AUDIBLE]);
+    expect(registry.keysForMedia(keys, { hasEbook: true, hasAudio: true })).toEqual(keys);
+  });
+
+  it('knows which providers serve only audiobooks and which answer per medium', () => {
+    const itunes = { ...createProvider(MetadataProviderKey.ITUNES), editionFollowsMedium: true };
+    const registry = new ProviderRegistry([
+      createProvider(MetadataProviderKey.GOOGLE),
+      createProvider(MetadataProviderKey.AUDIBLE, 'Audible', ['audiobook']),
+      itunes,
+    ]);
+
+    expect(registry.servesOnlyAudiobooks(MetadataProviderKey.AUDIBLE)).toBe(true);
+    expect(registry.servesOnlyAudiobooks(MetadataProviderKey.GOOGLE)).toBe(false);
+    expect(registry.editionFollowsMedium(MetadataProviderKey.ITUNES)).toBe(true);
+    expect(registry.editionFollowsMedium(MetadataProviderKey.GOOGLE)).toBe(false);
+  });
+
+  describe('external providers', () => {
+    const active = (key: string): ActiveHttpProvider => ({
+      id: 1,
+      key,
+      label: key.toUpperCase(),
+      enabled: true,
+      status: 'ok',
+      info: {
+        key,
+        name: key.toUpperCase(),
+        version: '1',
+        specVersion: '1',
+        avatarUrl: null,
+        authenticationRequired: false,
+        mediaTypes: ['book'],
+        lookup: true,
+        supportedFields: null,
+        searchParams: ['query', 'author', 'mediaType'],
+        idMaxLength: 512,
+        bookUrlTemplate: null,
+        rateLimit: { maxConcurrency: 1, minIntervalMs: 0 },
+        coverShape: null,
+      },
+      target: {
+        key,
+        baseUrl: 'http://x/',
+        authorization: null,
+        allowPrivateAddress: false,
+        timeoutMs: 5000,
+        rateLimit: { maxConcurrency: 1, minIntervalMs: 0 },
+      },
+    });
+
+    it('adds and removes external providers as the catalog changes, with no restart', () => {
+      const catalog = new MetadataHttpProviderCatalog();
+      const registry = new ProviderRegistry([createProvider(MetadataProviderKey.GOOGLE)], catalog, {} as HttpProviderClient);
+      const changes = vi.fn();
+      registry.onChange(changes);
+
+      catalog.replace([], [active('fantlab')]);
+      expect(registry.all().map((p) => p.key)).toEqual([MetadataProviderKey.GOOGLE, 'fantlab']);
+      expect(registry.isExternal('fantlab')).toBe(true);
+      expect(registry.isExternal(MetadataProviderKey.GOOGLE)).toBe(false);
+      expect(registry.select(['fantlab'])[0].source).toBe('external');
+
+      catalog.replace([], []);
+      expect(registry.all().map((p) => p.key)).toEqual([MetadataProviderKey.GOOGLE]);
+      expect(() => registry.select(['fantlab'])).toThrow(BadRequestException);
+      expect(changes).toHaveBeenCalledTimes(2);
+    });
+
+    it('never lists an external provider under a built-in key, which would crash released iOS builds', () => {
+      const catalog = new MetadataHttpProviderCatalog();
+      const registry = new ProviderRegistry([createProvider(MetadataProviderKey.GOOGLE)], catalog, {} as HttpProviderClient);
+      catalog.replace([], [active(MetadataProviderKey.GOOGLE)]);
+      expect(registry.all()).toHaveLength(1);
+    });
   });
 });

@@ -10,8 +10,7 @@ ack-gated semantics of the full sweep, and both write the same state file
 under mutual exclusion, so sweep and snapshot never double-upload.
 ]]
 
-local InfoMessage = require("ui/widget/infomessage")
-local Notification = require("ui/widget/notification")
+local Toast = setmetatable({}, { __index = function(_t, key) return require("bookorbit_toast")[key] end })
 local Trapper = require("ui/trapper")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -206,26 +205,24 @@ local function finish(ctx, err)
     end
 
     if err == "auth" then
-        if ctx.interactive then
-            UIManager:show(InfoMessage:new{ text = _("BookOrbit sync: login failed. Check your credentials."), timeout = 4 })
-        else
-            Notification:notify(_("BookOrbit sync: login failed"))
+        if not ctx.quiet then
+            Toast.error(_("BookOrbit sign-in failed. Check your account"))
         end
     elseif err == "network" then
-        if ctx.interactive then
-            UIManager:show(InfoMessage:new{ text = _("BookOrbit sync: server not reachable."), timeout = 4 })
+        if ctx.interactive and not ctx.quiet then
+            Toast.error(_("BookOrbit server not reachable"))
         end
         logger.dbg("BookOrbit: book sync aborted, server not reachable")
     elseif err == "unmatched" then
-        if ctx.interactive then
-            UIManager:show(InfoMessage:new{ text = _("This book is not in your BookOrbit library."), timeout = 4 })
+        if ctx.interactive and not ctx.quiet then
+            Toast.show(_("This book is not in your BookOrbit library"), { icon = "info" })
         end
         logger.dbg("BookOrbit: book sync skipped, book unmatched:", ctx.snap.digest)
     elseif err == "outbox" then
         logger.err("BookOrbit: lifecycle sync stopped because its durable state could not be updated")
     else
-        if ctx.interactive then
-            local text = T(_("BookOrbit: book synced. %1 reading events."), ctx.counts.page_stats)
+        if ctx.interactive and not ctx.quiet then
+            local text = T(_("%1 reading events."), ctx.counts.page_stats)
             if ctx.highlight_summary and BookOrbitHighlightSummary.hasCounts(ctx.highlight_summary) then
                 text = text .. "\n" .. BookOrbitHighlightSummary.message(ctx.highlight_summary)
             else
@@ -244,7 +241,7 @@ local function finish(ctx, err)
             if ctx.had_errors then
                 text = text .. "\n" .. _("Some uploads failed and will retry on the next sync.")
             end
-            UIManager:show(InfoMessage:new{ text = text, timeout = 4 })
+            require("bookorbit_dialog_ui").notice{ title = _("Book synced"), text = text }
         end
         logger.info(string.format(
             "BookOrbit: book sync done reason=%s pageStats=%d annotations=%d applied=%d deleted=%d errors=%s",
@@ -343,7 +340,7 @@ stepMatch = function(ctx)
 
     for _, match in ipairs(body.matches or {}) do
         if match.hash == ctx.snap.digest then
-            ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file)
+            ctx.state:setMatched(match.hash, match.bookFileId, match.bookId, ctx.snap.file, nil, match.positionCompatible)
             bindStatsRow(ctx, ctx.state:getBook(ctx.snap.digest))
             if not acknowledge(ctx, "match") then return end
             return step(ctx, stepStats)
@@ -419,6 +416,56 @@ end
 -- Two-way exchange: uploads the local delta, reports the full key set for
 -- deletion detection, applies server-side changes (live for the manual sync
 -- while the book is open, sidecar on the close path) and acks them.
+local function currentAnnotationKeys(ctx, kind)
+    local ui = ctx.plugin and ctx.plugin.ui
+    if ui and ui.document and ui.document.file == ctx.snap.file and ui.annotation then
+        if kind == "bookmarks" then return BookOrbitSidecar.normalizeBookmarks(ui.annotation.annotations), true end
+        return BookOrbitSidecar.normalizeAnnotations(ui.annotation.annotations), true
+    end
+    if ctx.snap.file and lfs.attributes(ctx.snap.file, "mode") == "file" then
+        local extract = BookOrbitSidecar.extract(ctx.snap.file)
+        if extract then return extract[kind] or {}, true end
+    end
+    -- Queued snapshots preserve uploads, but absence in an old snapshot cannot
+    -- delete entries that a later sync has already delivered.
+    return nil, false
+end
+
+-- Read once per sync: the marker is written only after both exchanges, and a
+-- dogear exchange that saw it early would read an empty new sidecar as deletions.
+local function sidecarState(ctx)
+    if not ctx.sidecar_checked then
+        ctx.sidecar_checked = true
+        local ui = ctx.plugin and ctx.plugin.ui
+        if ui and ui.document and ui.document.file == ctx.snap.file and ui.doc_settings then
+            ctx.sidecar_marked = BookOrbitSidecar.isMarked(ui.doc_settings)
+            ctx.sidecar_entries = #(ui.annotation and ui.annotation.annotations or {})
+        elseif ctx.snap.file and lfs.attributes(ctx.snap.file, "mode") == "file" then
+            local extract = BookOrbitSidecar.extract(ctx.snap.file)
+            if extract then
+                ctx.sidecar_marked = extract.marked
+                ctx.sidecar_entries = (extract.annotations_count or 0) + (extract.bookmarks_count or 0)
+            else
+                ctx.sidecar_marked, ctx.sidecar_entries = false, 0
+            end
+        end
+    end
+    return BookOrbitSidecar.sidecarState(ctx.sidecar_marked, ctx.sidecar_entries)
+end
+
+-- Marks the sidecar once both exchanges went through, so later syncs report it
+-- as known and a reader's real deletions count again.
+local function markSidecar(ctx)
+    if not (ctx.sidecar_ann_done and ctx.sidecar_bm_done) or ctx.sidecar_marked ~= false then return end
+    local ui = ctx.plugin and ctx.plugin.ui
+    if ui and ui.document and ui.document.file == ctx.snap.file and ui.doc_settings then
+        BookOrbitSidecar.markLive(ui.doc_settings, ctx.snap.ts)
+    else
+        BookOrbitSidecar.markFile(ctx.snap.file, ctx.snap.ts)
+    end
+    ctx.sidecar_marked = true
+end
+
 stepAnnotations = function(ctx)
     if ctx.acknowledged.annotations then
         return step(ctx, stepBookmarks)
@@ -428,11 +475,12 @@ stepAnnotations = function(ctx)
 
     local apply_mode = "skip"
     if ctx.annotation_sync then
-        if (ctx.reason == "close" or ctx.reason == "suspend" or ctx.reason == "recovery")
+        if ctx.plugin and ctx.plugin.ui and ctx.plugin.ui.document
+                and ctx.plugin.ui.document.file == ctx.snap.file then
+            apply_mode = "live"
+        elseif (ctx.reason == "close" or ctx.reason == "suspend" or ctx.reason == "recovery")
                 and ctx.snap.file and lfs.attributes(ctx.snap.file, "mode") == "file" then
             apply_mode = "sidecar"
-        elseif ctx.reason == "manual" and ctx.plugin and ctx.plugin.ui and ctx.plugin.ui.document then
-            apply_mode = "live"
         end
     elseif ctx.interactive then
         ctx.highlight_disabled_reported = true
@@ -451,8 +499,13 @@ stepAnnotations = function(ctx)
         return step(ctx, stepBookmarks)
     end
 
-    if pending and apply_mode == "sidecar" then
-        local applied, deleted = BookOrbitAnnotations.applySidecar(ctx.snap.file, pending.to_apply or {})
+    if pending and apply_mode ~= "skip" then
+        local applied, deleted
+        if apply_mode == "live" then
+            applied, deleted = BookOrbitAnnotations.applyLive(ctx.plugin.ui, pending.to_apply or {})
+        else
+            applied, deleted = BookOrbitAnnotations.applySidecar(ctx.snap.file, pending.to_apply or {})
+        end
         local ack_body, ack_err = ctx.client:exchangeAck({
             { hash = ctx.snap.digest, applied = applied, deleted = deleted },
         })
@@ -467,13 +520,18 @@ stepAnnotations = function(ctx)
         ctx.remote_pending.annotations = nil
     end
 
+    local key_annotations, keys_complete = currentAnnotationKeys(ctx, "annotations")
     local result, err = BookOrbitAnnotations.exchangeBook({
         client = ctx.client,
         state = ctx.state,
         digest = ctx.snap.digest,
         annotations = ctx.snap.annotations,
+        key_annotations = key_annotations,
+        keys_complete = keys_complete,
         ann_max_datetime = ctx.snap.ann_max_datetime,
         ann_signature = ctx.snap.ann_signature,
+        captured_at = ctx.snap.ts,
+        sidecar_state = sidecarState(ctx),
         apply_mode = apply_mode,
         ui = apply_mode == "live" and ctx.plugin.ui or nil,
         file = ctx.snap.file,
@@ -503,6 +561,8 @@ stepAnnotations = function(ctx)
         closed_book = apply_mode == "sidecar",
     })
     if not result.had_errors then
+        -- An incompatible copy exchanged nothing, so its sidecar is not marked as known.
+        if not result.incompatible then ctx.sidecar_ann_done = true end
         book.annCount = ctx.snap.ann_count
         -- Only park remote changes when the user actually wants them applied;
         -- with two-way highlights off there is nothing to come back for.
@@ -582,28 +642,36 @@ end
 -- free-form remote_pending kind is new.
 stepBookmarks = function(ctx)
     if not ctx.annotation_sync or not BookOrbitBookmarks.enabled(ctx.client, true) then
+        ctx.sidecar_bm_done = true
         return step(ctx, stepState)
     end
     local book = ctx.state:getBook(ctx.snap.digest)
     if not book then return finish(ctx, "unmatched") end
 
     local apply_mode = "skip"
-    if (ctx.reason == "close" or ctx.reason == "suspend" or ctx.reason == "recovery")
+    if ctx.plugin and ctx.plugin.ui and ctx.plugin.ui.document
+            and ctx.plugin.ui.document.file == ctx.snap.file then
+        apply_mode = "live"
+    elseif (ctx.reason == "close" or ctx.reason == "suspend" or ctx.reason == "recovery")
             and ctx.snap.file and lfs.attributes(ctx.snap.file, "mode") == "file" then
         apply_mode = "sidecar"
-    elseif ctx.reason == "manual" and ctx.plugin and ctx.plugin.ui and ctx.plugin.ui.document then
-        apply_mode = "live"
     end
 
     local pending = ctx.remote_pending and ctx.remote_pending.bookmarks
     if not pending and not ctx.interactive
             and BookOrbitBookmarks.canSkipExchange(book, ctx.snap.bm_signature) then
         logger.dbg("BookOrbit: book sync bookmark exchange skipped, local set unchanged")
+        ctx.sidecar_bm_done = true
         return step(ctx, stepState)
     end
 
-    if pending and apply_mode == "sidecar" then
-        local applied, deleted = BookOrbitBookmarks.applySidecar(ctx.snap.file, pending.to_apply or {})
+    if pending and apply_mode ~= "skip" then
+        local applied, deleted
+        if apply_mode == "live" then
+            applied, deleted = BookOrbitBookmarks.applyLive(ctx.plugin.ui, pending.to_apply or {})
+        else
+            applied, deleted = BookOrbitBookmarks.applySidecar(ctx.snap.file, pending.to_apply or {})
+        end
         local ack_body, ack_err = ctx.client:exchangeBookmarksAck({
             { hash = ctx.snap.digest, applied = applied, deleted = deleted },
         })
@@ -618,12 +686,16 @@ stepBookmarks = function(ctx)
         ctx.remote_pending.bookmarks = nil
     end
 
+    local key_bookmarks, keys_complete = currentAnnotationKeys(ctx, "bookmarks")
     local result, err = BookOrbitBookmarks.exchangeBook({
         client = ctx.client,
         state = ctx.state,
         digest = ctx.snap.digest,
         bookmarks = ctx.snap.bookmarks,
+        key_bookmarks = key_bookmarks,
+        keys_complete = keys_complete,
         bm_signature = ctx.snap.bm_signature,
+        sidecar_state = sidecarState(ctx),
         apply_mode = apply_mode,
         ui = apply_mode == "live" and ctx.plugin.ui or nil,
         file = ctx.snap.file,
@@ -637,6 +709,7 @@ stepBookmarks = function(ctx)
         if err == "unmatched" then return finish(ctx, "unmatched") end
         if err == "unsupported_server" then
             BookOrbitBookmarks.markUnsupported(ctx.client)
+            ctx.sidecar_bm_done = true
             return step(ctx, stepState)
         end
         ctx.had_errors = true
@@ -644,7 +717,11 @@ stepBookmarks = function(ctx)
         return step(ctx, stepState)
     end
 
-    if result.had_errors then ctx.had_errors = true end
+    if result.had_errors then
+        ctx.had_errors = true
+    elseif not result.incompatible then
+        ctx.sidecar_bm_done = true
+    end
     ctx.counts.bookmarks = (ctx.counts.bookmarks or 0) + result.uploaded
     ctx.highlight_summary = BookOrbitHighlightSummary.addBookmarks(ctx.highlight_summary, result)
     if not result.had_errors and result.remote_pending and ctx.on_remote_pending then
@@ -658,6 +735,7 @@ stepBookmarks = function(ctx)
 end
 
 stepState = function(ctx)
+    markSidecar(ctx)
     if ctx.acknowledged.state then
         return step(ctx, stepProgress)
     end
@@ -669,7 +747,13 @@ stepState = function(ctx)
         if not ctx.snap.file or lfs.attributes(ctx.snap.file, "mode") ~= "file" then
             return step(ctx, stepProgress)
         end
-        BookOrbitSidecar.applyServerStateSidecar(ctx.snap.file, pending_state)
+        local ui = ctx.plugin and ctx.plugin.ui
+        if ui and ui.document and ui.document.file == ctx.snap.file then
+            BookOrbitSidecar.applyServerStateLive(ui, pending_state)
+        else
+            BookOrbitSidecar.applyServerStateSidecar(ctx.snap.file, pending_state)
+        end
+        BookOrbitSidecar.rememberServerState(book, pending_state)
         if ctx.on_remote_applied then
             local ok, cleared = pcall(ctx.on_remote_applied, "state")
             if not ok or cleared == false then return finish(ctx, "outbox") end
@@ -716,6 +800,9 @@ stepState = function(ctx)
     local result = body.results and body.results[1] or nil
     local server_state = BookOrbitSidecar.stateFromServerResult(result)
     if server_state then
+        if not server_state.status_known then
+            BookOrbitSidecar.rememberUploadedState(book, {}, { status = payload.status, statusModified = payload.statusModified })
+        end
         if ctx.reason == "close" or ctx.reason == "suspend" or ctx.reason == "recovery" then
             if not ctx.snap.file or lfs.attributes(ctx.snap.file, "mode") ~= "file" then
                 if ctx.on_remote_pending then
@@ -727,7 +814,12 @@ stepState = function(ctx)
                     return step(ctx, stepProgress)
                 end
             else
-                BookOrbitSidecar.applyServerStateSidecar(ctx.snap.file, server_state)
+                local ui = ctx.plugin and ctx.plugin.ui
+                if ui and ui.document and ui.document.file == ctx.snap.file then
+                    BookOrbitSidecar.applyServerStateLive(ui, server_state)
+                else
+                    BookOrbitSidecar.applyServerStateSidecar(ctx.snap.file, server_state)
+                end
             end
         else
             BookOrbitSidecar.applyServerStateLive(ctx.plugin and ctx.plugin.ui or nil, server_state)
@@ -760,12 +852,6 @@ stepProgress = function(ctx)
         if not acknowledge(ctx, "progress", false) then return end
         return finish(ctx)
     end
-    local pushed = book.progressPushedPct or -1
-    if math.abs(pct - pushed) <= 0.001 and not ctx.interactive then
-        if not acknowledge(ctx, "progress", false) then return end
-        return finish(ctx)
-    end
-
     -- The live PUT carries device/device_id/timestamp, which is what the
     -- pull-conflict logic on other devices consumes; the bulk endpoint is the
     -- sweep's many-books channel with sidecar freshness semantics.
@@ -788,7 +874,7 @@ end
 function BookOrbitBookSync.run(opts)
     if BookOrbitBookSync.running or BookOrbitSweep.isRunning() then
         if opts.interactive then
-            UIManager:show(InfoMessage:new{ text = _("BookOrbit sync is already running."), timeout = 2 })
+            Toast.show(_("BookOrbit sync is already running"), { icon = "hourglass" })
         end
         return false
     end
@@ -799,7 +885,7 @@ function BookOrbitBookSync.run(opts)
     local client = BookOrbitApi.new(opts.api)
     if not client:isConfigured() then
         if opts.interactive then
-            UIManager:show(InfoMessage:new{ text = _("Please configure the BookOrbit server and login first."), timeout = 3 })
+            Toast.error(_("Sign in to BookOrbit first"))
         end
         return false
     end
@@ -818,6 +904,7 @@ function BookOrbitBookSync.run(opts)
         origin = opts.origin,
         force_match = opts.force_match == true,
         interactive = opts.interactive or false,
+        quiet = opts.quiet == true,
         annotation_sync = opts.annotation_sync ~= false,
         plugin = opts.plugin,
         on_finish = opts.on_finish,

@@ -18,6 +18,7 @@ export const BOOK_METADATA_LOCK_FIELDS = [
   "narrators",
   "durationSeconds",
   "abridged",
+  "chapters",
   "googleBooksId",
   "goodreadsId",
   "amazonId",
@@ -44,6 +45,7 @@ export const BOOK_METADATA_LOCK_FIELDS = [
   "comicTeams",
   "comicLocations",
   "cover",
+  "audioCover",
 ] as const;
 
 export type BookMetadataLockField = (typeof BOOK_METADATA_LOCK_FIELDS)[number];

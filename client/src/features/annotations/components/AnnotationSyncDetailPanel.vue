@@ -5,7 +5,9 @@ import { formatDate as formatLocaleDate } from '@/i18n/formatters'
 import { Globe, Loader2, MonitorSmartphone, RefreshCw, Tablet } from '@lucide/vue'
 import type { AnnotationPositionFormat } from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { koreaderOptionalDeviceLabel } from '@/features/koreader/lib/device-label'
 import { useAnnotationSyncDetail } from '../composables/useAnnotationSyncDetail'
+import { annotationSourceKey } from '../lib/source-label'
 
 const { t } = useI18n()
 
@@ -44,9 +46,13 @@ function statusClass(status: string): string {
   return 'border-border bg-muted text-muted-foreground'
 }
 
-function deviceLabel(device: { source: string; deviceId: string; deviceName: string | null }): string {
+function deviceLabel(device: { source: string; deviceId: string; deviceName: string | null; deviceModel?: string | null }): string {
+  if (device.source === 'koreader') {
+    const label = koreaderOptionalDeviceLabel(device.deviceModel, device.deviceName)
+    if (label) return t('annotations.hub.deviceWithSource', { source: t(annotationSourceKey(device.source)), device: label })
+    return `KOReader ${device.deviceId.slice(0, 8)}`
+  }
   if (device.deviceName) return device.deviceName
-  if (device.source === 'koreader') return `KOReader ${device.deviceId.slice(0, 8)}`
   return `Kobo ${device.deviceId}`
 }
 
@@ -78,7 +84,7 @@ onMounted(() => {
       <ul class="flex flex-col gap-1">
         <li v-for="position in positions" :key="position.format" class="flex flex-wrap items-center gap-2">
           <span class="w-24 shrink-0 text-muted-foreground">{{ formatLabel(position.format) }}</span>
-          <span class="inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium" :class="statusClass(position.status)">
+          <span class="inline-flex items-center rounded-xs border px-1.5 py-0.5 text-[10px] font-medium" :class="statusClass(position.status)">
             {{ statusLabel(position.status) }}
           </span>
           <span v-if="position.reason" class="truncate text-muted-foreground">{{ position.reason }}</span>
@@ -86,7 +92,7 @@ onMounted(() => {
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                class="flex h-6 w-6 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 :disabled="retrying === position.format"
                 @click="() => handleRetry(position.format)"
               >
@@ -109,7 +115,7 @@ onMounted(() => {
             {{ deviceLabel(device) }}
           </span>
           <span
-            class="inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium"
+            class="inline-flex items-center rounded-xs border px-1.5 py-0.5 text-[10px] font-medium"
             :class="device.upToDate ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-muted text-muted-foreground'"
           >
             {{ device.upToDate ? t('annotations.sync.upToDate') : t('annotations.sync.pendingVersion', { version: detail.version }) }}

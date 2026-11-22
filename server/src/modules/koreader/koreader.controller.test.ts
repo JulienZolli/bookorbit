@@ -23,6 +23,7 @@ function makeController() {
     clearDeviceFileNamingPattern: vi.fn().mockResolvedValue(undefined),
     removeDevice: vi.fn().mockResolvedValue(undefined),
     setDeviceRetired: vi.fn().mockResolvedValue(undefined),
+    setDeviceName: vi.fn().mockResolvedValue(undefined),
     getBookProgress: vi.fn().mockResolvedValue(null),
     testConnection: vi.fn().mockResolvedValue(true),
   };
@@ -94,7 +95,7 @@ describe('KoreaderController', () => {
     const user = { id: 7 } as never;
 
     await expect(controller.createCredentials(user, { username: 'reader', password: 'secret1' } as never)).resolves.toEqual({ success: true });
-    expect(koreaderService.createCredentials).toHaveBeenCalledWith(7, 'reader', 'secret1');
+    expect(koreaderService.createCredentials).toHaveBeenCalledWith(7, 'reader', 'secret1', undefined);
 
     await expect(controller.updateCredentials(user, { syncEnabled: false } as never)).resolves.toEqual({ success: true });
     expect(koreaderService.updateCredentials).toHaveBeenCalledWith(7, { syncEnabled: false });
@@ -117,7 +118,7 @@ describe('KoreaderController', () => {
     expect(koreaderService.getDevices).toHaveBeenCalledWith(7);
 
     await expect(controller.getBookProgress(user, 10)).resolves.toBeNull();
-    expect(koreaderService.getBookProgress).toHaveBeenCalledWith(7, 10);
+    expect(koreaderService.getBookProgress).toHaveBeenCalledWith(user, 10);
   });
 
   it('scopes KOReader default pattern reads and writes to the authenticated user', async () => {
@@ -172,6 +173,25 @@ describe('KoreaderController', () => {
 
   it('grants Koreader Sync permission for the device update route', () => {
     expect(Reflect.getMetadata(PERMISSION_KEY, KoreaderController.prototype.updateDevice)).toBe(Permission.KoreaderSync);
+  });
+
+  it('forwards device names to the service, and clears them with null', async () => {
+    const { controller, koreaderService } = makeController();
+    const user = { id: 7 } as never;
+
+    await expect(controller.setDeviceName(user, { deviceId: 'device-1' }, { name: 'Pixel 8' })).resolves.toEqual({
+      deviceId: 'device-1',
+      name: 'Pixel 8',
+    });
+    expect(koreaderService.setDeviceName).toHaveBeenCalledWith(7, 'device-1', 'Pixel 8');
+
+    await expect(controller.clearDeviceName(user, { deviceId: 'device-1' })).resolves.toEqual({ success: true });
+    expect(koreaderService.setDeviceName).toHaveBeenCalledWith(7, 'device-1', null);
+  });
+
+  it('grants Koreader Sync permission for the device name routes', () => {
+    expect(Reflect.getMetadata(PERMISSION_KEY, KoreaderController.prototype.setDeviceName)).toBe(Permission.KoreaderSync);
+    expect(Reflect.getMetadata(PERMISSION_KEY, KoreaderController.prototype.clearDeviceName)).toBe(Permission.KoreaderSync);
   });
 
   it('grants Koreader Sync permission for the unmatched-book dismiss route', () => {

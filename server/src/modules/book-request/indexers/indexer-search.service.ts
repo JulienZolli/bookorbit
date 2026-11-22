@@ -1,5 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { canonicalizeBookRequestIsbn, compareByTier, MAX_BOOK_REQUEST_SEARCH_ISBNS, releaseProfileIsActive } from '@bookorbit/types';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  canonicalizeBookRequestIsbn,
+  compareByTier,
+  isBookRequestMediaKind,
+  MAX_BOOK_REQUEST_SEARCH_ISBNS,
+  releaseProfileIsActive,
+} from '@bookorbit/types';
 import type {
   BookRequestMediaKind,
   IndexerSearchQuery,
@@ -15,10 +21,12 @@ import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import { withDeadline } from '../../../common/utils/with-deadline.utils';
 import type { BookRequestRow } from '../../../db/schema';
 import { RequestAutomationSettingsService } from '../fulfillment/request-automation-settings.service';
+import { RETIRED_MEDIUM_REFUSAL } from '../retired-media';
 import { IndexerSearchException, type ReleaseCandidate, type ReleaseQuery, type ResolvedIndexerConfig } from './indexer-adapter';
 import { IndexerConfigService } from './indexer-config.service';
 import { IndexerOperationLock } from './indexer-operation-lock';
 import { IndexerRegistry } from './indexer-registry';
+import { indexerSecrets, withSafeInfoUrl } from './release-info-url';
 import { rejectRelease, scoreRelease, toReleaseItem, type ScoredRelease, type ScoringRequest } from './release-scoring';
 import { normalizeTitleText } from '../../../common/text-match/title-match';
 import { buildSearchText } from './search-text';
@@ -79,6 +87,9 @@ export class IndexerSearchService {
   ) {}
 
   async search(request: BookRequestRow, options: IndexerSearchOptions = {}): Promise<ReleaseSearchResult> {
+    const mediaKind = request.mediaKind;
+    if (!isBookRequestMediaKind(mediaKind)) throw new BadRequestException(RETIRED_MEDIUM_REFUSAL);
+
     const searchKey = JSON.stringify({ overrides: options.overrides ?? null, indexerMode: options.indexerMode ?? 'all' });
     const cacheKey = `${request.id}:${searchKey}`;
     const cached = this.cache.get(cacheKey);
@@ -91,8 +102,8 @@ export class IndexerSearchService {
     // source switched off" need opposite fixes.
     const [configs, sources] = await Promise.all([this.indexers.resolveEnabledConfigs(), this.indexers.countSources()]);
     const { profiles } = await this.automationSettings.get();
-    const tiers = profiles[request.mediaKind] ?? [];
-    const { scoringRequest, availableIsbns } = prepareScoringRequest(request, tiers, options.overrides);
+    const tiers = profiles[mediaKind] ?? [];
+    const { scoringRequest, availableIsbns } = prepareScoringRequest({ ...request, mediaKind }, tiers, options.overrides);
     const query = toQuery(scoringRequest);
 
     // A source that does not carry the requested medium is left out of the search rather than
@@ -442,7 +453,10 @@ export class IndexerSearchService {
         // Duplicates are fine here: the merge keys releases by guid and keeps the first.
         releases = [...releases, ...bySubtitle];
       }
-      return { config, releases, query: indexerQuery };
+      // Vetted here rather than in each adapter, so a plugin is held to the same rule as the
+      // built-ins and a candidate refreshed for a grab is held to it a second time.
+      const secrets = indexerSecrets(config);
+      return { config, releases: releases.map((release) => withSafeInfoUrl(release, secrets)), query: indexerQuery };
     } catch (error) {
       const failure: IndexerSearchFailure = error instanceof IndexerSearchException ? error.failure : 'error';
       const message = error instanceof Error ? error.message : String(error);
@@ -521,19 +535,22 @@ function toQuery(request: ScoringRequest): ReleaseQuery {
 }
 
 function prepareScoringRequest(
-  request: BookRequestRow,
+  request: BookRequestRow & { mediaKind: BookRequestMediaKind },
   tiers: readonly ReleaseTier[],
   overrides?: ReleaseSearchOverrides,
 ): { scoringRequest: ScoringRequest; availableIsbns: string[] } {
   const requestIdentifiers = bookRequestSearchIsbns(request);
   const activeIsbn = overrides?.isbn !== undefined ? overrides.isbn : (requestIdentifiers[0] ?? null);
   const availableIsbns = activeIsbn && !requestIdentifiers.includes(activeIsbn) ? [activeIsbn, ...requestIdentifiers] : requestIdentifiers;
+  const usesRequestTitle = overrides?.title === undefined;
   return {
     scoringRequest: {
       title: overrides?.title ?? request.title,
       // A title the approver typed replaces the work being searched for, subtitle included.
       subtitle: overrides?.title !== undefined ? null : request.subtitle,
       authors: overrides?.authors ?? request.authors ?? [],
+      seriesName: usesRequestTitle ? request.seriesName : null,
+      seriesIndex: usesRequestTitle ? request.seriesIndex : null,
       isbn13: activeIsbn,
       isbn10: null,
       isbns: activeIsbn ? [activeIsbn] : [],

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search } from '@lucide/vue'
-import { Permission, PERMISSION_LABELS } from '@bookorbit/types'
+import { Search, TriangleAlert } from '@lucide/vue'
+import type { Permission } from '@bookorbit/types'
 import { formatNumber } from '@/i18n/formatters'
 import {
   PERMISSION_GROUPS,
@@ -11,11 +11,14 @@ import {
   type PermissionPreset,
   type PermissionSelection,
 } from '../lib/permission-presets'
+import { permissionLabel } from '../lib/permission-labels'
 
 const props = defineProps<{
   selected: ReadonlySet<string>
   total: number
   granted: number
+  /** Context a permission needs beyond its checkbox, such as where it actually takes effect. */
+  notes?: Partial<Record<string, { text: string; warning: boolean }>>
 }>()
 
 const emit = defineEmits<{
@@ -24,6 +27,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const noteIdPrefix = `permission-note-${useId()}`
 
 const filter = ref('')
 const grantedOnly = ref(false)
@@ -43,16 +47,12 @@ const presetOptions = computed<PresetOption[]>(() => [
   { id: 'admin', label: t('adminFeature.userForm.presets.admin'), preset: 'admin' },
 ])
 
-function permissionLabel(permission: Permission): string {
-  if (permission === Permission.ViewUserActivity) return t('adminFeature.accountActivity.permissionLabel')
-  return PERMISSION_LABELS[permission] ?? permission
-}
-
 interface PermissionRow {
   name: Permission
   label: string
   manage: boolean
   checked: boolean
+  note?: { id: string; text: string; warning: boolean }
 }
 
 interface RenderedGroup {
@@ -77,12 +77,16 @@ const groups = computed<RenderedGroup[]>(() => {
     const permissions = permissionsInGroup(group)
 
     const rows = permissions
-      .map((permission) => ({
-        name: permission,
-        label: permissionLabel(permission),
-        manage: group.manage.includes(permission),
-        checked: props.selected.has(permission),
-      }))
+      .map((permission): PermissionRow => {
+        const note = props.notes?.[permission]
+        return {
+          name: permission,
+          label: permissionLabel(permission, t),
+          manage: group.manage.includes(permission),
+          checked: props.selected.has(permission),
+          note: note && { ...note, id: `${noteIdPrefix}-${permission}` },
+        }
+      })
       .filter((row) => (grantedOnly.value ? row.checked : true))
       .filter((row) => (query.length === 0 || groupMatches ? true : row.label.toLowerCase().includes(query)))
 
@@ -200,7 +204,7 @@ function clearFilters() {
           <span
             v-if="group.manageOnly"
             aria-hidden="true"
-            class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+            class="rounded-xs bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
           >
             {{ t('adminFeature.userForm.permissionLevels.manage') }}
           </span>
@@ -209,25 +213,33 @@ function clearFilters() {
           </span>
         </div>
         <div :class="group.wide ? 'grid gap-x-4 @md:grid-cols-2 @xl:grid-cols-3' : ''">
-          <label
-            v-for="row in group.rows"
-            :key="row.name"
-            class="flex cursor-pointer items-start gap-2 rounded py-1 focus-within:ring-2 focus-within:ring-ring"
-          >
-            <input
-              type="checkbox"
-              :checked="row.checked"
-              class="mt-0.5 size-4 shrink-0 rounded border-input accent-primary"
-              @change="togglePermission(row.name)"
-            />
-            <span class="text-sm leading-tight text-foreground">{{ row.label }}</span>
-            <span
-              v-if="row.manage && !group.manageOnly"
-              class="ms-auto mt-0.5 shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+          <div v-for="row in group.rows" :key="row.name">
+            <label class="flex cursor-pointer items-start gap-2 rounded-xs py-1 focus-within:ring-2 focus-within:ring-ring">
+              <input
+                type="checkbox"
+                :checked="row.checked"
+                :aria-describedby="row.note?.id"
+                class="mt-0.5 size-4 shrink-0 rounded-xs border-input accent-primary"
+                @change="togglePermission(row.name)"
+              />
+              <span class="text-sm leading-tight text-foreground">{{ row.label }}</span>
+              <span
+                v-if="row.manage && !group.manageOnly"
+                class="ms-auto mt-0.5 shrink-0 rounded-xs bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+              >
+                {{ t('adminFeature.userForm.permissionLevels.manage') }}
+              </span>
+            </label>
+            <p
+              v-if="row.note"
+              :id="row.note.id"
+              class="flex items-start gap-1.5 pb-1 ps-6 text-xs leading-snug"
+              :class="row.note.warning ? 'text-[var(--pill-warning)]' : 'text-muted-foreground'"
             >
-              {{ t('adminFeature.userForm.permissionLevels.manage') }}
-            </span>
-          </label>
+              <TriangleAlert v-if="row.note.warning" :size="13" class="mt-px shrink-0" aria-hidden="true" />
+              <span>{{ row.note.text }}</span>
+            </p>
+          </div>
         </div>
       </fieldset>
     </div>

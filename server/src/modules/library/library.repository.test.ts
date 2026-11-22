@@ -7,7 +7,12 @@ vi.mock('drizzle-orm', () => ({
   sql: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => ({ op: 'sql', text: strings.join(''), values })),
 }));
 
-import { books, libraries, libraryFolders } from '../../db/schema';
+vi.mock('../../db/reading-attempt-retention', () => ({ retainFinishedReads: vi.fn() }));
+vi.mock('../../db/kobo-entitlement-tombstones', () => ({ writeKoboTombstones: vi.fn() }));
+
+import { writeKoboTombstones } from '../../db/kobo-entitlement-tombstones';
+import { retainFinishedReads } from '../../db/reading-attempt-retention';
+import { bookLinkGroups, bookLinks, books, libraries, libraryFolders } from '../../db/schema';
 import { LIBRARY_BOOK_STATUS_PRESENT } from './library.constants';
 import { LibraryRepository } from './library.repository';
 
@@ -15,8 +20,13 @@ describe('LibraryRepository', () => {
   const txUpdateWhere = vi.fn();
   const txUpdateSet = vi.fn();
   const txUpdate = vi.fn(() => ({ set: txUpdateSet }));
+  const txExecute = vi.fn();
+  const txDeleteWhere = vi.fn();
+  const txDelete = vi.fn(() => ({ where: txDeleteWhere }));
   const tx = {
     update: txUpdate,
+    execute: txExecute,
+    delete: txDelete,
   };
 
   const db = {
@@ -40,6 +50,26 @@ describe('LibraryRepository', () => {
     txUpdate.mockImplementation(() => ({ set: txUpdateSet }));
     txUpdateSet.mockReturnValue({ where: txUpdateWhere });
     txUpdateWhere.mockResolvedValue(undefined);
+    txExecute.mockResolvedValue(undefined);
+    txDelete.mockImplementation(() => ({ where: txDeleteWhere }));
+    txDeleteWhere.mockResolvedValue(undefined);
+  });
+
+  it('delete drops the link groups the library leaves with fewer than two members, in the same transaction', async () => {
+    await repo.delete(42);
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(retainFinishedReads).toHaveBeenCalledWith(tx, { op: 'eq', left: books.libraryId, right: 42 });
+    expect(writeKoboTombstones).toHaveBeenCalledWith(tx, { op: 'eq', left: books.libraryId, right: 42 });
+    expect(txExecute).toHaveBeenCalledTimes(1);
+    const statement = txExecute.mock.calls[0]![0] as { text: string; values: unknown[] };
+    expect(statement.text).toMatch(/^\s*delete from /);
+    expect(statement.text).toContain(') < 2');
+    expect(statement.values).toEqual([bookLinkGroups, bookLinks, books, 42, bookLinks, books, 42]);
+    expect(txDelete).toHaveBeenCalledWith(libraries);
+    expect(txDeleteWhere).toHaveBeenCalledWith({ op: 'eq', left: libraries.id, right: 42 });
+    // Counted while the books are still there: the library delete cascades them away.
+    expect(txExecute.mock.invocationCallOrder[0]).toBeLessThan(txDelete.mock.invocationCallOrder[0]!);
   });
 
   it('updateDisplayOrders updates each library order entry in one transaction', async () => {
@@ -57,8 +87,7 @@ describe('LibraryRepository', () => {
   it('findAll counts only present books while retaining empty libraries', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const where = vi.fn().mockReturnValue({ groupBy });
-    const leftJoin = vi.fn().mockReturnValue({ where });
+    const leftJoin = vi.fn().mockReturnValue({ groupBy });
     const from = vi.fn().mockReturnValue({ leftJoin });
     db.select.mockReturnValue({ from });
 
@@ -71,14 +100,12 @@ describe('LibraryRepository', () => {
         { op: 'eq', left: books.status, right: LIBRARY_BOOK_STATUS_PRESENT },
       ],
     });
-    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
   });
 
-  it('findAllForUser includes file rename eligibility and counts only present books', async () => {
+  it('findAllForUser includes organization and automation settings and counts only present books', async () => {
     const orderBy = vi.fn().mockResolvedValue([]);
     const groupBy = vi.fn().mockReturnValue({ orderBy });
-    const where = vi.fn().mockReturnValue({ groupBy });
-    const leftJoin = vi.fn().mockReturnValue({ where });
+    const leftJoin = vi.fn().mockReturnValue({ groupBy });
     const innerJoin = vi.fn().mockReturnValue({ leftJoin });
     const from = vi.fn().mockReturnValue({ innerJoin });
     db.select.mockReturnValue({ from });
@@ -87,6 +114,10 @@ describe('LibraryRepository', () => {
 
     expect(db.select).toHaveBeenCalledWith(
       expect.objectContaining({
+        organizationMode: libraries.organizationMode,
+        autoScanCronExpression: libraries.autoScanCronExpression,
+        watch: libraries.watch,
+        fileWriteEnabled: libraries.fileWriteEnabled,
         fileRenameEnabled: libraries.fileRenameEnabled,
       }),
     );
@@ -98,7 +129,6 @@ describe('LibraryRepository', () => {
       ],
     });
     expect(orderBy).toHaveBeenCalledWith(libraries.displayOrder, libraries.name);
-    expect(where).toHaveBeenCalledWith({ op: 'eq', left: libraries.type, right: 'books' });
   });
 
   it('findAutoScanSchedules selects only libraries with a configured expression', async () => {
@@ -225,12 +255,6 @@ describe('LibraryRepository', () => {
   it('getStatsForLibraries issues no query for an empty id list', async () => {
     await expect(repo.getStatsForLibraries([])).resolves.toEqual(new Map());
     expect(db.select).not.toHaveBeenCalled();
-  });
-
-  it('hasUserAccess returns false when no access row exists', async () => {
-    (db.query.userLibraryAccess.findFirst as vi.Mock).mockResolvedValue(undefined);
-
-    await expect(repo.hasUserAccess(1, 2)).resolves.toBe(false);
   });
 
   it('getStats throws when totalSizeBytes exceeds safe integer range', async () => {

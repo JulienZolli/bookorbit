@@ -2,7 +2,7 @@ import { usableFileTime } from '../../../common/utils/file-time.utils';
 import { readdir, stat } from 'fs/promises';
 import { basename, dirname, join, relative } from 'path';
 
-import { naturalCompare } from '../../../common/utils/natural-sort.utils';
+import { compareBookFilePaths } from '../../../common/utils/audio-track-order.utils';
 import { buildNameExcludeMatcher, walkDirectoryTree, WALK_MAX_PATH_LENGTH } from '../../../common/fs-walk.utils';
 import { classifyFile, isPrimaryFormat, isAudioFormat, type FileRole } from './classify';
 
@@ -122,9 +122,11 @@ async function collectByDir(
   knownDirMtimes?: Map<string, number>,
   unchangedDirs?: Set<string>,
   dirMtimes?: Map<string, number>,
+  skipDirectories?: ReadonlySet<string>,
 ): Promise<Set<string>> {
   const { skippedDirs } = await walkDirectoryTree(libraryRoot, {
     shouldExclude,
+    skipDirectories,
     logger,
     visit: async ({ path: dir, filePaths, subdirectoryPaths }) => {
       // Record this directory's mtime for incremental scan state
@@ -146,6 +148,8 @@ async function collectByDir(
       //    that turn this dir into a stem-named subdir needing flattening).
       //    Root is exempt: root-level files are never stem-merged into a parent (see
       //    buildBookCandidates: parent === libraryFolderPath is explicitly skipped).
+      // A disc-named library folder is no longer flattened, but it stays unskippable: libraries
+      // scanned while it was are regrouped by their next scan, whatever its mtime.
       const hasDiscSubdirs = subdirectoryPaths.some((s) => isDiscDirectory(basename(s)));
       const canSkip = knownDirMtimes && unchangedDirs && dirMtimes && filePaths.length > 0 && !isDiscDirectory(basename(dir)) && !hasDiscSubdirs;
 
@@ -198,18 +202,21 @@ export async function findBookCandidates(
   excludePatterns: string[] = [],
   logger?: (msg: string) => void,
   knownDirMtimes?: Map<string, number>,
+  skipDirectories?: ReadonlySet<string>,
 ): Promise<WalkResult> {
   const byDir = new Map<string, FileStat[]>();
   const shouldExclude = buildNameExcludeMatcher(excludePatterns);
   const unchangedDirs = new Set<string>();
   const dirMtimes = new Map<string, number>();
-  const skippedDirs = await collectByDir(libraryFolderPath, byDir, shouldExclude, logger, knownDirMtimes, unchangedDirs, dirMtimes);
+  const skippedDirs = await collectByDir(libraryFolderPath, byDir, shouldExclude, logger, knownDirMtimes, unchangedDirs, dirMtimes, skipDirectories);
 
   // Flatten disc subdirectories (e.g. "CD 1", "Disc 2") into their parent.
   // Collect disc dirs first to avoid mutating the map while iterating.
+  // The library folder itself is never flattened, whatever its name: unRAID mounts its drives
+  // as /mnt/disk1, and folding one would file its books under the folder above the library.
   const discDirs: string[] = [];
   for (const [dir] of byDir) {
-    if (isDiscDirectory(basename(dir))) {
+    if (dir !== libraryFolderPath && isDiscDirectory(basename(dir))) {
       discDirs.push(dir);
     }
   }
@@ -269,13 +276,14 @@ export async function findBookCandidates(
     }
 
     // If any primary file is an audio format, treat the entire folder as one audiobook.
-    // Files are natural-sorted by basename so playback order is deterministic.
+    // Files are natural-sorted by path so playback order is deterministic and flattened disc
+    // folders play disc by disc.
     const hasAudio = primaryFiles.some((f) => {
       return f.format !== null && f.format !== undefined && isAudioFormat(f.format);
     });
 
     if (hasAudio) {
-      const sorted = [...files].sort((a, b) => naturalCompare(basename(a.absolutePath), basename(b.absolutePath)));
+      const sorted = [...files].sort((a, b) => compareBookFilePaths(a.absolutePath, b.absolutePath));
       candidates.push({ folderPath: dir, files: sorted });
       continue;
     }
@@ -304,12 +312,13 @@ export async function findLooseFileCandidates(
   excludePatterns: string[] = [],
   logger?: (msg: string) => void,
   knownDirMtimes?: Map<string, number>,
+  skipDirectories?: ReadonlySet<string>,
 ): Promise<WalkResult> {
   const byDir = new Map<string, FileStat[]>();
   const shouldExclude = buildNameExcludeMatcher(excludePatterns);
   const unchangedDirs = new Set<string>();
   const dirMtimes = new Map<string, number>();
-  const skippedDirs = await collectByDir(libraryFolderPath, byDir, shouldExclude, logger, knownDirMtimes, unchangedDirs, dirMtimes);
+  const skippedDirs = await collectByDir(libraryFolderPath, byDir, shouldExclude, logger, knownDirMtimes, unchangedDirs, dirMtimes, skipDirectories);
 
   const candidates: BookCandidate[] = [];
 
@@ -416,6 +425,6 @@ export async function buildSingleBookCandidate(
 
   return {
     folderPath,
-    files: allFiles.sort((a, b) => naturalCompare(basename(a.absolutePath), basename(b.absolutePath))),
+    files: allFiles.sort((a, b) => compareBookFilePaths(a.absolutePath, b.absolutePath)),
   };
 }

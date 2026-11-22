@@ -1,6 +1,6 @@
 import { MetadataCandidate } from '@bookorbit/types';
 
-import { matchableTitle, scoreCandidate } from './candidate-relevance';
+import { matchableTitle, rankCandidate } from './candidate-relevance';
 import { candidateHasNormalizedIsbn, candidatesShareIsbn, normalizeMetadataIsbn } from './isbn-match';
 import { MetadataSearchParams } from './providers/metadata-search-params';
 import { scoreTitleMatch, shareSignificantToken } from '../../common/text-match/title-match';
@@ -53,6 +53,24 @@ export function resolveCandidateAgreement(candidates: readonly MetadataCandidate
 }
 
 /**
+ * Holds candidates from a later search to an anchor chosen earlier, such as the audiobook edition's
+ * art to the book a first pass identified. Unlike `resolveCandidateAgreement`, a single candidate
+ * is checked too: it has no peers to outvote it, but the anchor still describes the book.
+ */
+export function acceptAgainstAnchor(
+  anchor: MetadataCandidate,
+  candidates: readonly MetadataCandidate[],
+): Pick<CandidateAgreement, 'accepted' | 'rejected'> {
+  const accepted: MetadataCandidate[] = [];
+  const rejected: MetadataCandidate[] = [];
+  for (const candidate of candidates) {
+    if (candidate === anchor || describesSameBook(anchor, candidate)) accepted.push(candidate);
+    else rejected.push(candidate);
+  }
+  return { accepted, rejected };
+}
+
+/**
  * The candidate the others are measured against: an edition confirmed by the book's own ISBN when
  * one is available, otherwise whichever candidate the query supports most strongly. Ties fall to
  * the caller's trust order.
@@ -69,9 +87,9 @@ function selectAnchor(candidates: readonly MetadataCandidate[], params: Metadata
   if (!hasText(params.title) && !hasText(params.author)) return scoreable[0];
 
   let best = scoreable[0];
-  let bestScore = scoreCandidate(best, params);
+  let bestScore = rankCandidate(best, params);
   for (const candidate of scoreable.slice(1)) {
-    const score = scoreCandidate(candidate, params);
+    const score = rankCandidate(candidate, params);
     if (score > bestScore) {
       best = candidate;
       bestScore = score;

@@ -41,12 +41,12 @@ function descriptor(overrides: Partial<IndexerAdapterDescriptor> = {}): IndexerA
     builtIn: true,
     requiresCredential: false,
     credentialKind: 'apiKey',
-    mediaKinds: ['ebook', 'audiobook', 'comic'],
+    mediaKinds: ['ebook', 'audiobook'],
     usesCategories: true,
     seedsBack: true,
     delivery: 'torrent',
     supportsIsbnSearch: false,
-    defaultCategories: { ebook: [7020], audiobook: [3030], comic: [7030] },
+    defaultCategories: { ebook: [7020], audiobook: [3030] },
     settingsFields: [],
     ...overrides,
   }
@@ -66,7 +66,7 @@ const OPEN_LIBRARY = descriptor({
   usesCategories: false,
   seedsBack: false,
   delivery: 'file',
-  defaultCategories: { ebook: [], audiobook: [], comic: [] },
+  defaultCategories: { ebook: [], audiobook: [] },
   defaultBaseUrl: 'https://openlibrary.example',
 })
 
@@ -107,7 +107,7 @@ function indexer(overrides: Partial<IndexerItem> = {}): IndexerItem {
     applyTrackerSeedGoals: true,
     seedRatioGoal: null,
     seedTimeMinutes: null,
-    categories: { ebook: [7020], audiobook: [3030], comic: [7030] },
+    categories: { ebook: [7020], audiobook: [3030] },
     disabledMediaKinds: [],
     isbnSearchDisabled: false,
     settings: {},
@@ -693,6 +693,16 @@ describe('RequestIndexersPanel', () => {
       await clickInPanel(wrapper, 'Set up')
 
       expect(sheet().querySelector<HTMLInputElement>('#indexer-name')?.value).toBe('Demo Tracker')
+    })
+
+    /** The plugin already settles the type, and switching it here would save a torznab feed under the plugin's name. */
+    it('does not offer the built-in type picker when setting up a plugin', async () => {
+      const wrapper = await mountPanel({ adapters: [descriptor(), PLUGIN] })
+
+      await clickInPanel(wrapper, 'Set up')
+
+      expect(sheet().querySelector('#indexer-name')).not.toBeNull()
+      expect(sheet().querySelector('#indexer-type')).toBeNull()
     })
 
     /** Once something uses it, it is that source, and a second row for it would be a duplicate. */

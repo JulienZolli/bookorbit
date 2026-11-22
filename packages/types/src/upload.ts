@@ -4,6 +4,7 @@ export const UPLOAD_SUPPORTED_FORMATS = [
   "epub",
   "kepub",
   "pdf",
+  "djvu",
   "mobi",
   "azw",
   "azw3",
@@ -40,8 +41,14 @@ export const UploadErrorCode = {
 
 export type UploadErrorCode = (typeof UploadErrorCode)[keyof typeof UploadErrorCode];
 
+/**
+ * Where an upload goes. `book_dock` with a `libraryId` lands in that library's dock; send it only to
+ * a server that lists the dock in `GET /book-dock/docks`, because older servers drop it silently.
+ */
 export type UploadTarget =
-  { kind: "library"; libraryId: number; folderId?: number } | { kind: "existing_book"; bookId: number } | { kind: "book_dock" };
+  | { kind: "library"; libraryId: number; folderId?: number }
+  | { kind: "existing_book"; bookId: number }
+  | { kind: "book_dock"; libraryId?: number };
 
 export type UploadSessionStatus = "receiving" | "processing" | "completed" | "failed" | "cancelled" | "expired";
 

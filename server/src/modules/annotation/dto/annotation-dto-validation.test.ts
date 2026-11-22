@@ -52,6 +52,31 @@ describe('Annotation DTO validation', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('accepts a pdf create payload with empty text, as sent for a PDF that denies text extraction', async () => {
+    const errors = await errorsFor(CreateAnnotationDto, {
+      pdf: { page: 9, rect: { x: 1, y: 2, width: 3, height: 4 }, rects: [{ x: 1, y: 2, width: 3, height: 4 }] },
+      bookFileId: 46,
+      text: '',
+    });
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('still requires text to be a string on a pdf create payload', async () => {
+    const errors = await errorsFor(CreateAnnotationDto, {
+      pdf: { page: 0, rect: { x: 1, y: 2, width: 3, height: 4 }, rects: [{ x: 1, y: 2, width: 3, height: 4 }] },
+      bookFileId: 46,
+    });
+
+    expect(errors.map((error) => error.property)).toContain('text');
+  });
+
+  it('keeps the empty-text message for a cfi create payload', async () => {
+    const errors = await errorsFor(CreateAnnotationDto, { cfi: 'epubcfi(/6/4!/4/2/1:0)', text: '' });
+
+    expect(errors.flatMap((error) => Object.values(error.constraints ?? {}))).toEqual(['text should not be empty']);
+  });
+
   it('rejects a create payload missing both cfi and pdf', async () => {
     expect((await errorsFor(CreateAnnotationDto, { text: 'ok' })).length).toBeGreaterThan(0);
   });
@@ -260,5 +285,34 @@ describe('AnnotationHubBooksQueryDto validation', () => {
     expect(await errorsFor(AnnotationHubBooksQueryDto, { status: 'active' })).toHaveLength(0);
     expect(await errorsFor(AnnotationHubBooksQueryDto, { status: 'trashed' })).toHaveLength(0);
     expect((await errorsFor(AnnotationHubBooksQueryDto, { status: 'gone' })).length).toBeGreaterThan(0);
+  });
+
+  describe('notebook additions', () => {
+    async function strictErrors<T extends object>(cls: new () => T, value: Record<string, unknown>) {
+      return validate(plainToInstance(cls, value), { whitelist: true, forbidNonWhitelisted: true });
+    }
+
+    it('accepts a null note under the global whitelist settings, which is how a note is cleared', async () => {
+      const dto = plainToInstance(UpdateAnnotationDto, { note: null });
+      expect(await strictErrors(UpdateAnnotationDto, { note: null })).toHaveLength(0);
+      expect(dto.note).toBeNull();
+    });
+
+    it('accepts a boolean star toggle on its own or with content changes', async () => {
+      expect(await strictErrors(UpdateAnnotationDto, { starred: true })).toHaveLength(0);
+      expect(await strictErrors(UpdateAnnotationDto, { starred: false, note: null, color: '#4ADE80' })).toHaveLength(0);
+    });
+
+    it('rejects a non-boolean or null star toggle rather than reading null as unstar', async () => {
+      expect((await strictErrors(UpdateAnnotationDto, { starred: 'yes' })).map((error) => error.property)).toEqual(['starred']);
+      expect((await strictErrors(UpdateAnnotationDto, { starred: null })).map((error) => error.property)).toEqual(['starred']);
+    });
+
+    it('accepts star and unstar as bulk actions next to the existing ones', async () => {
+      for (const action of ['trash', 'restore', 'restyle', 'star', 'unstar']) {
+        expect(await strictErrors(AnnotationBulkDto, { ids: [1, 2], action })).toHaveLength(0);
+      }
+      expect((await strictErrors(AnnotationBulkDto, { ids: [1], action: 'favourite' })).map((error) => error.property)).toEqual(['action']);
+    });
   });
 });

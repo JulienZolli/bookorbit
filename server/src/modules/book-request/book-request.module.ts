@@ -1,12 +1,11 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
-import type { StringValue } from 'ms';
+import { SetupOverviewModule } from '../setup-overview/setup-overview.module';
 
 import { AppSettingsModule } from '../app-settings/app-settings.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
 import { BookDockModule } from '../book-dock/book-dock.module';
+import { JobsModule } from '../jobs/jobs.module';
 import { LibraryModule } from '../library/library.module';
 import { NotificationModule } from '../notification/notification.module';
 import { UploadModule } from '../upload/upload.module';
@@ -22,7 +21,10 @@ import { BookRequestGateway } from './book-request.gateway';
 import { BookRequestNotifier } from './book-request-notifier.service';
 import { BookRequestRepository } from './book-request.repository';
 import { BookRequestService } from './book-request.service';
+import { BookRequestSetupFlow } from './book-request.setup-flow';
 import { RequestCredentialService } from './request-credential.service';
+import { RequestDownloadJobRepository } from './request-download-job.repository';
+import { RequestDownloadJobSource } from './request-download-job-source';
 import { DOWNLOAD_CLIENT_ADAPTERS } from './download-clients/download-client-adapter';
 import { DownloadClientConfigService } from './download-clients/download-client-config.service';
 import { DownloadClientReconciliationService } from './download-clients/download-client-reconciliation.service';
@@ -33,8 +35,12 @@ import { PathMappingService } from './download-clients/path-mapping.service';
 import { QbittorrentAdapter } from './download-clients/adapters/qbittorrent.adapter';
 import { TransmissionAdapter } from './download-clients/adapters/transmission.adapter';
 import { DelugeAdapter } from './download-clients/adapters/deluge.adapter';
+import { RtorrentAdapter } from './download-clients/adapters/rtorrent.adapter';
+import { DownloadContentRemovalService } from './download-clients/download-content-removal.service';
 import { NzbgetAdapter } from './download-clients/adapters/nzbget.adapter';
 import { SabnzbdAdapter } from './download-clients/adapters/sabnzbd.adapter';
+import { TorboxAdapter } from './download-clients/adapters/torbox.adapter';
+import { TorboxApiClient } from './download-clients/adapters/torbox.api';
 import { INDEXER_ADAPTERS } from './indexers/indexer-adapter';
 import { IndexerConfigService } from './indexers/indexer-config.service';
 import { IndexerController } from './indexers/indexer.controller';
@@ -64,6 +70,7 @@ import { RequestFulfillmentService } from './fulfillment/request-fulfillment.ser
 import { RequestImportService } from './fulfillment/request-import.service';
 import { RequestSeedService } from './fulfillment/request-seed.service';
 import { RequestUserCleanupService } from './fulfillment/request-user-cleanup.service';
+import { RequestCompanionService } from './fulfillment/request-companion.service';
 import { RequestVerificationService } from './fulfillment/request-verification.service';
 import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
 import { RequestIdentifierEnrichmentService } from './request-identifier-enrichment.service';
@@ -75,6 +82,7 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
  */
 @Module({
   imports: [
+    SetupOverviewModule,
     LibraryModule,
     AppSettingsModule,
     AuditModule,
@@ -82,15 +90,9 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
     UploadModule,
     AuthModule,
     UserModule,
+    JobsModule,
     MetadataFetchModule,
     forwardRef(() => NotificationModule),
-    JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.getOrThrow<string>('auth.jwtSecret'),
-        signOptions: { expiresIn: config.getOrThrow<StringValue | number>('auth.jwtExpiresIn') },
-      }),
-    }),
   ],
   controllers: [
     BookRequestController,
@@ -102,6 +104,7 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
     IndexerManagerController,
   ],
   providers: [
+    BookRequestSetupFlow,
     BookRequestService,
     RequestIdentifierEnrichmentService,
     BookRequestRepository,
@@ -111,27 +114,35 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
     BookRequestGateway,
     BookRequestEventsService,
     RequestCredentialService,
+    RequestDownloadJobRepository,
+    RequestDownloadJobSource,
 
     DownloadClientRepository,
     DownloadClientConfigService,
     DownloadClientReconciliationService,
     DownloadClientRegistry,
     PathMappingService,
+    DownloadContentRemovalService,
     QbittorrentAdapter,
     TransmissionAdapter,
     DelugeAdapter,
+    RtorrentAdapter,
     NzbgetAdapter,
     SabnzbdAdapter,
+    TorboxApiClient,
+    TorboxAdapter,
     {
       provide: DOWNLOAD_CLIENT_ADAPTERS,
       useFactory: (
         qbittorrent: QbittorrentAdapter,
         transmission: TransmissionAdapter,
         deluge: DelugeAdapter,
+        rtorrent: RtorrentAdapter,
         nzbget: NzbgetAdapter,
         sabnzbd: SabnzbdAdapter,
-      ) => [qbittorrent, transmission, deluge, nzbget, sabnzbd],
-      inject: [QbittorrentAdapter, TransmissionAdapter, DelugeAdapter, NzbgetAdapter, SabnzbdAdapter],
+        torbox: TorboxAdapter,
+      ) => [qbittorrent, transmission, deluge, rtorrent, nzbget, sabnzbd, torbox],
+      inject: [QbittorrentAdapter, TransmissionAdapter, DelugeAdapter, RtorrentAdapter, NzbgetAdapter, SabnzbdAdapter, TorboxAdapter],
     },
 
     IndexerRepository,
@@ -160,6 +171,7 @@ import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
     DownloadRemovalService,
     RequestFulfillmentService,
     RequestImportService,
+    RequestCompanionService,
     RequestVerificationService,
     RequestSeedService,
     RequestUserCleanupService,

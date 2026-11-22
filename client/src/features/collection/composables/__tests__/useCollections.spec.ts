@@ -11,16 +11,15 @@ function makeCollection(overrides: Partial<Collection> = {}): Collection {
   return {
     id: 7,
     userId: 1,
-    mediaType: 'books',
     name: 'Favorites',
     icon: 'FolderOpen',
     description: null,
     isPublic: false,
+    coverAspectRatio: '2/3',
     isOwner: true,
     syncToKobo: false,
     displayOrder: 0,
     bookCount: 0,
-    podcastCount: 0,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -160,60 +159,43 @@ describe('useCollections', () => {
     expect(loaded.value).toBe(true)
   })
 
-  it('splits collections by medium so each surface renders only its own', async () => {
+  it('sends only the fields the create endpoint accepts', async () => {
     const { useCollections } = await import('../useCollections')
-    apiMock.mockResolvedValueOnce(makeResponse([makeCollection({ id: 1, mediaType: 'books' }), makeCollection({ id: 2, mediaType: 'podcasts' })]))
-    const { bookCollections, podcastCollections, fetchCollections } = useCollections()
-
-    await fetchCollections()
-
-    expect(bookCollections.value.map((collection) => collection.id)).toEqual([1])
-    expect(podcastCollections.value.map((collection) => collection.id)).toEqual([2])
-  })
-
-  it('coalesces concurrent requests for the same podcast collection page', async () => {
-    let resolveRequest!: (response: Response) => void
-    apiMock.mockReturnValueOnce(new Promise<Response>((resolve) => (resolveRequest = resolve)))
-    const { useCollections } = await import('../useCollections')
-    const { fetchCollectionPodcasts } = useCollections()
-
-    const first = fetchCollectionPodcasts(5, 1, 50)
-    const second = fetchCollectionPodcasts(5, 1, 50)
-
-    expect(apiMock).toHaveBeenCalledTimes(1)
-    resolveRequest(makeResponse({ items: [], total: 0, page: 1, size: 50 }))
-    await Promise.all([first, second])
-  })
-
-  it('sends the media type when creating a podcast collection', async () => {
-    const { useCollections } = await import('../useCollections')
-    apiMock.mockResolvedValueOnce(makeResponse(makeCollection({ mediaType: 'podcasts' })))
+    apiMock.mockResolvedValueOnce(makeResponse(makeCollection())).mockResolvedValueOnce(makeResponse(makeCollection({ isPublic: true })))
     const { createCollection } = useCollections()
 
-    await createCollection('Sci-fi', 'Podcast', undefined, 'podcasts')
+    await createCollection('Sci-fi', 'Rocket')
+    await createCollection('Shared', 'Users', undefined, true)
 
-    expect(apiMock).toHaveBeenCalledWith(
+    expect(apiMock).toHaveBeenNthCalledWith(
+      1,
       '/api/v1/collections',
-      expect.objectContaining({ body: JSON.stringify({ name: 'Sci-fi', icon: 'Podcast', mediaType: 'podcasts' }) }),
+      expect.objectContaining({ body: JSON.stringify({ name: 'Sci-fi', icon: 'Rocket' }) }),
+    )
+    expect(apiMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/collections',
+      expect.objectContaining({ body: JSON.stringify({ name: 'Shared', icon: 'Users', isPublic: true }) }),
     )
   })
 
-  it('adds and removes shows through the podcasts membership endpoint', async () => {
+  it('sends the grid shape on update only when one is given (issue #1926)', async () => {
     const { useCollections } = await import('../useCollections')
-    const { addPodcastsToCollection, removePodcastsFromCollection } = useCollections()
+    apiMock.mockResolvedValueOnce(makeResponse(makeCollection({ coverAspectRatio: '1/1' }))).mockResolvedValueOnce(makeResponse(makeCollection()))
+    const { updateCollection } = useCollections()
 
-    apiMock.mockResolvedValueOnce(makeResponse(null))
-    await addPodcastsToCollection(5, [7, 8])
-    expect(apiMock).toHaveBeenCalledWith(
-      '/api/v1/collections/5/podcasts',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ podcastIds: [7, 8] }) }),
-    )
+    await updateCollection(1, 'Listening', 'Headphones', false, true, '1/1')
+    await updateCollection(1, 'Listening', 'Headphones')
 
-    apiMock.mockResolvedValueOnce(makeResponse(null))
-    await removePodcastsFromCollection(5, [7])
-    expect(apiMock).toHaveBeenCalledWith(
-      '/api/v1/collections/5/podcasts',
-      expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ podcastIds: [7] }) }),
-    )
+    const [, square] = apiMock.mock.calls[0] as [string, RequestInit]
+    const [, omitted] = apiMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(square.body))).toEqual({
+      name: 'Listening',
+      icon: 'Headphones',
+      syncToKobo: false,
+      isPublic: true,
+      coverAspectRatio: '1/1',
+    })
+    expect(JSON.parse(String(omitted.body))).toEqual({ name: 'Listening', icon: 'Headphones' })
   })
 })

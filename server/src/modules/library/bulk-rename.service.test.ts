@@ -1,4 +1,5 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { LibraryOperationGate } from '../../common/services/library-operation-gate.service';
 import { BulkRenameService } from './bulk-rename.service';
 import type { BulkRenameBookData } from '../file-write/bulk-rename.repository';
 import type { FileRenameResult } from '@bookorbit/types';
@@ -26,6 +27,7 @@ function makeBookData(overrides: Partial<BulkRenameBookData> & { bookId?: number
       subtitle: null,
       publisher: null,
       language: null,
+      isbn10: null,
       isbn13: null,
       publishedYear: null,
       seriesName: null,
@@ -80,6 +82,7 @@ function renameEvents(events: any[]): any[] {
 
 describe('BulkRenameService', () => {
   let service: BulkRenameService;
+  let libraryGate: LibraryOperationGate;
 
   const bulkRenameRepo = {
     findAllBooksForLibrary: vi.fn(),
@@ -88,6 +91,7 @@ describe('BulkRenameService', () => {
 
   const fileRenameRepo = {
     findExistingPaths: vi.fn(),
+    findFolderOwners: vi.fn(),
   };
 
   const fileRenameService = {
@@ -119,8 +123,10 @@ describe('BulkRenameService', () => {
     appSettings.getUploadPatternBookPerFolder.mockResolvedValue('{authors}/{title}/');
     notificationService.notify.mockResolvedValue(undefined);
     fileRenameRepo.findExistingPaths.mockResolvedValue(new Map());
+    fileRenameRepo.findFolderOwners.mockResolvedValue(new Map());
     fileWatcherService.pauseWatcher.mockReturnValue(true);
 
+    libraryGate = new LibraryOperationGate();
     service = new BulkRenameService(
       bulkRenameRepo as any,
       fileRenameRepo as any,
@@ -128,6 +134,7 @@ describe('BulkRenameService', () => {
       appSettings as any,
       notificationService as any,
       fileWatcherService as any,
+      libraryGate,
     );
   });
 
@@ -399,6 +406,88 @@ describe('BulkRenameService', () => {
 
       expect(appSettings.getUploadPatternBookPerFolder).toHaveBeenCalled();
       expect(result.items[0].newPath).toContain('FolderBook');
+    });
+
+    describe('folders held by another book', () => {
+      const seriesPattern = '{authors}/<{series}/><{seriesIndex}> - {title}';
+      const seriesFolder = '/library/Frank Herbert/Dune';
+
+      function looseSeriesBook(bookId: number, title: string, seriesIndex: string, format = 'epub'): BulkRenameBookData {
+        const book = makeBookData({
+          bookId,
+          title,
+          absolutePath: `/library/loose-${bookId}.${format}`,
+          format,
+          organizationMode: 'book_per_folder',
+          fileNamingPattern: seriesPattern,
+          authors: ['Frank Herbert'],
+        });
+        book.metadata.seriesName = 'Dune';
+        book.metadata.seriesIndex = seriesIndex;
+        return book;
+      }
+
+      beforeEach(() => {
+        bulkRenameRepo.findLibrarySettings.mockResolvedValue({
+          fileRenameEnabled: true,
+          fileNamingPattern: seriesPattern,
+          organizationMode: 'book_per_folder',
+          watch: false,
+        });
+      });
+
+      it('holds back a book whose target folder belongs to a different work', async () => {
+        bulkRenameRepo.findAllBooksForLibrary.mockResolvedValue([looseSeriesBook(2, 'Dune Messiah', '2')]);
+        fileRenameRepo.findFolderOwners.mockResolvedValue(new Map([[seriesFolder, { bookId: 1, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]));
+
+        const result = await service.getPreview(1, 1, 50);
+
+        expect(fileRenameRepo.findFolderOwners).toHaveBeenCalledWith(1, [seriesFolder]);
+        expect(result.items[0]).toEqual(expect.objectContaining({ status: 'collision', reason: 'Target folder belongs to another book' }));
+        expect(result.totalByStatus.collision).toBe(1);
+        expect(result.totalByStatus.will_rename).toBe(0);
+      });
+
+      it('keeps a rename into the folder held by the same work in another format', async () => {
+        bulkRenameRepo.findAllBooksForLibrary.mockResolvedValue([looseSeriesBook(2, 'Dune', '1', 'm4b')]);
+        fileRenameRepo.findFolderOwners.mockResolvedValue(new Map([[seriesFolder, { bookId: 1, title: 'Dune', primaryAuthor: 'Frank Herbert' }]]));
+
+        const result = await service.getPreview(1, 1, 50);
+
+        expect(result.items[0].status).toBe('will_rename');
+      });
+
+      it('holds back every book of a series that would share one new folder', async () => {
+        bulkRenameRepo.findAllBooksForLibrary.mockResolvedValue([looseSeriesBook(1, 'Dune', '1'), looseSeriesBook(2, 'Dune Messiah', '2')]);
+
+        const result = await service.getPreview(1, 1, 50);
+
+        expect(result.items.map((item) => item.status)).toEqual(['collision', 'collision']);
+        expect(result.items[0].reason).toBe('Multiple books would resolve to the same folder');
+      });
+
+      it('keeps two formats of one work that would share a new folder', async () => {
+        bulkRenameRepo.findAllBooksForLibrary.mockResolvedValue([looseSeriesBook(1, 'Dune', '1'), looseSeriesBook(2, 'Dune', '1', 'm4b')]);
+
+        const result = await service.getPreview(1, 1, 50);
+
+        expect(result.items.map((item) => item.status)).toEqual(['will_rename', 'will_rename']);
+      });
+
+      it('does not look up folder owners for a file-as-book library', async () => {
+        bulkRenameRepo.findLibrarySettings.mockResolvedValue({
+          fileRenameEnabled: true,
+          fileNamingPattern: '{title}',
+          organizationMode: 'book_per_file',
+          watch: false,
+        });
+        bulkRenameRepo.findAllBooksForLibrary.mockResolvedValue([willRenameBook(1)]);
+
+        const result = await service.getPreview(1, 1, 50);
+
+        expect(result.items[0].status).toBe('will_rename');
+        expect(fileRenameRepo.findFolderOwners).not.toHaveBeenCalled();
+      });
     });
 
     it('returns empty items for library with no books', async () => {
@@ -1078,6 +1167,17 @@ describe('BulkRenameService', () => {
       // A preparation failure used to strand the lock, wedging the library as "already running".
       expect(service.isRunning(1)).toBe(false);
       expect(fileWatcherService.pauseWatcher).not.toHaveBeenCalled();
+    });
+
+    it('refuses with a conflict while a scan, move or merge holds the library', async () => {
+      bulkRenameRepo.findLibrarySettings.mockResolvedValue(noWatchSettings);
+      const release = libraryGate.tryAcquire(1, 'book_merge')!;
+
+      await expect(service.execute(1, 42, { onProgress: () => {}, isCancelled: () => false })).rejects.toThrow(ConflictException);
+      expect(bulkRenameRepo.findAllBooksForLibrary).not.toHaveBeenCalled();
+      expect(libraryGate.current(1)).toBe('book_merge');
+
+      release();
     });
 
     it('releases the lock when pausing the watcher fails', async () => {

@@ -96,10 +96,23 @@ describe('MetadataSearchDto', () => {
     expect(falseValue.dto.isAudiobook).toBe(false);
   });
 
-  it('rejects unknown provider keys after normalization', async () => {
+  it('converts resultsPerProvider to a number within the browsing cap', async () => {
+    const valid = await validateInput({ author: 'Terry Pratchett', resultsPerProvider: '20' });
+    const tooMany = await validateInput({ author: 'Terry Pratchett', resultsPerProvider: '21' });
+    const zero = await validateInput({ author: 'Terry Pratchett', resultsPerProvider: '0' });
+    const fraction = await validateInput({ author: 'Terry Pratchett', resultsPerProvider: '2.5' });
+
+    expect(valid.errors).toHaveLength(0);
+    expect(valid.dto.resultsPerProvider).toBe(20);
+    for (const { errors } of [tooMany, zero, fraction]) {
+      expect(errors).toEqual(expect.arrayContaining([expect.objectContaining({ property: 'resultsPerProvider' })]));
+    }
+  });
+
+  it('rejects provider values that cannot be a key after normalization', async () => {
     const { errors } = await validateInput({
       title: 'Dune',
-      providers: `${MetadataProviderKey.GOOGLE},unknown-provider`,
+      providers: `${MetadataProviderKey.GOOGLE},Not A Provider`,
     });
 
     expect(errors).toEqual(
@@ -107,10 +120,16 @@ describe('MetadataSearchDto', () => {
         expect.objectContaining({
           property: 'providers',
           constraints: expect.objectContaining({
-            isEnum: expect.stringContaining('providers'),
+            isMetadataProviderKey: expect.stringContaining('providers'),
           }),
         }),
       ]),
     );
+  });
+
+  it('accepts external provider keys beside built-ins', async () => {
+    const { errors, dto } = await validateInput({ title: 'Dune', providers: `${MetadataProviderKey.GOOGLE},fantlab` });
+    expect(errors).toEqual([]);
+    expect(dto.providers).toEqual([MetadataProviderKey.GOOGLE, 'fantlab']);
   });
 });

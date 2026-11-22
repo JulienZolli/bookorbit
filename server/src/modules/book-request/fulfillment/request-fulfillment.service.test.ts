@@ -4,7 +4,7 @@ import { NotificationType, UNSETTLED_BOOK_REQUEST_DOWNLOAD_STATUSES, WORKER_WRIT
 import type { RequestUser } from '../../../common/types/request-user';
 import type { BookRequestDownloadRow, BookRequestRow } from '../../../db/schema';
 import { newznabClientKey } from '../indexers/adapters/newznab.adapter';
-import { IndexerSearchException } from '../indexers/indexer-adapter';
+import { IndexerRetryExhaustedException, IndexerSearchException } from '../indexers/indexer-adapter';
 import { RequestFulfillmentService } from './request-fulfillment.service';
 
 const INFO_HASH = 'c9e15763f722f23e98a29decdfae341b98d53056';
@@ -42,6 +42,7 @@ function joined(overrides: Partial<BookRequestRow> = {}) {
     requesterUsername: 'bob',
     requesterName: 'Bob',
     decidedByUsername: null,
+    decidedByName: null,
     targetLibraryName: 'Books',
   };
 }
@@ -81,7 +82,7 @@ function makeService(
     ...overrides.clients,
   };
   const adapter = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
-  const registry = { require: vi.fn().mockReturnValue(adapter) };
+  const registry = { find: vi.fn().mockReturnValue(undefined), require: vi.fn().mockReturnValue(adapter) };
   const direct = { add: vi.fn().mockResolvedValue({ clientKey: INFO_HASH }) };
   const indexers = {
     resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'tracker', adapterType: 'torznab' }),
@@ -228,7 +229,7 @@ describe('RequestFulfillmentService.grab', () => {
 
     await expect(service.grab(7, { magnet: MAGNET }, user())).rejects.toMatchObject({
       status: 503,
-      response: { errorCode: 'GRAB_CLIENT_UNAVAILABLE' },
+      response: { errorCode: 'GRAB_CLIENT_UNAVAILABLE', errorMeta: { client: 'qbit' } },
     });
 
     expect(adapter.add).toHaveBeenCalledTimes(1);
@@ -330,6 +331,25 @@ describe('RequestFulfillmentService.grab', () => {
     expect(downloads.create).not.toHaveBeenCalled();
   });
 
+  /**
+   * A client that stages its own files lands them under a root BookOrbit owns, so it has no import
+   * root to declare and is saved without mappings by design. The rule that lets it be saved without
+   * one has to let it grab without one too, or the saved config can never be used.
+   */
+  it('grabs through a staging client that has no path mapping', async () => {
+    const { service, downloads, registry } = makeService({
+      clients: {
+        findOne: vi.fn().mockResolvedValue({ id: 4, name: 'torbox', adapterType: 'torbox', enabled: true, pathMappings: [] }),
+        resolveConfig: vi.fn().mockResolvedValue({ id: 4, adapterType: 'torbox' }),
+      },
+    });
+    registry.find.mockReturnValue({ stage: vi.fn() });
+
+    await service.grab(7, { downloadClientId: 4, magnet: MAGNET }, user());
+
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ downloadClientId: 4 }));
+  });
+
   it('404s an unknown request', async () => {
     const { service } = makeService({ requests: { findById: vi.fn().mockResolvedValue(undefined) } });
     await expect(service.grab(7, { magnet: MAGNET }, user())).rejects.toThrow(NotFoundException);
@@ -372,6 +392,30 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
         source: 'torrent_file',
       }),
     );
+  });
+
+  it('keeps the release page and the request to review it on the attempt', async () => {
+    const { service, downloads } = makeService({
+      releases: { find: vi.fn().mockReturnValue({ ...RELEASE, infoUrl: 'https://tracker.example.com/details/1' }) },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1', holdForReview: true }, user());
+
+    expect(downloads.create).toHaveBeenCalledWith(
+      expect.objectContaining({ releaseInfoUrl: 'https://tracker.example.com/details/1', holdForReview: true }),
+    );
+  });
+
+  it('files a grab on its score unless the sender asked to review it', async () => {
+    const { service, downloads } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexerAdapter: { fetchTorrentFile: vi.fn().mockResolvedValue(torrentBytes()) },
+    });
+
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(downloads.create).toHaveBeenCalledWith(expect.objectContaining({ releaseInfoUrl: null, holdForReview: false }));
   });
 
   it('hands a magnet redirect from a Torznab download endpoint to the torrent client', async () => {
@@ -466,6 +510,24 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
       expect.objectContaining({ nzbFile: nzb, nzbFileName: 'Dune - Frank Herbert [EPUB].nzb', clientKey }),
       expect.anything(),
     );
+  });
+
+  it.each([true, false])('does not restart an exhausted NZB retry budget (automated=%s)', async (automated) => {
+    const exhausted = new IndexerRetryExhaustedException('throttled', 'The indexer is still rate limiting us');
+    const fetchNzbFile = vi.fn().mockRejectedValue(exhausted);
+    const { service, downloads, adapter } = makeService({
+      releases: { find: vi.fn().mockReturnValue(RELEASE) },
+      indexers: { resolveConfig: vi.fn().mockResolvedValue({ id: 9, name: 'usenet', adapterType: 'newznab' }) },
+      indexerAdapter: { fetchNzbFile },
+    });
+
+    await expect(service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, automated ? null : user())).rejects.toMatchObject({
+      response: { errorCode: 'GRAB_SOURCE_UNAVAILABLE', statusCode: 503 },
+      cause: exhausted,
+    });
+    expect(fetchNzbFile).toHaveBeenCalledTimes(1);
+    expect(downloads.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ source: 'nzb_file', status: 'failed', automated }));
+    expect(adapter.add).not.toHaveBeenCalled();
   });
 
   it('inspects the torrent without creating an attempt and reuses it for the following grab', async () => {
@@ -758,6 +820,47 @@ describe('RequestFulfillmentService.grab from a picked release', () => {
     const payload = adapter.add.mock.calls[0]?.[0];
     expect(payload).not.toHaveProperty('seedRatioGoal');
     expect(payload).toHaveProperty('seedTimeMinutes', 90);
+  });
+
+  it.each([
+    { transport: 'torrent', inspected: false },
+    { transport: 'torrent', inspected: true },
+    { transport: 'magnet', inspected: false },
+    { transport: 'magnet', inspected: true },
+  ])('omits both tracker limits for a disabled source ($transport, inspected=$inspected)', async ({ transport, inspected }) => {
+    const fetchTorrentFile = vi.fn().mockResolvedValue(torrentBytes());
+    const resolveSeedPolicy = vi.fn().mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: true,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+    const { service, adapter } = makeService({
+      releases: {
+        find: vi.fn().mockReturnValue({ ...RELEASE, seedRatioGoal: 1, seedTimeMinutes: 4320, ...(transport === 'magnet' ? { magnet: MAGNET } : {}) }),
+      },
+      indexers: { resolveSeedPolicy },
+      indexerAdapter: { fetchTorrentFile },
+    });
+
+    if (inspected) await service.inspectRelease(7, { indexerId: 9, releaseGuid: 'r-1' });
+    resolveSeedPolicy.mockResolvedValue({
+      id: 9,
+      adapterType: 'torznab',
+      seedsBack: true,
+      applyTrackerSeedGoals: false,
+      seedRatioGoal: null,
+      seedTimeMinutes: null,
+    });
+    await service.grab(7, { indexerId: 9, releaseGuid: 'r-1' }, user());
+
+    expect(resolveSeedPolicy).toHaveBeenCalledExactlyOnceWith(9);
+    expect(adapter.add).toHaveBeenCalledTimes(1);
+    expect(adapter.add.mock.calls[0]?.[0]).not.toHaveProperty('seedRatioGoal');
+    expect(adapter.add.mock.calls[0]?.[0]).not.toHaveProperty('seedTimeMinutes');
+    expect(fetchTorrentFile).toHaveBeenCalledTimes(transport === 'torrent' ? 1 : 0);
   });
 
   it('uses current policy after an inspection cache hit without fetching bytes again', async () => {
@@ -1108,6 +1211,23 @@ describe('RequestFulfillmentService.failDownload', () => {
       NotificationType.BookRequestFailed,
       expect.objectContaining({ meta: { requestId: 7, downloadId: 11 } }),
     );
+  });
+
+  /** The prose is still written, so a client that does not know the code keeps showing it. */
+  it('records a classified failure with its code and parameters beside the reason', async () => {
+    const { service, requests } = makeService();
+
+    await service.failDownload({ id: 11, requestId: 7 } as BookRequestDownloadRow, 'The downloaded content is not readable at /data/torrents/Dune', {
+      code: 'DOWNLOAD_UNREADABLE',
+      meta: { path: '/data/torrents/Dune' },
+    });
+
+    expect(requests.updateIf).toHaveBeenCalledWith(7, WORKER_WRITABLE_BOOK_REQUEST_STATUSES, {
+      status: 'failed',
+      statusReason: 'The downloaded content is not readable at /data/torrents/Dune',
+      failureCode: 'DOWNLOAD_UNREADABLE',
+      failureMeta: { path: '/data/torrents/Dune' },
+    });
   });
 
   it('drops a direct source URL when its attempt fails', async () => {

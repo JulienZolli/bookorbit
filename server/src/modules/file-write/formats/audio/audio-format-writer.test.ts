@@ -172,6 +172,114 @@ describe('AudioFormatWriter', () => {
     expect(embedder.embedMetadata).toHaveBeenCalledWith('/books/audio/book.flac', 'flac', expect.objectContaining({ coverBytes: null }));
   });
 
+  it('writes only the chapters when a chapter write passes them with an empty field mask', async () => {
+    const { writer, embedder } = makeWriter('m4b');
+    const chapters = [
+      { title: 'One', startMs: 0, endMs: 1_000 },
+      { title: 'Two', startMs: 1_000, endMs: 2_000 },
+    ];
+
+    const result = await writer.write('/books/audio/Part 1.m4b', {}, { dryRun: false, fieldMask: new Set(), chapters });
+
+    expect(result).toEqual(expect.objectContaining({ status: 'success', fieldsWritten: ['chapters'] }));
+    expect(embedder.embedMetadata).toHaveBeenCalledWith('/books/audio/Part 1.m4b', 'm4b', { coverBytes: null, metadata: [], chapters });
+  });
+
+  it('lists the chapters after the tags written alongside them', async () => {
+    const { writer } = makeWriter('mp3');
+
+    const result = await writer.write(
+      '/books/audio/book.mp3',
+      { title: 'Dune' },
+      { dryRun: false, fieldMask: new Set(['title']), chapters: [{ title: 'One', startMs: 0, endMs: 1_000 }] },
+    );
+
+    expect(result.fieldsWritten).toEqual(['title', 'chapters']);
+  });
+
+  it('reports chapters for a dry run without touching the file', async () => {
+    const { writer, embedder } = makeWriter('m4b');
+
+    const result = await writer.write('/books/audio/book.m4b', {}, { dryRun: true, fieldMask: new Set(), chapters: [] });
+
+    expect(result).toEqual(expect.objectContaining({ status: 'skipped', reason: 'dry-run', fieldsWritten: ['chapters'] }));
+    expect(embedder.embedMetadata).not.toHaveBeenCalled();
+  });
+
+  it('passes no chapters on an ordinary metadata write, so the file keeps its own', async () => {
+    const { writer, embedder } = makeWriter('m4b');
+
+    const result = await writer.write('/books/audio/book.m4b', { title: 'Dune' }, { dryRun: false, fieldMask: new Set(['title']) });
+
+    expect(result.fieldsWritten).toEqual(['title']);
+    expect(embedder.embedMetadata).toHaveBeenCalledWith('/books/audio/book.m4b', 'm4b', expect.objectContaining({ chapters: null }));
+  });
+
+  describe('track argument snapshots', () => {
+    const payload = { title: 'The Book', authors: [{ name: 'An Author', sortName: null }] };
+    const fieldMask = new Set(['title', 'authors'] as const);
+
+    it('writes the album but keeps the file title and track when its track identity is preserved', async () => {
+      const { writer, embedder } = makeWriter('mp3');
+
+      const result = await writer.write('/books/audio/bonus.mp3', payload, {
+        dryRun: false,
+        fieldMask: new Set(fieldMask),
+        preserveTrackIdentity: true,
+      });
+
+      expect(result.fieldsWritten).toEqual(['title', 'authors']);
+      expect(embedder.embedMetadata).toHaveBeenCalledWith(
+        '/books/audio/bonus.mp3',
+        'mp3',
+        expect.objectContaining({
+          metadata: [
+            { key: 'album', value: 'The Book' },
+            { key: 'album_artist', value: 'An Author' },
+            { key: 'albumartist', value: 'An Author' },
+            { key: 'artist', value: 'An Author' },
+          ],
+        }),
+      );
+    });
+
+    it('writes the book title and no track for a single-track audiobook', () => {
+      expect(
+        testing.buildAudioMetadataArgs(
+          payload,
+          { dryRun: false, fieldMask: new Set(fieldMask), isMultiTrackAudio: false, trackNumber: 1, trackTotal: 1, trackTitle: 'the-book' },
+          'm4b',
+        ),
+      ).toEqual([
+        { key: 'album', value: 'The Book' },
+        { key: 'title', value: 'The Book' },
+        { key: 'album_artist', value: 'An Author' },
+        { key: 'albumartist', value: 'An Author' },
+        { key: 'artist', value: 'An Author' },
+      ]);
+    });
+
+    it('swaps in the track title and numbers each track of a three-track audiobook', () => {
+      const argsFor = (trackNumber: number) =>
+        testing.buildAudioMetadataArgs(
+          payload,
+          { dryRun: false, fieldMask: new Set(fieldMask), isMultiTrackAudio: true, trackNumber, trackTotal: 3, trackTitle: `Part ${trackNumber}` },
+          'mp3',
+        );
+
+      expect([1, 2, 3].map(argsFor)).toEqual(
+        [1, 2, 3].map((trackNumber) => [
+          { key: 'album', value: 'The Book' },
+          { key: 'title', value: `Part ${trackNumber}` },
+          { key: 'track', value: `${trackNumber}/3` },
+          { key: 'album_artist', value: 'An Author' },
+          { key: 'albumartist', value: 'An Author' },
+          { key: 'artist', value: 'An Author' },
+        ]),
+      );
+    });
+  });
+
   it('clears nullable fields by writing empty managed tag values', () => {
     const metadata = testing.buildAudioMetadataArgs(
       {

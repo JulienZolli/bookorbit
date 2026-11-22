@@ -2,7 +2,8 @@ import { BadRequestException } from '@nestjs/common';
 import { z } from 'zod';
 
 import {
-  COMMUNITY_RATING_PROVIDER_KEYS,
+  AUTHOR_GENDERS,
+  isMetadataProviderKeySyntax,
   CUSTOM_FIELD_OPERATORS,
   FIELD_OPERATORS,
   RULE_OPERATORS,
@@ -16,10 +17,10 @@ import {
 } from '@bookorbit/types';
 import { isDateKey } from '../../../common/utils/timezone.utils';
 
-const COMMUNITY_RATING_PROVIDER_VALUES = ['any', ...COMMUNITY_RATING_PROVIDER_KEYS] as const;
-
 const DATE_VALUE_FIELDS = new Set<StaticRuleField>(['addedAt', 'startedAt', 'finishedAt', 'publishedDate']);
+const AUTHOR_GENDER_SET = new Set<string>(AUTHOR_GENDERS);
 const DATE_VALUE_OPERATORS = new Set<RuleOperator>(['before', 'after', 'between']);
+const RELATIVE_DATE_OPERATORS = new Set<RuleOperator>(['moreThanAgo']);
 const CUSTOM_NUMERIC_OPERATORS = new Set<RuleOperator>(['gt', 'gte', 'lt', 'lte']);
 const CUSTOM_DATE_OPERATORS = new Set<RuleOperator>(['before', 'after']);
 const ISO_DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -46,6 +47,11 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+function isNonNegativeRelativeDayCount(value: unknown): boolean {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return typeof number === 'number' && Number.isFinite(number) && number >= 0;
+}
+
 type UnvalidatedRule = { field: string; operator: string; value?: unknown; valueTo?: unknown };
 
 /**
@@ -67,6 +73,10 @@ function checkCustomFieldValue(rule: UnvalidatedRule, ctx: z.RefinementCtx): voi
     ctx.addIssue({ code: 'custom', message: `Operator '${operator}' requires a valid date value`, path: ['value'] });
     return;
   }
+  if (RELATIVE_DATE_OPERATORS.has(operator as RuleOperator) && !isNonNegativeRelativeDayCount(value)) {
+    ctx.addIssue({ code: 'custom', message: `Operator '${operator}' requires a non-negative day count`, path: ['value'] });
+    return;
+  }
   if (operator === 'between') {
     // `value` picks the column the query builder reads, so `valueTo` has to suit that same column.
     const rangeIsValid = isFiniteNumber(value) ? isFiniteNumber(valueTo) : isValidRuleDateValue(value) && isValidRuleDateValue(valueTo);
@@ -83,7 +93,14 @@ const ruleSchema: z.ZodType<Rule> = z
     operator: z.enum(RULE_OPERATORS as unknown as [string, ...string[]]),
     value: z.union([z.string(), z.number(), z.array(z.string().min(1)).min(1).max(20), z.array(z.number()).min(1).max(20)]).optional(),
     valueTo: z.union([z.string(), z.number()]).optional(),
-    provider: z.enum(COMMUNITY_RATING_PROVIDER_VALUES as unknown as [CommunityRatingProvider, ...CommunityRatingProvider[]]).optional(),
+    // Any provider's ratings can be filtered on, including an external provider's; the built-in list
+    // only seeds the picker.
+    provider: z
+      .string()
+      .refine((value): value is CommunityRatingProvider => value === 'any' || isMetadataProviderKeySyntax(value), {
+        message: 'Unknown rating provider',
+      })
+      .optional(),
   })
   .superRefine((rule, ctx) => {
     const custom = isCustomRuleField(rule.field);
@@ -104,12 +121,22 @@ const ruleSchema: z.ZodType<Rule> = z
       checkCustomFieldValue(rule, ctx);
       return;
     }
+    if (rule.field === 'authorGender' && (rule.operator === 'includesAny' || rule.operator === 'excludesAll')) {
+      if (!Array.isArray(rule.value) || rule.value.some((value) => typeof value !== 'string' || !AUTHOR_GENDER_SET.has(value))) {
+        ctx.addIssue({ code: 'custom', message: 'Unknown author gender', path: ['value'] });
+      }
+    }
     if (DATE_VALUE_FIELDS.has(rule.field as StaticRuleField) && DATE_VALUE_OPERATORS.has(rule.operator as RuleOperator)) {
       if (!isValidRuleDateValue(rule.value)) {
         ctx.addIssue({ code: 'custom', message: `Operator '${rule.operator}' requires a valid date value`, path: ['value'] });
       }
       if (rule.operator === 'between' && !isValidRuleDateValue(rule.valueTo)) {
         ctx.addIssue({ code: 'custom', message: `Operator '${rule.operator}' requires a valid date valueTo`, path: ['valueTo'] });
+      }
+    }
+    if (DATE_VALUE_FIELDS.has(rule.field as StaticRuleField) && RELATIVE_DATE_OPERATORS.has(rule.operator as RuleOperator)) {
+      if (!isNonNegativeRelativeDayCount(rule.value)) {
+        ctx.addIssue({ code: 'custom', message: `Operator '${rule.operator}' requires a non-negative day count`, path: ['value'] });
       }
     }
   }) as z.ZodType<Rule>;

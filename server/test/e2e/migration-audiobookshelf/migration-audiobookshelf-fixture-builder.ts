@@ -20,6 +20,7 @@ import {
 const execFile = promisify(execFileCallback);
 const requireInstaller = createRequire(__filename);
 const MAYA_CFI = 'epubcfi(/6/2[chapter]!/4/2/2:5)';
+const THEO_MAP_STARTED_AT = '2025-01-10T12:30:00.000Z';
 const THEO_MAP_FINISHED_AT = '2025-01-15T12:30:00.000Z';
 const THEO_BRASS_FINISHED_AT = '2025-02-20T08:45:00.000Z';
 
@@ -54,6 +55,7 @@ export interface AudiobookshelfMigrationScenario {
   targetBooks: Record<'glass' | 'map' | 'brass' | 'northbound', SeededTargetBook>;
   expected: {
     mayaCfi: string;
+    theoMapStartedAt: string;
     theoMapFinishedAt: string;
     theoBrassFinishedAt: string;
   };
@@ -134,6 +136,12 @@ export async function seedAudiobookshelfMigrationScenario(ctx: MigrationAudioboo
       publishedYear: '2022',
       series: [{ name: 'Harbor Cycle', sequence: '1' }],
     }),
+    // Hand-edited chapters, as an Audiobookshelf user curates them in its chapter editor.
+    setItemChapters(ctx.audiobookshelf, sourceItems.glass.id, [
+      { start: 0, end: 12.5, title: 'Prologue: The Breakwater' },
+      { start: 12.5, end: 60, title: 'Chapter 1: Low Tide' },
+      { start: 60, end: 150, title: 'Chapter 2: Open Water' },
+    ]),
     setItemMetadata(ctx.audiobookshelf, sourceItems.map.id, {
       title: 'A Map of Quiet Stars',
       authors: [{ name: 'Imani Reed' }],
@@ -195,7 +203,7 @@ export async function seedAudiobookshelfMigrationScenario(ctx: MigrationAudioboo
       ebookProgress: 1,
       isFinished: true,
       finishedAt: THEO_MAP_FINISHED_AT,
-      createdAt: '2025-01-10T12:30:00.000Z',
+      createdAt: THEO_MAP_STARTED_AT,
     }),
     setProgress(ctx.audiobookshelf, theo.token, sourceItems.brass.id, {
       duration: 30,
@@ -203,7 +211,9 @@ export async function seedAudiobookshelfMigrationScenario(ctx: MigrationAudioboo
       progress: 1,
       isFinished: true,
       finishedAt: THEO_BRASS_FINISHED_AT,
-      createdAt: '2025-02-10T08:45:00.000Z',
+      // ABS reports a progress row's creation time as its start, while clients set the finish
+      // date freely, so a backfilled finish lands before the start (issue 1678).
+      createdAt: '2025-03-05T08:45:00.000Z',
     }),
     setProgress(ctx.audiobookshelf, lina.token, sourceItems.glass.id, {
       duration: 150,
@@ -239,7 +249,12 @@ export async function seedAudiobookshelfMigrationScenario(ctx: MigrationAudioboo
     sourceItems,
     targetUsers,
     targetBooks,
-    expected: { mayaCfi: MAYA_CFI, theoMapFinishedAt: THEO_MAP_FINISHED_AT, theoBrassFinishedAt: THEO_BRASS_FINISHED_AT },
+    expected: {
+      mayaCfi: MAYA_CFI,
+      theoMapStartedAt: THEO_MAP_STARTED_AT,
+      theoMapFinishedAt: THEO_MAP_FINISHED_AT,
+      theoBrassFinishedAt: THEO_BRASS_FINISHED_AT,
+    },
   };
 }
 
@@ -395,6 +410,19 @@ function findItem(items: AudiobookshelfItem[], folderName: string): Audiobookshe
 
 async function setItemMetadata(service: AudiobookshelfService, itemId: string, metadata: Record<string, unknown>): Promise<void> {
   await absJson(service, { method: 'PATCH', path: `/api/items/${itemId}/media`, token: service.rootToken, payload: { metadata } });
+}
+
+async function setItemChapters(
+  service: AudiobookshelfService,
+  itemId: string,
+  chapters: Array<{ start: number; end: number; title: string }>,
+): Promise<void> {
+  await absJson(service, {
+    method: 'POST',
+    path: `/api/items/${itemId}/chapters`,
+    token: service.rootToken,
+    payload: { chapters: chapters.map((chapter, id) => ({ id, ...chapter })) },
+  });
 }
 
 async function createAbsUser(

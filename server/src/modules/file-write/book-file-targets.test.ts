@@ -1,5 +1,6 @@
 import {
   findSiblingOccupiedTarget,
+  isSameWork,
   resolveBookFileTargets,
   resolvePrimaryFileTarget,
   type BookFileTargetsInput,
@@ -60,6 +61,66 @@ describe('resolveBookFileTargets', () => {
     it('leaves a book that already sits at its target where it is', () => {
       const files: TargetBookFile[] = [{ id: 1, absolutePath: '/library/Author/Book.epub', format: 'epub', role: 'content', sortOrder: null }];
       expect(resolvePrimaryFileTarget(input({ files, bookFolderPath: '/library/Author/Book.epub' }))).toBe('/library/Author/Book.epub');
+    });
+  });
+
+  describe('read-aloud EPUBs', () => {
+    it('separates a plain EPUB, read-aloud EPUB, and audiobook using the file-specific token', () => {
+      const files: TargetBookFile[] = [
+        {
+          id: 1,
+          absolutePath: '/library/old/plain.epub',
+          format: 'epub',
+          role: 'content',
+          sortOrder: null,
+          mediaOverlayAvailable: false,
+        },
+        {
+          id: 2,
+          absolutePath: '/library/old/read-aloud.epub',
+          format: 'epub',
+          role: 'content',
+          sortOrder: null,
+          mediaOverlayAvailable: true,
+        },
+        {
+          id: 3,
+          absolutePath: '/library/old/audio.m4b',
+          format: 'm4b',
+          role: 'content',
+          sortOrder: null,
+          mediaOverlayAvailable: false,
+        },
+      ];
+
+      const targets = resolveBookFileTargets(
+        input({
+          files,
+          bookFolderPath: '/library/old',
+          organizationMode: 'book_per_folder',
+          pattern: '{title}/{title}< ({readaloud})>',
+        }),
+      );
+
+      expect(targets.get(1)).toBe('/library/Book/Book.epub');
+      expect(targets.get(2)).toBe('/library/Book/Book (readaloud).epub');
+      expect(targets.get(3)).toBe('/library/Book/Book.m4b');
+      expect(new Set(targets.values()).size).toBe(3);
+    });
+
+    it('does not trust the overlay flag on a non-EPUB file', () => {
+      const files: TargetBookFile[] = [
+        {
+          id: 1,
+          absolutePath: '/library/old/book.m4b',
+          format: 'm4b',
+          role: 'content',
+          sortOrder: null,
+          mediaOverlayAvailable: true,
+        },
+      ];
+
+      expect(resolvePrimaryFileTarget(input({ files, pattern: '{title}< ({readaloud})>' }))).toBe('/library/Book.m4b');
     });
   });
 
@@ -403,6 +464,27 @@ describe('resolveBookFileTargets', () => {
       ]);
 
       expect(findSiblingOccupiedTarget(files, targets)).toBe(`${folder}/book-part02.mp3`);
+    });
+  });
+
+  describe('isSameWork', () => {
+    it('matches the same title and primary author regardless of case, spacing, and Unicode form', () => {
+      expect(isSameWork({ title: 'Dune', primaryAuthor: 'Frank Herbert' }, { title: '  dune ', primaryAuthor: 'FRANK  HERBERT' })).toBe(true);
+      expect(isSameWork({ title: 'Caf\u00e9', primaryAuthor: null }, { title: 'Cafe\u0301', primaryAuthor: null })).toBe(true);
+    });
+
+    it('tells apart different volumes of one series', () => {
+      expect(isSameWork({ title: 'Dune Messiah', primaryAuthor: 'Frank Herbert' }, { title: 'Dune', primaryAuthor: 'Frank Herbert' })).toBe(false);
+    });
+
+    it('tells apart one title by two authors', () => {
+      expect(isSameWork({ title: 'Dune', primaryAuthor: 'Frank Herbert' }, { title: 'Dune', primaryAuthor: 'Brian Herbert' })).toBe(false);
+      expect(isSameWork({ title: 'Dune', primaryAuthor: 'Frank Herbert' }, { title: 'Dune', primaryAuthor: null })).toBe(false);
+    });
+
+    it('never treats untitled books as the same work', () => {
+      expect(isSameWork({ title: null, primaryAuthor: 'Frank Herbert' }, { title: null, primaryAuthor: 'Frank Herbert' })).toBe(false);
+      expect(isSameWork({ title: ' ', primaryAuthor: null }, { title: ' ', primaryAuthor: null })).toBe(false);
     });
   });
 });

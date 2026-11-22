@@ -1,37 +1,19 @@
+import { retainFinishedReads } from '../../db/reading-attempt-retention';
+import { deleteLibraryFoldersWithHashInvalidation } from '../../db/book-file-hash-history';
+import { writeKoboTombstones } from '../../db/kobo-entitlement-tombstones';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, getTableColumns, gt, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, gt, inArray, isNotNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { APP_FEATURES, type AccessLevel, type ContentFilterRules, type LibraryStats } from '@bookorbit/types';
+import { type AccessLevel, type ContentFilterRules, type LibraryStats } from '@bookorbit/types';
 
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { DB } from '../../db';
 import { MIN_VALID_FILE_TIME_MS } from '../../common/utils/file-time.utils';
 import * as schema from '../../db/schema';
-import {
-  bookFiles,
-  books,
-  libraries,
-  libraryFolders,
-  podcastEpisodeMedia,
-  podcastEpisodes,
-  podcastJobs,
-  podcastLibrarySettings,
-  podcasts,
-} from '../../db/schema';
+import { bookFiles, books, libraries, libraryFolders } from '../../db/schema';
 import { LIBRARY_BOOK_STATUS_PRESENT } from './library.constants';
 
 type Db = NodePgDatabase<typeof schema>;
-
-const visibleLibraryCondition = APP_FEATURES.podcasts ? undefined : eq(libraries.type, 'books');
-
-/**
- * Podcast libraries hold shows rather than books, so the row count that fills their badge comes from
- * a different table. The subquery only runs for podcast libraries, and it excludes archived shows so
- * the count matches the show list the library view opens on.
- */
-const podcastShowCount = sql<number | null>`case when ${libraries.type} = 'podcasts' then (
-  select count(*)::int from ${podcasts} where ${podcasts.libraryId} = ${libraries.id} and ${podcasts.archivedAt} is null
-) end`;
 
 @Injectable()
 export class LibraryRepository {
@@ -43,11 +25,9 @@ export class LibraryRepository {
         ...getTableColumns(libraries),
         accessLevel: sql<AccessLevel | null>`null`,
         bookCount: sql<number>`count(${books.id})::int`,
-        podcastCount: podcastShowCount,
       })
       .from(libraries)
       .leftJoin(books, and(eq(books.libraryId, libraries.id), eq(books.status, LIBRARY_BOOK_STATUS_PRESENT)))
-      .where(visibleLibraryCondition)
       .groupBy(libraries.id)
       .orderBy(libraries.displayOrder, libraries.name);
   }
@@ -59,29 +39,26 @@ export class LibraryRepository {
     return this.db
       .select({
         id: libraries.id,
-        type: libraries.type,
         accessLevel: schema.userLibraryAccess.accessLevel,
         name: libraries.name,
         icon: libraries.icon,
         displayOrder: libraries.displayOrder,
         coverAspectRatio: libraries.coverAspectRatio,
+        watch: libraries.watch,
+        autoScanCronExpression: libraries.autoScanCronExpression,
+        organizationMode: libraries.organizationMode,
         scanMode: libraries.scanMode,
+        fileWriteEnabled: libraries.fileWriteEnabled,
         fileRenameEnabled: libraries.fileRenameEnabled,
         createdAt: libraries.createdAt,
         updatedAt: libraries.updatedAt,
         bookCount: sql<number>`count(${books.id})::int`,
-        podcastCount: podcastShowCount,
       })
       .from(libraries)
       .innerJoin(schema.userLibraryAccess, and(eq(schema.userLibraryAccess.libraryId, libraries.id), eq(schema.userLibraryAccess.userId, userId)))
       .leftJoin(books, bookJoinOn)
-      .where(visibleLibraryCondition)
       .groupBy(libraries.id, schema.userLibraryAccess.accessLevel)
       .orderBy(libraries.displayOrder, libraries.name);
-  }
-
-  findAllIds() {
-    return this.db.select({ id: libraries.id }).from(libraries).where(visibleLibraryCondition).orderBy(libraries.displayOrder, libraries.name);
   }
 
   findAutoScanSchedules() {
@@ -92,29 +69,13 @@ export class LibraryRepository {
       .orderBy(libraries.id);
   }
 
-  findAccessibleIdsForUser(userId: number) {
-    return this.db
-      .select({ id: libraries.id })
-      .from(libraries)
-      .innerJoin(schema.userLibraryAccess, and(eq(schema.userLibraryAccess.libraryId, libraries.id), eq(schema.userLibraryAccess.userId, userId)))
-      .where(visibleLibraryCondition)
-      .orderBy(libraries.displayOrder, libraries.name);
-  }
-
   findById(id: number) {
-    return this.db
-      .select()
-      .from(libraries)
-      .where(and(eq(libraries.id, id), visibleLibraryCondition))
-      .limit(1);
+    return this.db.select().from(libraries).where(eq(libraries.id, id)).limit(1);
   }
 
   findByIds(ids: number[]) {
     if (ids.length === 0) return Promise.resolve([]);
-    return this.db
-      .select({ id: libraries.id })
-      .from(libraries)
-      .where(and(inArray(libraries.id, ids), visibleLibraryCondition));
+    return this.db.select({ id: libraries.id }).from(libraries).where(inArray(libraries.id, ids));
   }
 
   findByName(name: string, excludeId?: number) {
@@ -170,120 +131,42 @@ export class LibraryRepository {
     return this.db.insert(libraryFolders).values(data).returning();
   }
 
-  insertPodcastSettings(libraryId: number) {
-    return this.db.insert(podcastLibrarySettings).values({ libraryId }).onConflictDoNothing();
-  }
-
-  /**
-   * Files BookOrbit downloaded and may therefore delete. Local-origin media is excluded: those rows
-   * point at files the user brought, which BookOrbit adopted where they lay and never owns.
-   */
-  findPodcastMediaFiles(libraryId: number, afterEpisodeId: number, limit: number) {
-    return this.db
-      .select({ episodeId: podcastEpisodes.id, localPath: podcastEpisodeMedia.localPath })
-      .from(podcastEpisodeMedia)
-      .innerJoin(podcastEpisodes, eq(podcastEpisodes.id, podcastEpisodeMedia.episodeId))
-      .innerJoin(podcasts, eq(podcasts.id, podcastEpisodes.podcastId))
-      .where(
-        and(
-          eq(podcasts.libraryId, libraryId),
-          eq(podcastEpisodes.origin, 'feed'),
-          gt(podcastEpisodes.id, afterEpisodeId),
-          isNotNull(podcastEpisodeMedia.localPath),
-        ),
-      )
-      .orderBy(asc(podcastEpisodes.id))
-      .limit(limit);
-  }
-
-  findPodcastIds(libraryId: number, afterPodcastId: number, limit: number) {
-    return this.db
-      .select({ id: podcasts.id })
-      .from(podcasts)
-      .where(and(eq(podcasts.libraryId, libraryId), gt(podcasts.id, afterPodcastId)))
-      .orderBy(asc(podcasts.id))
-      .limit(limit);
-  }
-
-  findPodcastCleanupJobs(libraryId: number, afterJobId: number, limit: number) {
-    return this.db
-      .select({ id: podcastJobs.id, payload: podcastJobs.payload })
-      .from(podcastJobs)
-      .where(
-        and(
-          eq(podcastJobs.libraryId, libraryId),
-          eq(podcastJobs.type, 'file_cleanup'),
-          gt(podcastJobs.id, afterJobId),
-          sql`${podcastJobs.status} in ('queued', 'failed', 'cancelled')`,
-        ),
-      )
-      .orderBy(asc(podcastJobs.id))
-      .limit(limit);
-  }
-
-  /** Whether anything lives in the downloads root, which is what makes repointing it unsafe. */
-  async hasPodcastMediaFiles(libraryId: number): Promise<boolean> {
-    const [row] = await this.db
-      .select({ episodeId: podcastEpisodes.id })
-      .from(podcastEpisodeMedia)
-      .innerJoin(podcastEpisodes, eq(podcastEpisodes.id, podcastEpisodeMedia.episodeId))
-      .innerJoin(podcasts, eq(podcasts.id, podcastEpisodes.podcastId))
-      .where(and(eq(podcasts.libraryId, libraryId), eq(podcastEpisodes.origin, 'feed'), isNotNull(podcastEpisodeMedia.localPath)))
-      .limit(1);
-    return row !== undefined;
-  }
-
-  async hasBlockingPodcastStorageJobs(libraryId: number): Promise<boolean> {
-    const [row] = await this.db
-      .select({ id: podcastJobs.id })
-      .from(podcastJobs)
-      .where(
-        and(
-          eq(podcastJobs.libraryId, libraryId),
-          inArray(podcastJobs.type, ['download', 'retention', 'purge', 'merge', 'file_cleanup']),
-          sql`(${podcastJobs.status} = 'processing' or (${podcastJobs.type} = 'file_cleanup' and ${podcastJobs.status} in ('queued', 'failed', 'cancelled')))`,
-        ),
-      )
-      .limit(1);
-    return row !== undefined;
-  }
-
-  async cancelPodcastJobs(libraryId: number): Promise<number> {
-    const rows = await this.db
-      .update(podcastJobs)
-      .set({
-        cancelRequested: true,
-        status: sql`case when ${podcastJobs.status} = 'queued' then 'cancelled' else ${podcastJobs.status} end`,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(podcastJobs.libraryId, libraryId), sql`${podcastJobs.status} in ('queued', 'processing')`))
-      .returning({ status: podcastJobs.status, type: podcastJobs.type, episodeId: podcastJobs.episodeId });
-    const cancelledEpisodeIds = rows.flatMap((row) =>
-      row.status === 'cancelled' && row.type === 'download' && row.episodeId !== null ? [row.episodeId] : [],
-    );
-    if (cancelledEpisodeIds.length > 0) {
-      await this.db
-        .update(podcastEpisodeMedia)
-        .set({ status: 'remote', lastError: null, updatedAt: new Date() })
-        .where(and(inArray(podcastEpisodeMedia.episodeId, cancelledEpisodeIds), eq(podcastEpisodeMedia.status, 'queued')));
-    }
-    return rows.filter((row) => row.status === 'processing').length;
-  }
-
   findBookIdsByLibrary(libraryId: number) {
     return this.db.select({ id: books.id }).from(books).where(eq(books.libraryId, libraryId));
   }
 
+  /**
+   * The library's books go with it by cascade; their finished reads stay in each reader's history.
+   * A link group left with fewer than two members means "not linked", so it goes too, as it does
+   * when books or folders are deleted.
+   */
   delete(id: number) {
-    return this.db.delete(libraries).where(eq(libraries.id, id));
+    return this.db.transaction(async (tx) => {
+      await retainFinishedReads(tx, eq(books.libraryId, id));
+      await writeKoboTombstones(tx, eq(books.libraryId, id));
+      await tx.execute(sql`
+        delete from ${schema.bookLinkGroups} g
+        where g.id in (
+            select l.group_id from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where b.library_id = ${id}
+          )
+          and (
+            select count(*) from ${schema.bookLinks} l
+            join ${books} b on b.id = l.book_id
+            where l.group_id = g.id and b.library_id <> ${id}
+          ) < 2
+      `);
+      await tx.delete(libraries).where(eq(libraries.id, id));
+    });
   }
 
   deleteFolder(id: number) {
-    return this.db.delete(libraryFolders).where(eq(libraryFolders.id, id));
+    return deleteLibraryFoldersWithHashInvalidation(this.db, eq(libraryFolders.id, id));
   }
 
   deleteFoldersByLibrary(libraryId: number) {
-    return this.db.delete(libraryFolders).where(eq(libraryFolders.libraryId, libraryId));
+    return deleteLibraryFoldersWithHashInvalidation(this.db, eq(libraryFolders.libraryId, libraryId));
   }
 
   async updateDisplayOrders(order: { id: number; displayOrder: number }[]) {
@@ -458,21 +341,6 @@ export class LibraryRepository {
       .where(and(eq(books.libraryId, libraryId), sql`${books.id} = dates.id`, sql`${books.addedAt} = dates.previous_added_at`))
       .returning({ id: books.id });
     return result.map(({ id }) => id);
-  }
-
-  async hasUserAccess(userId: number, libraryId: number): Promise<boolean> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row !== undefined;
-  }
-
-  async findUserAccessLevel(userId: number, libraryId: number): Promise<AccessLevel | null> {
-    const row = await this.db.query.userLibraryAccess.findFirst({
-      columns: { accessLevel: true },
-      where: and(eq(schema.userLibraryAccess.userId, userId), eq(schema.userLibraryAccess.libraryId, libraryId)),
-    });
-    return row?.accessLevel ?? null;
   }
 
   getAccess(libraryId: number) {

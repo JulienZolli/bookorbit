@@ -42,6 +42,7 @@ CatalogUtil.SORTS = {
 CatalogUtil.SORT_LABELS = {
     title = _("Title"),
     author = _("Author"),
+    published = _("Publication date"),
     recently_added = _("Recently added"),
     recently_updated = _("Recently updated"),
     recently_read = _("Recently read"),
@@ -51,6 +52,7 @@ CatalogUtil.SORT_LABELS = {
 CatalogUtil.NATURAL_ORDER = {
     title = "asc",
     author = "asc",
+    published = "asc",
     series = "asc",
     recently_added = "desc",
     recently_updated = "desc",
@@ -60,6 +62,7 @@ CatalogUtil.NATURAL_ORDER = {
 CatalogUtil.SORT_KIND = {
     title = "alpha",
     author = "alpha",
+    published = "time",
     series = "alpha",
     recently_added = "time",
     recently_updated = "time",
@@ -352,6 +355,8 @@ function CatalogUtil.cleanDescriptionText(text)
     text = text:gsub("<%s*[Bb][Rr]%s*/?%s*>", "\n")
     text = text:gsub("<%s*/%s*[Pp]%s*>", "\n\n")
     text = text:gsub("<%s*[Pp][^>]*>", "")
+    text = text:gsub("<%s*/%s*[Hh][1-6]%s*>", "\n\n")
+    text = text:gsub("<%s*[Hh][1-6][^>]*>", "\n\n")
     text = text:gsub("<%s*/%s*[Dd][Ii][Vv]%s*>", "\n\n")
     text = text:gsub("<%s*[Dd][Ii][Vv][^>]*>", "")
     text = text:gsub("<%s*/%s*[Ll][Ii]%s*>", "\n")
@@ -388,9 +393,17 @@ end
 
 function CatalogUtil.transferErrorText(err)
     if err == "unsafe_destination" then
-        return _("The download destination is outside the selected folder.")
+        return _("The download destination is outside the selected folder or contains a symbolic link.")
     elseif err == "temp_dir_failed" then
         return _("Could not create a temporary download folder in the selected folder.")
+    elseif err == "hash_mismatch" then
+        return _("The downloaded file failed its integrity check. Retry the download. The previous file was kept.")
+    elseif err == "size_mismatch" then
+        return _("The download was incomplete. Retry the download. The previous file was kept.")
+    elseif err == "response_too_large" then
+        return _("The download exceeded its expected size. The previous file was kept.")
+    elseif err == "publish_failed" then
+        return _("Could not save the download. Check free space and folder permissions. The previous file was kept.")
     end
     return nil
 end

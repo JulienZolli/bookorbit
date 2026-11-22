@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, HttpException, Injectable, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, Injectable, Logger, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Interval } from '@nestjs/schedule';
 import { Permission, UploadErrorCode, UPLOAD_SUPPORTED_FORMATS } from '@bookorbit/types';
@@ -15,6 +15,7 @@ import { Inject } from '@nestjs/common';
 import type { UploadSessionRow } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
 import { storageConfig } from '../../config/config';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import {
   HARD_MAX_UPLOAD_BYTES,
   UPLOAD_CHUNK_SIZE_BYTES,
@@ -24,16 +25,21 @@ import {
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { LibraryService } from '../library/library.service';
 import { BookDockIngestService } from '../book-dock/book-dock-ingest.service';
+import { LibraryDockService } from '../book-dock/library-dock.service';
 import type { CreateUploadSessionDto } from './dto/create-upload-session.dto';
 import { UploadProcessorService } from './upload-processor.service';
 import { UploadService } from './upload.service';
 import { UploadSessionRepository } from './upload-session.repository';
 import { UploadStorageService } from './upload-storage.service';
-import { UploadValidatorService } from './upload-validator.service';
+import { CONTENT_SIGNATURE_BYTES, UploadValidatorService } from './upload-validator.service';
 import { uploadError } from './upload-errors';
+
+const IMPORT_FAILED_MESSAGE = 'The file could not be added';
+const CHUNK_IDLE_TIMEOUT_MS = 120_000;
 
 @Injectable()
 export class UploadSessionService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(UploadSessionService.name);
   private readonly stagingDirectory: string;
   private readonly locks = new Map<string, Promise<void>>();
 
@@ -91,10 +97,14 @@ export class UploadSessionService implements OnApplicationBootstrap {
 
   async create(dto: CreateUploadSessionDto, user: RequestUser): Promise<UploadSessionResponse> {
     const existing = await this.repo.findByIdempotencyKey(user.id, dto.idempotencyKey);
-    if (existing) {
+    if (existing && isResumable(existing)) {
       this.assertIdempotentMatch(existing, dto);
       return this.toResponse(existing);
     }
+    // A key belongs to one live upload, not to every attempt made under it. Clients that keep their
+    // key across a retry were handed the failed, cancelled or expired session back, which can never
+    // receive or complete, and the unique index refused them a new one.
+    if (existing) await this.repo.releaseIdempotencyKey(existing.id);
 
     const maxMb = await this.appSettings.getMaxUploadSizeMb();
     const maxBytes = Math.min(HARD_MAX_UPLOAD_BYTES, maxMb * 1_024 * 1_024);
@@ -114,7 +124,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
         userId: user.id,
         idempotencyKey: dto.idempotencyKey,
         targetKind: target.kind,
-        targetLibraryId: target.kind === 'library' ? target.libraryId : null,
+        targetLibraryId: targetLibraryId(target),
         targetFolderId: target.kind === 'library' ? (target.folderId ?? null) : null,
         targetBookId: target.kind === 'existing_book' ? target.bookId : null,
         filename,
@@ -143,29 +153,29 @@ export class UploadSessionService implements OnApplicationBootstrap {
     chunkStream: NodeJS.ReadableStream,
     user: RequestUser,
   ): Promise<UploadSessionResponse> {
-    return this.withLock(id, async () => {
-      let row = await this.owned(id, user);
-      row = await this.reconcileSize(row);
-      this.assertReceiving(row);
-      if (offset !== row.receivedBytes) {
-        throw new ConflictException({
-          errorCode: UploadErrorCode.OffsetMismatch,
-          message: `Expected upload offset ${row.receivedBytes}, received ${offset}`,
-          expectedOffset: row.receivedBytes,
-        });
+    // The body is read before the session's lock is taken. Read under the lock, a chunk whose
+    // connection went half-open held it for as long as the connection lasted, and every later
+    // chunk, complete and cancel for the session queued behind it.
+    const before = await this.owned(id, user);
+    this.assertReceiving(before);
+    if (offset !== before.receivedBytes) throw offsetMismatch(before.receivedBytes, offset);
+    const allowedChunk = Math.min(UPLOAD_CHUNK_SIZE_BYTES, before.sizeBytes - offset);
+    const stagedChunk = await this.storageService.streamToTemp(chunkStream as Readable, allowedChunk, { idleTimeoutMs: CHUNK_IDLE_TIMEOUT_MS });
+    try {
+      if (stagedChunk.sizeBytes === 0) throw uploadError.empty();
+      if (checksum) {
+        const normalized = normalizeChecksum(checksum);
+        const actual = await sha256File(stagedChunk.tempPath);
+        if (normalized !== actual) throw uploadError.checksumMismatch('Chunk checksum does not match');
       }
 
-      const remaining = row.sizeBytes - row.receivedBytes;
-      const allowedChunk = Math.min(UPLOAD_CHUNK_SIZE_BYTES, remaining);
-      const stagedChunk = await this.storageService.streamToTemp(chunkStream as Readable, allowedChunk);
-      try {
-        if (stagedChunk.sizeBytes === 0) throw uploadError.empty();
-        if (stagedChunk.sizeBytes > remaining) throw uploadError.tooLarge('Chunk exceeds the remaining upload size');
-        if (checksum) {
-          const normalized = normalizeChecksum(checksum);
-          const actual = await sha256File(stagedChunk.tempPath);
-          if (normalized !== actual) throw uploadError.checksumMismatch('Chunk checksum does not match');
-        }
+      return await this.withLock(id, async () => {
+        let row = await this.owned(id, user);
+        row = await this.reconcileSize(row);
+        this.assertReceiving(row);
+        if (offset !== row.receivedBytes) throw offsetMismatch(row.receivedBytes, offset);
+        if (stagedChunk.sizeBytes > row.sizeBytes - row.receivedBytes) throw uploadError.tooLarge('Chunk exceeds the remaining upload size');
+        if (row.receivedBytes === 0) await this.refuseUnreadableStart(row, stagedChunk);
 
         try {
           await pipeline(createReadStream(stagedChunk.tempPath), createWriteStream(row.stagingPath, { flags: 'a' }));
@@ -180,10 +190,10 @@ export class UploadSessionService implements OnApplicationBootstrap {
         const receivedBytes = row.receivedBytes + stagedChunk.sizeBytes;
         row = (await this.repo.update(row.id, { receivedBytes, expiresAt: new Date(Date.now() + UPLOAD_SESSION_TTL_MS) }))!;
         return this.toResponse(row);
-      } finally {
-        await this.storageService.cleanup(stagedChunk.tempPath);
-      }
-    });
+      });
+    } finally {
+      await this.storageService.cleanup(stagedChunk.tempPath);
+    }
   }
 
   async complete(id: string, user: RequestUser): Promise<UploadSessionResponse> {
@@ -199,7 +209,8 @@ export class UploadSessionService implements OnApplicationBootstrap {
         if (actual !== row.expectedSha256) throw uploadError.checksumMismatch('File checksum does not match');
       }
 
-      await this.validator.validateContent(row.stagingPath, this.validator.validateFormat(row.filename, await this.allowedFormats(row)));
+      const format = this.validator.validateFormat(row.filename, await this.allowedFormats(row));
+      await this.refuseUnreadable(row, () => this.validator.validateContent(row.stagingPath, format));
       row = (await this.repo.update(row.id, { status: 'processing', errorCode: null, errorMessage: null }))!;
 
       try {
@@ -227,7 +238,9 @@ export class UploadSessionService implements OnApplicationBootstrap {
           void result;
         } else {
           const ingest = this.moduleRef.get(BookDockIngestService, { strict: false });
-          const fileId = await ingest.ingestUpload(row.filename, createReadStream(row.stagingPath), user.id);
+          // Checked again: the dock may have been turned off while the bytes were arriving.
+          const dock = row.targetLibraryId ? await this.libraryDocks().resolveUploadDock(user, row.targetLibraryId, row.filename) : undefined;
+          const fileId = await ingest.ingestUpload(row.filename, createReadStream(row.stagingPath), user.id, dock);
           row = (await this.repo.update(row.id, {
             status: 'completed',
             resultBookDockFileId: fileId,
@@ -237,8 +250,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
         }
         return this.toResponse(row);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await this.fail(row.id, UploadErrorCode.ImportFailed, message);
+        await this.failImport(row.id, error);
         throw error;
       }
     });
@@ -271,7 +283,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
       await this.repo.update(row.id, { status: 'completed', completedAt: new Date() });
       await this.storageService.cleanup(row.stagingPath);
     } catch (error) {
-      await this.fail(row.id, UploadErrorCode.ImportFailed, error instanceof Error ? error.message : String(error));
+      await this.failImport(row.id, error);
     }
   }
 
@@ -286,21 +298,22 @@ export class UploadSessionService implements OnApplicationBootstrap {
       await this.repo.update(row.id, { status: 'completed', completedAt: new Date() });
       await this.storageService.cleanup(row.stagingPath);
     } catch (error) {
-      await this.fail(row.id, UploadErrorCode.ImportFailed, error instanceof Error ? error.message : String(error));
+      await this.failImport(row.id, error);
     }
   }
 
   private async validateTarget(target: UploadTarget, filename: string, user: RequestUser): Promise<void> {
     if (target.kind === 'book_dock') {
-      if (!this.hasPermission(user, Permission.BookDockAccess)) throw new ForbiddenException('Book Dock access is required');
-      this.validator.validateFormat(filename, []);
+      if (!this.hasPermission(user, Permission.BookDockAccess)) throw new ForbiddenException('Library Dock access is required');
+      if (target.libraryId) await this.libraryDocks().resolveUploadDock(user, target.libraryId, filename);
+      else this.validator.validateFormat(filename, []);
       return;
     }
     if (!this.hasPermission(user, Permission.LibraryUpload)) throw new ForbiddenException('Library upload permission is required');
     if (target.kind === 'library') {
       const library = await this.repo.findLibrary(target.libraryId);
       if (!library) throw uploadError.invalidTarget('Library not found');
-      await this.libraryService.verifyUserAccess(user.id, library.id, user.isSuperuser);
+      await this.libraryService.verifyAccess(user, library.id);
       if (target.folderId) {
         if (!(await this.repo.folderBelongsToLibrary(target.folderId, target.libraryId))) {
           throw uploadError.invalidTarget('Folder does not belong to this library');
@@ -311,7 +324,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
     }
     const book = await this.repo.findBookTarget(target.bookId);
     if (!book) throw uploadError.invalidTarget('Book not found');
-    await this.libraryService.verifyUserAccess(user.id, book.libraryId, user.isSuperuser);
+    await this.libraryService.verifyAccess(user, book.libraryId);
     if (book.organizationMode === 'book_per_file') throw uploadError.invalidTarget('This library does not allow multiple files per book');
     await this.assertBookFolderIsADirectory(book.folderPath);
     this.validator.validateFormat(filename, book.allowedFormats);
@@ -348,12 +361,12 @@ export class UploadSessionService implements OnApplicationBootstrap {
       return { kind: 'library', libraryId: dto.target.libraryId, folderId: dto.target.folderId };
     }
     if (dto.target.kind === 'existing_book' && dto.target.bookId) return { kind: 'existing_book', bookId: dto.target.bookId };
-    if (dto.target.kind === 'book_dock') return { kind: 'book_dock' };
+    if (dto.target.kind === 'book_dock') return dto.target.libraryId ? { kind: 'book_dock', libraryId: dto.target.libraryId } : { kind: 'book_dock' };
     throw uploadError.invalidTarget('Upload target fields are invalid');
   }
 
   private async allowedFormats(row: UploadSessionRow): Promise<string[]> {
-    if (row.targetKind === 'book_dock') return [];
+    if (row.targetKind === 'book_dock' && !row.targetLibraryId) return [];
     const libraryId = row.targetLibraryId ?? (await this.repo.findBookLibraryId(row.targetBookId!));
     if (!libraryId) throw uploadError.invalidTarget('Target library no longer exists');
     const allowedFormats = await this.repo.findLibraryAllowedFormats(libraryId);
@@ -367,7 +380,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
       row.filename === this.validator.sanitizeFilename(dto.filename) &&
       row.sizeBytes === dto.sizeBytes &&
       row.targetKind === target.kind &&
-      row.targetLibraryId === (target.kind === 'library' ? target.libraryId : null) &&
+      row.targetLibraryId === targetLibraryId(target) &&
       row.targetFolderId === (target.kind === 'library' ? (target.folderId ?? null) : null) &&
       row.targetBookId === (target.kind === 'existing_book' ? target.bookId : null);
     if (!matches) throw uploadError.invalidSessionState('Idempotency key is already used by a different upload');
@@ -397,8 +410,53 @@ export class UploadSessionService implements OnApplicationBootstrap {
     return row;
   }
 
+  /** Resolved lazily, like the ingest service: the Book Dock module imports this one. */
+  private libraryDocks(): LibraryDockService {
+    return this.moduleRef.get(LibraryDockService, { strict: false });
+  }
+
   private hasPermission(user: RequestUser, permission: Permission): boolean {
     return user.isSuperuser || user.permissions.includes(permission);
+  }
+
+  /**
+   * A format's signature is in its first bytes, so a file that is not what its name says is refused
+   * at its first chunk rather than after every byte has been sent.
+   */
+  private async refuseUnreadableStart(row: UploadSessionRow, chunk: { tempPath: string; sizeBytes: number }): Promise<void> {
+    if (chunk.sizeBytes < CONTENT_SIGNATURE_BYTES && chunk.sizeBytes < row.sizeBytes) return;
+    const format = this.validator.validateFormat(row.filename, []);
+    await this.refuseUnreadable(row, () => this.validator.validateContent(chunk.tempPath, format));
+  }
+
+  /** Contents that do not match the format will not get better, so the session ends with them. */
+  private async refuseUnreadable(row: UploadSessionRow, check: () => Promise<void>): Promise<void> {
+    try {
+      await check();
+    } catch (error) {
+      if (uploadErrorCodeOf(error) === UploadErrorCode.InvalidContent) {
+        await this.fail(row.id, UploadErrorCode.InvalidContent, (error as HttpException).message);
+        await this.storageService.cleanup(row.stagingPath);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Stores why an import failed. A coded upload error keeps its code and its message, which are
+   * written for the client. Anything else is stored as an import failure with a fixed message,
+   * because a raw exception message can carry server paths; the raw error goes to the log.
+   */
+  private async failImport(id: string, error: unknown): Promise<void> {
+    const code = uploadErrorCodeOf(error);
+    if (code) {
+      await this.fail(id, code, (error as HttpException).message);
+      return;
+    }
+    const errorClass = error instanceof Error ? error.name : typeof error;
+    const message = sanitizeLogValue(error instanceof Error ? error.message : String(error));
+    this.logger.warn(`[upload_session.import] [fail] sessionId=${id} errorClass=${errorClass} error="${message}" - upload import failed`);
+    await this.fail(id, UploadErrorCode.ImportFailed, IMPORT_FAILED_MESSAGE);
   }
 
   private async fail(id: string, errorCode: string, errorMessage: string): Promise<void> {
@@ -418,7 +476,7 @@ export class UploadSessionService implements OnApplicationBootstrap {
           ? { kind: 'library', libraryId: row.targetLibraryId!, ...(row.targetFolderId ? { folderId: row.targetFolderId } : {}) }
           : row.targetKind === 'existing_book'
             ? { kind: 'existing_book', bookId: row.targetBookId! }
-            : { kind: 'book_dock' },
+            : { kind: 'book_dock', ...(row.targetLibraryId ? { libraryId: row.targetLibraryId } : {}) },
       errorCode: (row.errorCode as UploadSessionResponse['errorCode']) ?? null,
       errorMessage: row.errorMessage,
       bookId: row.resultBookId,
@@ -446,6 +504,34 @@ export class UploadSessionService implements OnApplicationBootstrap {
       if (this.locks.get(id) === queued) this.locks.delete(id);
     }
   }
+}
+
+/** A session a repeated create may hand back: still able to take bytes, importing, or added. */
+/** The library a session is for: a library upload's, or a library dock's. */
+function targetLibraryId(target: UploadTarget): number | null {
+  if (target.kind === 'library') return target.libraryId;
+  if (target.kind === 'book_dock') return target.libraryId ?? null;
+  return null;
+}
+
+function isResumable(row: UploadSessionRow): boolean {
+  if (row.status === 'processing' || row.status === 'completed') return true;
+  return row.status === 'receiving' && row.expiresAt.getTime() > Date.now();
+}
+
+function offsetMismatch(expectedOffset: number, offset: number): ConflictException {
+  return new ConflictException({
+    errorCode: UploadErrorCode.OffsetMismatch,
+    message: `Expected upload offset ${expectedOffset}, received ${offset}`,
+    expectedOffset,
+  });
+}
+
+function uploadErrorCodeOf(error: unknown): UploadErrorCode | null {
+  if (!(error instanceof HttpException)) return null;
+  const response = error.getResponse();
+  const code = typeof response === 'object' && response !== null ? (response as { errorCode?: unknown }).errorCode : undefined;
+  return (Object.values(UploadErrorCode) as unknown[]).includes(code) ? (code as UploadErrorCode) : null;
 }
 
 function normalizeChecksum(value: string): string {

@@ -2,26 +2,43 @@ import { Injectable, Logger } from '@nestjs/common';
 import { MetadataCandidate, MetadataProviderKey } from '@bookorbit/types';
 
 import { ProviderConfigService } from '../../../metadata-preferences/provider-config.service';
+import { markProviderFailed } from '../../../../common/provider-cache/provider-call-context';
+import type { ProviderCacheSpec } from '../../../../common/provider-cache/provider-cache-spec';
 import { sanitizeLogValue } from '../../../../common/utils/log-sanitize.utils';
 import { audibleApiOrigin } from '../../../../common/utils/metadata-provider-hosts.utils';
 import { fetchWithThrottle } from '../../fetch-with-throttle';
 import { ProviderThrottleError } from '../../provider-throttle.error';
 import { IdentifiableProvider } from '../metadata-provider';
 import { MetadataSearchParams } from '../metadata-search-params';
+import { audiobookGate, pickSearchInputs, providerCacheContext } from '../provider-cache';
 import { PROVIDER_TIMEOUT_MS } from '../provider-constants';
 import { allowsAudiobookProviders, buildRequestSignal } from '../provider-utils';
 import { mapAudibleProduct } from './audible.mapper';
 import { AudibleSearchResponse } from './audible.types';
 import { normalizeAudibleDomain } from './normalize-audible-domain';
 
+const AUDIBLE_RESPONSE_GROUPS = 'product_desc,product_extended_attrs,media,product_attrs,series,product_plan_details,category_ladders,rating';
+
 @Injectable()
 export class AudibleProvider implements IdentifiableProvider {
   readonly key = MetadataProviderKey.AUDIBLE;
   readonly label = 'Audible';
   readonly identifiable = true as const;
+  readonly coverShape = 'square' as const;
   readonly mediaKinds = ['audiobook'] as const;
 
   private readonly logger = new Logger(AudibleProvider.name);
+
+  readonly cache: ProviderCacheSpec<MetadataSearchParams> = {
+    version: 2,
+    trustEmpty: true,
+    context: async () => {
+      const { enabled, domain } = (await this.providerConfig.getConfig()).audible;
+      return providerCacheContext(enabled, { domain });
+    },
+    describeSearch: (params) => ({ inputs: { ...pickSearchInputs(params, ['title', 'author']), audiobook: audiobookGate(params) } }),
+    describeLookup: (providerId) => ({ inputs: { id: providerId } }),
+  };
 
   constructor(private readonly providerConfig: ProviderConfigService) {}
 
@@ -36,7 +53,9 @@ export class AudibleProvider implements IdentifiableProvider {
     const url = new URL('/1.0/catalog/products', audibleApiOrigin(normalizedDomain));
     url.searchParams.set('num_results', '10');
     url.searchParams.set('keywords', query);
-    url.searchParams.set('response_groups', 'product_desc,media,product_attrs,series,product_plan_details,category_ladders,rating');
+    url.searchParams.set('response_groups', AUDIBLE_RESPONSE_GROUPS);
+    // Without it the catalog lists only the 500px image.
+    url.searchParams.set('image_sizes', '500,1024');
     const requestUrl = url.toString();
     const startedAt = Date.now();
     const safeQuery = sanitizeLogValue(query);
@@ -51,6 +70,7 @@ export class AudibleProvider implements IdentifiableProvider {
         return [];
       }
       const body = (await res.json()) as AudibleSearchResponse;
+      if (!Array.isArray(body.products)) markProviderFailed('audible.search: response without products');
       const results = (body.products ?? []).map(mapAudibleProduct);
       this.logger.log(
         `[audible] [end] op=search query="${safeQuery}" status=${res.status} resultCount=${results.length} durationMs=${Date.now() - startedAt}`,
@@ -61,6 +81,7 @@ export class AudibleProvider implements IdentifiableProvider {
         this.logger.warn(`[audible] [fail] op=search query="${safeQuery}" durationMs=${Date.now() - startedAt} message="throttled"`);
         throw err;
       }
+      markProviderFailed('audible.search: unusable response');
       this.logger.error(
         `[audible] [fail] op=search query="${safeQuery}" durationMs=${Date.now() - startedAt} message="${err instanceof Error ? err.message : String(err)}"`,
       );
@@ -74,7 +95,9 @@ export class AudibleProvider implements IdentifiableProvider {
     const normalizedDomain = normalizeAudibleDomain(domain);
 
     const url = new URL(`/1.0/catalog/products/${encodeURIComponent(providerId)}`, audibleApiOrigin(normalizedDomain));
-    url.searchParams.set('response_groups', 'product_desc,media,product_attrs,series,product_plan_details,category_ladders,rating');
+    url.searchParams.set('response_groups', AUDIBLE_RESPONSE_GROUPS);
+    // Without it the catalog lists only the 500px image.
+    url.searchParams.set('image_sizes', '500,1024');
     const requestUrl = url.toString();
     const startedAt = Date.now();
     this.logger.log(`[audible] [start] op=lookup providerId="${providerId}"`);
@@ -88,6 +111,7 @@ export class AudibleProvider implements IdentifiableProvider {
         return null;
       }
       const body = (await res.json()) as { product: AudibleSearchResponse['products'][0] };
+      if (!body.product) markProviderFailed('audible.lookup: response without product');
       const result = body.product ? mapAudibleProduct(body.product) : null;
       this.logger.log(
         `[audible] [end] op=lookup providerId="${providerId}" status=${res.status} found=${result != null} durationMs=${Date.now() - startedAt}`,
@@ -98,6 +122,7 @@ export class AudibleProvider implements IdentifiableProvider {
         this.logger.warn(`[audible] [fail] op=lookup providerId="${providerId}" durationMs=${Date.now() - startedAt} message="throttled"`);
         throw err;
       }
+      markProviderFailed('audible.lookup: unusable response');
       this.logger.error(
         `[audible] [fail] op=lookup providerId="${providerId}" durationMs=${Date.now() - startedAt} message="${err instanceof Error ? err.message : String(err)}"`,
       );

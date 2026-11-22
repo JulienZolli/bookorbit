@@ -1,10 +1,11 @@
 import { registerAs } from '@nestjs/config';
 import { join, resolve } from 'path';
 
+import { DEV_CLIENT_ORIGIN } from './dev-client-origin';
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
   host: process.env.HOST?.trim() || '0.0.0.0',
-  appUrl: process.env.APP_URL ?? 'http://localhost:5173',
+  appUrl: process.env.APP_URL ?? DEV_CLIENT_ORIGIN,
   // Private-use scheme the iOS app registers with ASWebAuthenticationSession. Compiled into the
   // client binary, so it is the same for every provider on every deployment; configurable only so
   // a rebranded fork can change it.
@@ -12,6 +13,7 @@ export const appConfig = registerAs('app', () => ({
   version: process.env.APP_VERSION ?? 'Local build',
   githubReleasesRepo: process.env.GITHUB_RELEASES_REPO?.trim() || 'bookorbit/bookorbit',
   githubReleasesToken: process.env.GITHUB_RELEASES_TOKEN?.trim() || undefined,
+  metadataProviderDirectoryUrl: parseDirectoryUrl(process.env.METADATA_PROVIDER_DIRECTORY_URL),
   oidcAllowLocalIssuers: parseBooleanFlag(process.env.OIDC_ALLOW_LOCAL_ISSUERS, false),
   swaggerEnabled: parseBooleanFlag(process.env.SWAGGER_ENABLED, false),
   koboCloudscraperPython: process.env.KOBO_CLOUDSCRAPER_PYTHON?.trim() || undefined,
@@ -43,9 +45,20 @@ export const storageConfig = registerAs('storage', () => {
   };
 });
 
+export const coverSlotsConfig = registerAs('coverSlots', () => ({
+  backfillMode: process.env.COVER_SLOTS_BACKFILL_MODE?.trim().toLowerCase() || (process.env.NODE_ENV === 'test' ? 'skip' : 'background'),
+}));
+
 export const fileWriteConfig = registerAs('fileWrite', () => ({
   debounceMs: parsePositiveInteger(process.env.FILE_WRITE_DEBOUNCE_MS, 3_000),
   maxConcurrentWrites: parsePositiveInteger(process.env.FILE_WRITE_MAX_CONCURRENT_WRITES, 2),
+}));
+
+export const djvuConfig = registerAs('djvu', () => ({
+  maxConcurrent: parsePositiveInteger(process.env.DJVU_MAX_CONCURRENT, 2),
+  timeoutMs: parsePositiveInteger(process.env.DJVU_TIMEOUT_MS, 30_000),
+  maxSourceBytes: parsePositiveInteger(process.env.DJVU_MAX_SOURCE_BYTES, 256 * 1024 * 1024),
+  cacheBytes: parsePositiveInteger(process.env.DJVU_CACHE_BYTES, 64 * 1024 * 1024),
 }));
 
 export const audiolessEpubConfig = registerAs('audiolessEpub', () => ({
@@ -53,6 +66,25 @@ export const audiolessEpubConfig = registerAs('audiolessEpub', () => ({
   maxSourceEntries: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_SOURCE_ENTRIES, 50_000),
   maxMetadataBytes: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_METADATA_BYTES, 16 * 1024 * 1024),
   maxOutputBytes: parsePositiveInteger(process.env.AUDIOLESS_EPUB_MAX_OUTPUT_BYTES, 2 * 1024 * 1024 * 1024),
+}));
+
+export const readAloudConfig = registerAs('readAloud', () => {
+  const appDataPath = resolve(process.env.APP_DATA_PATH ?? '/data');
+  return {
+    workerUrl: process.env.READ_ALOUD_WORKER_URL?.trim().replace(/\/$/, '') || undefined,
+    workerToken: process.env.READ_ALOUD_WORKER_TOKEN?.trim() || undefined,
+    workRoot: join(appDataPath, 'read-aloud', 'jobs'),
+    maxOutputBytes: parsePositiveInteger(process.env.READ_ALOUD_MAX_OUTPUT_BYTES, 20 * 1024 * 1024 * 1024),
+    requestTimeoutMs: parsePositiveInteger(process.env.READ_ALOUD_WORKER_REQUEST_TIMEOUT_MS, 30_000),
+  };
+});
+
+/** External audio tools. The binaries are looked up on PATH unless an absolute path is given. */
+export const audioToolsConfig = registerAs('audioTools', () => ({
+  ffmpegPath: process.env.FFMPEG_PATH?.trim() || 'ffmpeg',
+  ffprobePath: process.env.FFPROBE_PATH?.trim() || 'ffprobe',
+  /** How scans read each audio file's length and chapters; `ffprobe` is the escape hatch from the in-process reader. */
+  scanReader: process.env.AUDIO_SCAN_READER?.trim().toLowerCase() === 'ffprobe' ? ('ffprobe' as const) : ('builtin' as const),
 }));
 
 export const emailConfig = registerAs('email', () => ({
@@ -73,13 +105,17 @@ export const bookRequestConfig = registerAs('bookRequest', () => ({
   encryptionKey: process.env.BOOK_REQUEST_ENCRYPTION_KEY ?? '',
 }));
 
-export const podcastConfig = registerAs('podcast', () => ({
-  encryptionKey: process.env.PODCAST_ENCRYPTION_KEY?.trim() || process.env.JWT_SECRET || 'change-me-in-production',
-  maxFeedBytes: parsePositiveInteger(process.env.PODCAST_MAX_FEED_BYTES, 10 * 1024 * 1024),
-  maxEpisodeBytes: parsePositiveInteger(process.env.PODCAST_MAX_EPISODE_BYTES, 2 * 1024 * 1024 * 1024),
-  maxConcurrentDownloads: parsePositiveInteger(process.env.PODCAST_MAX_CONCURRENT_DOWNLOADS, 2),
-  requestTimeoutMs: parsePositiveInteger(process.env.PODCAST_REQUEST_TIMEOUT_MS, 30_000),
-  maxDownloadDurationMs: parsePositiveInteger(process.env.PODCAST_MAX_DOWNLOAD_DURATION_MS, 6 * 60 * 60_000),
+/**
+ * Keys for AI provider connections. Like the book request key, a provider key is refused rather
+ * than stored in the clear when this is unset; connections without a key still save.
+ */
+export const aiConfig = registerAs('ai', () => ({
+  encryptionKey: process.env.AI_ENCRYPTION_KEY ?? '',
+}));
+
+/** How many bulk runs the server works through at once, across every account. */
+export const bulkRunsConfig = registerAs('bulkRuns', () => ({
+  maxConcurrent: Number(process.env.BULK_RUNS_MAX_CONCURRENT ?? 3),
 }));
 
 export const oidcRuntimeConfig = registerAs('oidcRuntime', () => ({
@@ -104,4 +140,13 @@ function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean
   if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+const DEFAULT_METADATA_PROVIDER_DIRECTORY_URL = 'https://raw.githubusercontent.com/bookorbit/bookorbit-metadata-providers/main/directory.json';
+
+/** Null when the online list of ready-made metadata providers is turned off. */
+function parseDirectoryUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return DEFAULT_METADATA_PROVIDER_DIRECTORY_URL;
+  return trimmed.toLowerCase() === 'off' ? null : trimmed;
 }

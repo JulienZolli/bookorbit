@@ -2,13 +2,17 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { CheckCircle2, FileUp, Loader2, Plus, RotateCcw, Upload, X, XCircle } from '@lucide/vue'
-import type { Library } from '@bookorbit/types'
+import { CheckCheck, CheckCircle2, FileUp, Loader2, PackageOpen, Plus, RotateCcw, Upload, X, XCircle } from '@lucide/vue'
+import { Permission, type BookDockUploadTarget } from '@bookorbit/types'
+import { useAuth } from '@/features/auth/composables/useAuth'
+import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { fetchDockUploadTargets } from '@/features/book-dock/api/book-dock.api'
+import { readUploadMode, rememberUploadMode, type LibraryUploadMode } from '../composables/useUploadModeMemory'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 import { SUPPORTED_FORMATS, SUPPORTED_FORMATS_ACCEPT, useBookUpload, type FileUploadStatus } from '../composables/useBookUpload'
 import { emitLibraryUploadCompleted } from '../composables/useLibraryUploadEvents'
-import { useLibraries } from '../composables/useLibraries'
-import { api } from '@/lib/api'
+import { useBookDestination } from '../composables/useBookDestination'
+import BookDestinationFields from './BookDestinationFields.vue'
 import { formatBytes } from '@/lib/formatting'
 const props = defineProps<{
   libraryId?: number
@@ -21,20 +25,63 @@ const emit = defineEmits<{
 
 const router = useRouter()
 const { t } = useI18n()
-const { libraries, fetchLibraries } = useLibraries()
+const destination = useBookDestination({ libraryId: props.libraryId })
+const { libraryId: selectedLibraryId, folderId: selectedFolderId, selectedLibrary, hasDestination, fetchLibraries } = destination
 const { maxUploadSizeMb } = useAppInfo()
 
-const selectedLibraryId = ref<number | undefined>(props.libraryId)
-const folders = ref<Library['folders']>([])
-const selectedFolderId = ref<number | undefined>(undefined)
-const libraryName = ref<string | null>(null)
 const isDragging = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
-const { files, pendingCount, isUploading, doneCount, errorCount, uploadedBookIds, addFiles, removeFile, retryFile, reset, startUpload } =
-  useBookUpload()
+const {
+  files,
+  pendingCount,
+  isUploading,
+  doneCount,
+  errorCount,
+  uploadedBookIds,
+  addFiles,
+  removeFile,
+  retryFile,
+  reset,
+  applyAllowedFormats,
+  startUpload,
+  startDockUpload,
+} = useBookUpload()
+const { user } = useAuth()
+const { hasPermission } = usePermissions()
 
-const canUpload = computed(() => pendingCount.value > 0 && !isUploading.value && selectedLibraryId.value !== undefined)
+/** Libraries whose dock is on and takes uploads from this person (D23). */
+const dockTargets = ref<BookDockUploadTarget[]>([])
+const dockTarget = computed(() => dockTargets.value.find((target) => target.libraryId === selectedLibraryId.value) ?? null)
+const mode = ref<LibraryUploadMode>('review')
+const reviewInDock = computed(() => dockTarget.value !== null && mode.value === 'review')
+const refusedCount = computed(() => files.value.filter((item) => item.refusedFormat).length)
+
+watch(
+  [selectedLibraryId, dockTarget],
+  ([libraryId, target]) => {
+    if (libraryId != null && target) mode.value = readUploadMode(user.value?.id ?? null, libraryId) ?? 'review'
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => selectedLibrary.value?.allowedFormats, () => files.value.length],
+  () => applyAllowedFormats(selectedLibrary.value?.allowedFormats ?? []),
+  { immediate: true },
+)
+
+function itemError(item: { refusedFormat?: boolean; error?: string; file: File }): string | undefined {
+  if (!item.refusedFormat) return item.error
+  return t('library.upload.dock.notAllowed', { library: selectedLibrary.value?.name ?? '', format: getFormat(item.file.name) })
+}
+
+function goToDock() {
+  if (dockTarget.value) void router.push({ name: 'book-dock', query: { dock: String(dockTarget.value.dockId) } })
+  handleClose()
+}
+
+const canUpload = computed(() => pendingCount.value > 0 && !isUploading.value && hasDestination.value)
 const hasFiles = computed(() => files.value.length > 0)
 const allDone = computed(() => hasFiles.value && files.value.every((f) => f.status === 'done' || f.status === 'error'))
 const allSuccess = computed(() => allDone.value && errorCount.value === 0)
@@ -42,7 +89,7 @@ const allSuccess = computed(() => allDone.value && errorCount.value === 0)
 const headerTitle = computed(() => {
   if (isUploading.value) return t('library.upload.header.uploading')
   if (allDone.value) return t('library.upload.header.complete')
-  if (libraryName.value) return t('library.upload.header.uploadTo', { library: libraryName.value })
+  if (selectedLibrary.value) return t('library.upload.header.uploadTo', { library: selectedLibrary.value.name })
   return t('library.upload.header.uploadBooks')
 })
 
@@ -58,33 +105,16 @@ const fileSummary = computed(() => {
   return { total: files.value.length, totalBytes, formatParts }
 })
 
-async function loadFolders(libraryId: number) {
-  const res = await api(`/api/v1/libraries/${libraryId}`)
-  if (res.ok) {
-    const data: Library = await res.json()
-    folders.value = data.folders ?? []
-    selectedFolderId.value = folders.value[0]?.id
-    libraryName.value = data.name
-  }
-}
-
-watch(selectedLibraryId, (id) => {
-  folders.value = []
-  selectedFolderId.value = undefined
-  libraryName.value = null
-  if (id !== undefined) loadFolders(id)
-})
-
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') handleClose()
 }
 
-onMounted(async () => {
-  if (!props.libraryId) {
-    if (!libraries.value.length) await fetchLibraries()
-    if (selectedLibraryId.value !== undefined) loadFolders(selectedLibraryId.value)
-  } else {
-    loadFolders(props.libraryId)
+onMounted(() => {
+  void fetchLibraries()
+  if (hasPermission(Permission.BookDockAccess)) {
+    void fetchDockUploadTargets().then((targets) => {
+      dockTargets.value = targets
+    })
   }
   document.addEventListener('keydown', onKeydown)
 })
@@ -131,11 +161,17 @@ function onFileInputChange(e: Event) {
 
 async function handleUpload() {
   const libraryId = selectedLibraryId.value
-  if (libraryId === undefined) return
-  const folderId = selectedFolderId.value
+  if (!hasDestination.value || libraryId === null) return
+  const folderId = selectedFolderId.value ?? undefined
 
   const pendingAtStart = files.value.filter((f) => f.status === 'pending').length
   if (pendingAtStart === 0) return
+
+  if (dockTarget.value) rememberUploadMode(user.value?.id ?? null, libraryId, mode.value)
+  if (reviewInDock.value) {
+    await startDockUpload(libraryId)
+    return
+  }
 
   const uploadedBefore = new Set(files.value.filter((f) => f.status === 'done' && f.bookId !== undefined).map((f) => f.bookId!))
   const errorCountBefore = files.value.filter((f) => f.status === 'error').length
@@ -185,7 +221,7 @@ function formatPillClass(filename: string): string {
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4">
-      <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" @click="handleClose" />
+      <div class="absolute inset-0 bg-scrim" @click="handleClose" />
 
       <div
         class="relative flex flex-col w-full max-w-2xl bg-background rounded-lg shadow-2xl border border-border overflow-hidden"
@@ -211,28 +247,37 @@ function formatPillClass(filename: string): string {
         </div>
 
         <div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-          <!-- Library selector (only when not pre-scoped to a library) -->
-          <div v-if="!libraryId" class="flex flex-col gap-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ t('library.upload.library') }}</label>
-            <select
-              v-model="selectedLibraryId"
-              class="h-8 rounded-md border border-input bg-background px-2.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            >
-              <option :value="undefined" disabled>{{ t('library.upload.selectLibrary') }}</option>
-              <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
-            </select>
-          </div>
+          <BookDestinationFields
+            :destination="destination"
+            :library-label="t('library.upload.library')"
+            :folder-label="t('library.upload.targetFolder')"
+            :scoped="libraryId !== undefined"
+          />
 
-          <!-- Folder selector (only shown when library has multiple folders) -->
-          <div v-if="folders.length > 1" class="flex flex-col gap-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ t('library.upload.targetFolder') }}</label>
-            <select
-              v-model="selectedFolderId"
-              class="h-8 rounded-md border border-input bg-background px-2.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            >
-              <option v-for="folder in folders" :key="folder.id" :value="folder.id">{{ folder.path }}</option>
-            </select>
-          </div>
+          <fieldset v-if="dockTarget" class="min-w-0" data-testid="library-upload-mode">
+            <legend class="mb-2 flex w-full items-baseline justify-between gap-3 text-xs font-medium text-muted-foreground">
+              <span>{{ t('library.upload.dock.howToAdd') }}</span>
+              <span class="font-normal">{{ t('library.upload.dock.remembered', { library: dockTarget.libraryName }) }}</span>
+            </legend>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="mode-choice">
+                <input v-model="mode" type="radio" value="review" class="sr-only" data-testid="library-upload-mode-review" />
+                <span class="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <PackageOpen class="size-4 text-primary" aria-hidden="true" />
+                  {{ t('library.upload.dock.review') }}
+                </span>
+                <span class="text-xs text-muted-foreground">{{ t('library.upload.dock.reviewHint', { library: dockTarget.libraryName }) }}</span>
+              </label>
+              <label class="mode-choice">
+                <input v-model="mode" type="radio" value="now" class="sr-only" data-testid="library-upload-mode-now" />
+                <span class="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <CheckCheck class="size-4 text-primary" aria-hidden="true" />
+                  {{ t('library.upload.dock.fileNow') }}
+                </span>
+                <span class="text-xs text-muted-foreground">{{ t('library.upload.dock.fileNowHint', { library: dockTarget.libraryName }) }}</span>
+              </label>
+            </div>
+          </fieldset>
 
           <!-- Shared file input -->
           <input ref="fileInputRef" type="file" multiple :accept="SUPPORTED_FORMATS_ACCEPT" class="sr-only" @change="onFileInputChange" />
@@ -309,10 +354,10 @@ function formatPillClass(filename: string): string {
                   <p class="text-xs font-medium text-foreground truncate">{{ item.file.name }}</p>
                   <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
                     <span class="text-[11px] text-muted-foreground">{{ formatBytes(item.file.size) }}</span>
-                    <span class="text-[10px] font-semibold px-1.5 py-px rounded uppercase tracking-wide" :class="formatPillClass(item.file.name)">
+                    <span class="text-[10px] font-semibold px-1.5 py-px rounded-xs uppercase tracking-wide" :class="formatPillClass(item.file.name)">
                       {{ getFormat(item.file.name) }}
                     </span>
-                    <span v-if="item.status === 'error'" class="text-[11px] text-destructive truncate">{{ item.error }}</span>
+                    <span v-if="item.status === 'error'" class="text-[11px] text-destructive truncate">{{ itemError(item) }}</span>
                     <span v-else-if="item.status === 'uploading'" class="text-[11px] text-primary tabular-nums">{{ item.progress }}%</span>
                     <span v-else-if="item.status === 'done'" class="text-[11px] text-emerald-600 dark:text-emerald-400">{{
                       t('library.upload.done')
@@ -328,8 +373,8 @@ function formatPillClass(filename: string): string {
                 <!-- Actions -->
                 <div class="shrink-0 flex items-center gap-0.5">
                   <button
-                    v-if="item.status === 'error' && !item.validationError"
-                    class="flex items-center justify-center w-6 h-6 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+                    v-if="item.status === 'error' && !item.validationError && !item.refusedFormat"
+                    class="flex items-center justify-center w-6 h-6 rounded-xs text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
                     :title="t('library.upload.retry')"
                     @click="retryFile(item.id)"
                   >
@@ -337,7 +382,7 @@ function formatPillClass(filename: string): string {
                   </button>
                   <button
                     v-if="item.status !== 'uploading'"
-                    class="flex items-center justify-center w-6 h-6 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    class="flex items-center justify-center w-6 h-6 rounded-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                     @click="removeFile(item.id)"
                   >
                     <X :size="12" />
@@ -352,7 +397,9 @@ function formatPillClass(filename: string): string {
         <div v-if="allSuccess" class="shrink-0 px-5 py-4 border-t border-border flex items-center justify-between gap-3">
           <div class="flex items-center gap-2">
             <CheckCircle2 class="size-4 text-emerald-500 shrink-0" />
-            <span class="text-sm font-medium text-foreground">{{ t('library.upload.booksAdded', { count: doneCount }) }}</span>
+            <span class="text-sm font-medium text-foreground">{{
+              reviewInDock ? t('library.upload.dock.sent', { count: doneCount }) : t('library.upload.booksAdded', { count: doneCount })
+            }}</span>
           </div>
           <div class="flex items-center gap-2">
             <button
@@ -362,6 +409,15 @@ function formatPillClass(filename: string): string {
               {{ t('common.close') }}
             </button>
             <button
+              v-if="reviewInDock"
+              class="flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity"
+              data-testid="library-upload-open-dock"
+              @click="goToDock"
+            >
+              {{ t('library.upload.dock.openDock') }}
+            </button>
+            <button
+              v-else
               class="flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity"
               @click="goToLibrary"
             >
@@ -378,6 +434,9 @@ function formatPillClass(filename: string): string {
           <span v-else-if="isUploading" class="text-xs text-muted-foreground tabular-nums">
             {{ t('library.upload.progress', { done: doneCount, total: files.length }) }}
           </span>
+          <span v-else-if="refusedCount > 0" class="text-xs text-muted-foreground">
+            {{ t('library.upload.dock.refusedCount', { count: refusedCount, library: selectedLibrary?.name ?? '' }) }}
+          </span>
           <span v-else class="text-xs text-muted-foreground" />
 
           <div class="flex items-center gap-2">
@@ -392,8 +451,16 @@ function formatPillClass(filename: string): string {
               :disabled="!canUpload"
               @click="handleUpload"
             >
-              <Upload :size="13" />
-              {{ pendingCount > 0 ? t('library.upload.uploadWithCount', { count: pendingCount }) : t('library.upload.upload') }}
+              <PackageOpen v-if="reviewInDock" :size="13" />
+              <Upload v-else :size="13" />
+              <template v-if="reviewInDock">{{
+                pendingCount > 0
+                  ? t('library.upload.dock.send', { count: pendingCount, library: dockTarget?.libraryName ?? '' })
+                  : t('library.upload.dock.sendEmpty', { library: dockTarget?.libraryName ?? '' })
+              }}</template>
+              <template v-else>{{
+                pendingCount > 0 ? t('library.upload.uploadWithCount', { count: pendingCount }) : t('library.upload.upload')
+              }}</template>
             </button>
           </div>
         </div>
@@ -403,6 +470,26 @@ function formatPillClass(filename: string): string {
 </template>
 
 <style scoped>
+.mode-choice {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  cursor: pointer;
+}
+.mode-choice:hover {
+  border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+}
+.mode-choice:has(input:checked) {
+  border-color: var(--primary);
+  background: color-mix(in oklch, var(--primary) 8%, var(--card));
+}
+.mode-choice:has(input:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
 .file-row-enter-active {
   transition: all 0.2s ease;
 }

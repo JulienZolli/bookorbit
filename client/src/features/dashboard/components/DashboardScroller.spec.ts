@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick, ref, type Ref } from 'vue'
-import type { BookCard, BookScrollerType } from '@bookorbit/types'
+import type { BookCard, ScrollerType } from '@bookorbit/types'
 
 type DashboardScrollerState = {
   books: Ref<BookCard[]>
@@ -10,7 +10,7 @@ type DashboardScrollerState = {
   refresh: () => Promise<void>
 }
 
-type UseDashboardScrollerMock = (type: BookScrollerType, limit?: number, smartScopeId?: number) => DashboardScrollerState
+type UseDashboardScrollerMock = (type: ScrollerType, limit?: number, smartScopeId?: number) => DashboardScrollerState
 
 // `sm` is true at or above the Tailwind sm breakpoint, so a false value is the
 // compact viewport where the row count gets capped. A real ref keeps the mock
@@ -36,10 +36,10 @@ const deleteMocks = vi.hoisted(() => ({
 vi.mock('@/features/book/components/BookCoverCard.vue', () => ({
   default: {
     name: 'BookCoverCard',
-    props: ['book', 'coverAspectRatio'],
+    props: ['book', 'coverAspectRatio', 'mediaKind'],
     emits: ['action'],
     template: `
-      <div class="book-card" :data-aspect="coverAspectRatio">
+      <div class="book-card" :data-aspect="coverAspectRatio" :data-media-kind="mediaKind || ''">
         <span>{{ book.title }}</span>
         <button class="quick-action" @click="$emit('action', 'quick-view')" />
         <button class="collection-action" @click="$emit('action', 'add-to-collection')" />
@@ -111,6 +111,7 @@ function makeBook(id: number, format: string, coverAspectRatio: BookCard['coverA
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -134,7 +135,7 @@ function mountScroller({
   limit,
   refresh = vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }: {
-  type: BookScrollerType
+  type: ScrollerType
   books?: BookCard[]
   loading?: boolean
   error?: boolean
@@ -208,14 +209,28 @@ describe('DashboardScroller', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
   })
 
-  it('renders cover slots from library configuration instead of media format', () => {
-    const wrapper = mountScroller({ type: 'continue-listening', books: [makeBook(1, 'epub', '1/1'), makeBook(2, 'm4b', '2/3')] })
+  it('draws a dual-format book as an audiobook on the continue-listening shelf', () => {
+    const book = makeBook(1, 'epub', '2/3')
+    book.files.push({ id: 2, format: 'm4b', role: 'content', sizeBytes: 456 })
 
-    const cards = wrapper.findAll('.book-card')
-    expect(wrapper.text()).toContain('2')
-    expect(cards).toHaveLength(2)
-    expect(cards[0]?.attributes('data-aspect')).toBe('1/1')
-    expect(cards[1]?.attributes('data-aspect')).toBe('2/3')
+    const wrapper = mountScroller({ type: 'continue-listening', books: [book] })
+
+    const card = wrapper.get('.book-card')
+    expect(card.attributes('data-media-kind')).toBe('audiobook')
+    expect(card.attributes('data-aspect')).toBe('1/1')
+    expect(card.element.parentElement?.classList.contains('w-[150px]')).toBe(true)
+  })
+
+  it('keeps the read-along face when the continue-listening book has no separate audio file', () => {
+    const book = makeBook(1, 'epub', '2/3')
+    book.files[0]!.mediaOverlay = { available: true, durationSeconds: 3600 }
+
+    const wrapper = mountScroller({ type: 'continue-listening', books: [book] })
+
+    const card = wrapper.get('.book-card')
+    expect(card.attributes('data-media-kind')).toBe('audiobook')
+    expect(card.attributes('data-aspect')).toBe('2/3')
+    expect(card.element.parentElement?.classList.contains('w-[120px]')).toBe(true)
   })
 
   it('keeps a mixed ebook and audiobook portrait when its library is portrait', () => {
@@ -224,7 +239,7 @@ describe('DashboardScroller', () => {
 
     const wrapper = mountScroller({ type: 'want-to-read', books: [mixedBook] })
 
-    expect(wrapper.get('.book-card').attributes('data-aspect')).toBe('2/3')
+    expect(wrapper.get('.book-card').attributes()).toMatchObject({ 'data-aspect': '2/3', 'data-media-kind': '' })
     expect(wrapper.get('.book-card').element.parentElement?.classList.contains('w-[120px]')).toBe(true)
   })
 

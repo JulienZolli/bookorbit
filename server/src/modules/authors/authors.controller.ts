@@ -24,6 +24,7 @@ import type { FastifyReply } from 'fastify';
 import { map, Observable } from 'rxjs';
 
 import { Permission, AuditAction, AuditResource } from '@bookorbit/types';
+import { KeyReadSafe } from '../../common/decorators/api-key-policy.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import { ForbidPermission } from '../../common/decorators/forbid-permission.decorator';
@@ -33,21 +34,24 @@ import { UpdateAuthorMetadataPreferencesDto } from './dto/update-author-metadata
 import { imageContentTypeFromPath } from '../../common/image-content-type';
 import type { MultipartRequest } from '../../common/types/multipart-request';
 import type { RequestUser } from '../../common/types/request-user';
-import type { AuthorMetadataCandidate } from '@bookorbit/types';
+import type { AuthorMetadataSearchCandidateEvent } from '@bookorbit/types';
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
 import { AuthorAutoEnrichmentConfigDto } from './dto/author-auto-enrichment-config.dto';
-import { BulkAuthorIdsDto } from './dto/bulk-author-ids.dto';
+import { AuthorEnrichmentBackfillDto } from './dto/author-enrichment-backfill.dto';
+import { BulkRefreshAuthorsMetadataDto } from './dto/bulk-refresh-authors-metadata.dto';
 import { DeleteAuthorsDto } from './dto/delete-authors.dto';
 import { ListAuthorBooksDto } from './dto/list-author-books.dto';
 import { ListAuthorMetadataDto } from './dto/list-author-metadata.dto';
 import { ListAuthorLettersDto, ListAuthorsDto } from './dto/list-authors.dto';
 import { LookupAuthorMetadataDto } from './dto/lookup-author-metadata.dto';
 import { MergeAuthorsDto } from './dto/merge-authors.dto';
+import { PinAuthorMetadataMatchDto } from './dto/pin-author-metadata-match.dto';
 import { PreviewAuthorEnrichmentCountDto } from './dto/preview-author-enrichment-count.dto';
 import { UpdateAuthorDto } from './dto/update-author.dto';
 import { AuthorsService } from './authors.service';
 import { AuthorEnrichmentOrchestratorService } from './author-enrichment-orchestrator.service';
 import { AuthorEnrichmentRepository } from './author-enrichment.repository';
+import { BulkRunsService } from '../bulk-runs/bulk-runs.service';
 
 @Controller('authors')
 export class AuthorsController {
@@ -57,6 +61,7 @@ export class AuthorsController {
     private readonly enrichmentConfig: AuthorEnrichmentConfigService,
     private readonly queueRepo: AuthorEnrichmentRepository,
     private readonly metadataPreferences: AuthorMetadataPreferencesService,
+    private readonly bulkRuns: BulkRunsService,
   ) {}
 
   @Get()
@@ -82,7 +87,7 @@ export class AuthorsController {
 
   @Sse('metadata/stream')
   streamMetadata(@Query() dto: ListAuthorMetadataDto): Observable<MessageEvent> {
-    return this.authorsService.streamMetadata(dto).pipe(map((candidate: AuthorMetadataCandidate) => ({ data: candidate })));
+    return this.authorsService.streamMetadata(dto).pipe(map((candidate: AuthorMetadataSearchCandidateEvent) => ({ data: candidate })));
   }
 
   @Get('metadata/lookup')
@@ -93,28 +98,19 @@ export class AuthorsController {
   @Post('bulk-refresh-metadata')
   @RequirePermission(Permission.LibraryEditMetadata)
   @ForbidPermission(Permission.DemoRestricted, 'Demo-restricted account cannot perform bulk edits')
-  async bulkRefreshMetadata(@Body() dto: BulkAuthorIdsDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+  async bulkRefreshMetadata(@Body() dto: BulkRefreshAuthorsMetadataDto, @CurrentUser() user: RequestUser, @Res() reply: FastifyReply) {
+    const authorIds = await this.authorsService.authorizeBulkRefresh(user, dto.authorIds);
+    await this.bulkRuns.startAndStream(reply, {
+      kind: 'author-refresh-metadata',
+      subjectIds: authorIds,
+      options: { ignoreCache: dto.ignoreCache === true },
+      actor: user,
+      audit: {
+        action: AuditAction.AuthorBulkMetadataRefresh,
+        resource: AuditResource.Author,
+        description: (count) => `Bulk refreshed metadata for ${count} author${count !== 1 ? 's' : ''}`,
+      },
     });
-    const sendEvent = (event: object) => {
-      if (reply.raw.destroyed || reply.raw.writableEnded) {
-        throw new Error('SSE stream closed');
-      }
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-    };
-    try {
-      const result = await this.authorsService.bulkRefreshMetadata(dto.authorIds, user, (event) => {
-        sendEvent(event);
-      });
-      sendEvent({ done: true, ...result });
-    } finally {
-      if (!reply.raw.destroyed && !reply.raw.writableEnded) {
-        reply.raw.end();
-      }
-    }
   }
 
   @Get('enrichment/config')
@@ -147,6 +143,7 @@ export class AuthorsController {
   }
 
   @Post('enrichment/preview-count')
+  @KeyReadSafe()
   @RequirePermission(Permission.ManageMetadataConfig)
   async previewCount(@Body() body: PreviewAuthorEnrichmentCountDto) {
     const count = await this.queueRepo.countEligibleLinkedAuthors(body.conditions);
@@ -155,15 +152,15 @@ export class AuthorsController {
 
   @Post('enrichment/backfill')
   @RequirePermission(Permission.ManageMetadataConfig)
-  async enqueueBackfill() {
-    const queued = await this.enrichmentOrchestrator.backfillLinkedAuthors();
+  async enqueueBackfill(@Body() dto?: AuthorEnrichmentBackfillDto) {
+    const queued = await this.enrichmentOrchestrator.backfillLinkedAuthors({ ignoreCache: dto?.ignoreCache === true });
     return { queued };
   }
 
   @Post('enrichment/backfill-all')
   @RequirePermission(Permission.ManageMetadataConfig)
-  async enqueueBackfillAll() {
-    const queued = await this.enrichmentOrchestrator.backfillAllLinkedAuthors();
+  async enqueueBackfillAll(@Body() dto?: AuthorEnrichmentBackfillDto) {
+    const queued = await this.enrichmentOrchestrator.backfillAllLinkedAuthors({ ignoreCache: dto?.ignoreCache === true });
     return { queued };
   }
 
@@ -298,6 +295,30 @@ export class AuthorsController {
   @RequirePermission(Permission.LibraryEditMetadata)
   refreshEnrichment(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
     return this.authorsService.refreshEnrichment(user, id);
+  }
+
+  @Put(':id/metadata-match')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @Auditable({
+    action: AuditAction.AuthorUpdate,
+    resource: AuditResource.Author,
+    getResourceId: (req) => parseInt(req.params['id'], 10),
+    description: (req) => `Pinned the metadata match for author #${req.params['id']}`,
+  })
+  pinMetadataMatch(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Body() dto: PinAuthorMetadataMatchDto) {
+    return this.authorsService.pinMetadataMatch(user, id, dto);
+  }
+
+  @Delete(':id/metadata-match')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @Auditable({
+    action: AuditAction.AuthorUpdate,
+    resource: AuditResource.Author,
+    getResourceId: (req) => parseInt(req.params['id'], 10),
+    description: (req) => `Unpinned the metadata match for author #${req.params['id']}`,
+  })
+  unpinMetadataMatch(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.authorsService.unpinMetadataMatch(user, id);
   }
 
   @Patch(':id')

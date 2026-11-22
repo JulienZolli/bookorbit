@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Zap } from '@lucide/vue'
 
-import { useThemeStore } from '@/stores/theme'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { DEFAULT_BREAKDOWN_DIMENSION, getBreakdownSeries, type BreakdownDimension } from '../../lib/breakdown'
 import { useUserReadingPace } from '../../composables/useUserReadingPace'
 import BreakdownSelect from '../BreakdownSelect.vue'
@@ -13,7 +13,7 @@ import ChartEmptyState from '../ChartEmptyState.vue'
 
 const MIN_SESSIONS = 10
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useUserReadingPace()
@@ -30,7 +30,7 @@ watchEffect(() => {
 
   const visible = data.value.filter((p) => p.durationSeconds > 0 && p.durationSeconds <= 14400 && p.progressDelta > 0 && p.progressDelta <= 100)
   const formatKeys = [...new Set(visible.map((p) => p.format))].sort()
-  const seriesMeta = getBreakdownSeries(dimension.value, `${themeStore.resolvedTheme}:${themeStore.accent}`, formatKeys)
+  const seriesMeta = getBreakdownSeries(dimension.value, chartTokens.value.key, formatKeys)
   const series = seriesMeta.map((meta) => ({
     type: 'scatter',
     name: meta.label,
@@ -81,6 +81,6 @@ watchEffect(() => {
       :title="t('statistics.empty.notEnoughData')"
       :description="t('statistics.charts.readingPace.notEnoughData', { count: MIN_SESSIONS })"
     />
-    <VChart v-else :option autoresize style="height: 100%" />
+    <AppChart v-else :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

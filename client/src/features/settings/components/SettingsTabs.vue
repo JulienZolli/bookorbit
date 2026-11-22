@@ -1,11 +1,16 @@
 <script setup lang="ts" generic="T extends string">
 import { nextTick, ref, watch } from 'vue'
 import { useScrollOverflow } from '@/composables/useScrollOverflow'
+import { formatNumber } from '@/i18n/formatters'
 
 interface SettingsTabItem {
   id: T
   label: string
   controls?: string
+  /** A quiet count after the label, such as how many items the tab holds. */
+  count?: number
+  /** Marks a tab with something waiting in it; the text is what a screen reader hears. */
+  attention?: string
 }
 
 const props = withDefaults(
@@ -79,7 +84,16 @@ function handleSelect(tab: T): void {
         ]"
         @click="handleSelect(tab.id)"
       >
-        {{ tab.label }}
+        {{ tab.label
+        }}<span v-if="tab.count !== undefined" class="ms-[7px] text-[11.5px] font-normal tabular-nums text-muted-foreground">{{
+          formatNumber(tab.count)
+        }}</span
+        ><span
+          v-if="tab.attention"
+          role="img"
+          :aria-label="tab.attention"
+          class="ms-1.5 inline-block size-1.5 rounded-full bg-warning align-middle"
+        />
       </button>
     </div>
     <div

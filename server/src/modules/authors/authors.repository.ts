@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { SQL, and, asc, desc, eq, exists, inArray, isNull, max, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
-import type { ContentFilterRules } from '@bookorbit/types';
+import type { AuthorGender, ContentFilterRules } from '@bookorbit/types';
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { accentInsensitiveIlike, buildSearchPattern } from '../../common/utils/accent-insensitive-search.utils';
 import { DB } from '../../db';
@@ -38,6 +38,7 @@ type AuthorBookIdRow = {
 };
 
 export type AuthorDetailRow = AuthorSummaryRow & {
+  gender: AuthorGender | null;
   birthDate: string | null;
   birthYear: number | null;
   deathDate: string | null;
@@ -47,6 +48,7 @@ export type AuthorDetailRow = AuthorSummaryRow & {
   influences: string[] | null;
   metadataProvider: string | null;
   metadataProviderId: string | null;
+  metadataProviderPinned: boolean;
 };
 
 export type AuthorEnrichmentRow = AuthorSummaryRow & {
@@ -58,6 +60,9 @@ export type AuthorEnrichmentRow = AuthorSummaryRow & {
   website: string | null;
   genres: string[] | null;
   influences: string[] | null;
+  metadataProvider: string | null;
+  metadataProviderId: string | null;
+  metadataProviderPinned: boolean;
 };
 
 @Injectable()
@@ -179,6 +184,7 @@ export class AuthorsRepository {
         name: authors.name,
         sortName: authors.sortName,
         description: authors.description,
+        gender: authors.gender,
         birthDate: authors.birthDate,
         birthYear: authors.birthYear,
         deathDate: authors.deathDate,
@@ -188,6 +194,7 @@ export class AuthorsRepository {
         influences: authors.influences,
         metadataProvider: authors.metadataProvider,
         metadataProviderId: authors.metadataProviderId,
+        metadataProviderPinned: authors.metadataProviderPinned,
         bookCount: sql<number>`count(distinct ${books.id})::int`,
         lastAddedAt: max(books.addedAt),
       })
@@ -200,6 +207,7 @@ export class AuthorsRepository {
         authors.name,
         authors.sortName,
         authors.description,
+        authors.gender,
         authors.birthDate,
         authors.birthYear,
         authors.deathDate,
@@ -209,6 +217,7 @@ export class AuthorsRepository {
         authors.influences,
         authors.metadataProvider,
         authors.metadataProviderId,
+        authors.metadataProviderPinned,
       )
       .limit(1);
 
@@ -230,6 +239,9 @@ export class AuthorsRepository {
         website: authors.website,
         genres: authors.genres,
         influences: authors.influences,
+        metadataProvider: authors.metadataProvider,
+        metadataProviderId: authors.metadataProviderId,
+        metadataProviderPinned: authors.metadataProviderPinned,
         bookCount: sql<number>`count(distinct ${books.id})::int`,
         lastAddedAt: max(books.addedAt),
       })
@@ -250,6 +262,9 @@ export class AuthorsRepository {
         authors.website,
         authors.genres,
         authors.influences,
+        authors.metadataProvider,
+        authors.metadataProviderId,
+        authors.metadataProviderPinned,
       )
       .limit(1);
     return row ?? null;
@@ -323,6 +338,7 @@ export class AuthorsRepository {
       name: string;
       sortName: string | null;
       description: string | null;
+      gender: AuthorGender | null;
       hasPhoto: boolean;
       birthDate: string | null;
       birthYear: number | null;
@@ -333,6 +349,7 @@ export class AuthorsRepository {
       influences: string[] | null;
       metadataProvider: string | null;
       metadataProviderId: string | null;
+      metadataProviderPinned: boolean;
       lastEnrichedAt: Date | null;
     }>,
   ) {
@@ -341,6 +358,7 @@ export class AuthorsRepository {
       name: authors.name,
       sortName: authors.sortName,
       description: authors.description,
+      gender: authors.gender,
       hasPhoto: authors.hasPhoto,
       lastEnrichedAt: authors.lastEnrichedAt,
     });

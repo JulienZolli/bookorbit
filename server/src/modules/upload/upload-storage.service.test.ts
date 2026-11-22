@@ -1,7 +1,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
-import { PayloadTooLargeException } from '@nestjs/common';
+import { PayloadTooLargeException, RequestTimeoutException } from '@nestjs/common';
 import { createReadStream, type WriteStream } from 'fs';
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from 'fs/promises';
+import { copyFile, link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { PassThrough, Readable, Writable } from 'stream';
 import { randomUUID } from 'crypto';
@@ -16,6 +16,7 @@ vi.mock('fs/promises', async (importOriginal) => {
   return {
     ...actual,
     copyFile: vi.fn(actual.copyFile),
+    link: vi.fn(actual.link),
     open: vi.fn(actual.open),
     rename: vi.fn(actual.rename),
     stat: vi.fn(actual.stat),
@@ -84,6 +85,54 @@ describe('UploadStorageService', () => {
     expect(await readdir(destinationDir)).toEqual([]);
   }
 
+  describe('placing a file and leaving the source where it is', () => {
+    it('hard links, so the source and the destination share one file', async () => {
+      await expect(service.linkToPath(source, destination)).resolves.toBe('linked');
+
+      const [original, placed] = await Promise.all([stat(source), stat(destination)]);
+      expect(placed.ino).toBe(original.ino);
+      expect(original.nlink).toBe(2);
+      expect(await readFile(source)).toEqual(payload);
+      expect(rename).not.toHaveBeenCalled();
+    });
+
+    it.each(['EXDEV', 'EPERM', 'ENOTSUP', 'EMLINK'])(
+      'copies through a staging file when linking fails with %s, and keeps the source',
+      async (code) => {
+        vi.mocked(link).mockRejectedValueOnce(ioError(code));
+
+        await expect(service.linkToPath(source, destination)).resolves.toBe('copied');
+
+        expect(await readFile(destination)).toEqual(payload);
+        expect((await stat(destination)).ino).not.toBe((await stat(source)).ino);
+        expect(await readdir(destinationDir)).toEqual(['book.epub']);
+        expect(open).toHaveBeenCalledWith(expect.stringMatching(/\.bookorbit-upload-.*\.tmp$/), 'wx');
+        await expectPreservedSource();
+      },
+    );
+
+    it('never replaces a destination that is already there', async () => {
+      await mkdir(destinationDir, { recursive: true });
+      await writeFile(destination, 'someone else');
+
+      await expect(service.linkToPath(source, destination)).rejects.toThrow('Upload destination already exists');
+
+      expect(await readFile(destination, 'utf8')).toBe('someone else');
+      await expectPreservedSource();
+    });
+
+    it('propagates any other link failure without copying', async () => {
+      const failure = ioError('EACCES');
+      vi.mocked(link).mockRejectedValueOnce(failure);
+
+      await expect(service.linkToPath(source, destination)).rejects.toBe(failure);
+
+      expect(open).not.toHaveBeenCalled();
+      await expectPreservedSource();
+      await expectEmptyDestination();
+    });
+  });
+
   it('streams multipart input to a temporary file and reports its actual size', async () => {
     const result = await service.streamToTemp(Readable.from(payload));
     expect(result.sizeBytes).toBe(payload.length);
@@ -107,6 +156,29 @@ describe('UploadStorageService', () => {
     );
     await expect(service.streamToTemp(input)).rejects.toBe(failure);
     expect(await readdir(control.tempDir)).toEqual(['source.epub']);
+  });
+
+  it('gives up a source that sends nothing for the idle timeout and removes its temporary file', async () => {
+    const input = new PassThrough();
+    input.write(payload);
+
+    await expect(service.streamToTemp(input, undefined, { idleTimeoutMs: 20 })).rejects.toBeInstanceOf(RequestTimeoutException);
+    expect(await readdir(control.tempDir)).toEqual(['source.epub']);
+  });
+
+  it('keeps reading a source that keeps sending, however long it takes in all', async () => {
+    const input = new PassThrough();
+    const sent = (async () => {
+      for (let index = 0; index < 4; index += 1) {
+        input.write(payload);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      input.end();
+    })();
+
+    const result = await service.streamToTemp(input, undefined, { idleTimeoutMs: 40 });
+    await sent;
+    expect(result.sizeBytes).toBe(payload.length * 4);
   });
 
   it('uses rename directly on the same filesystem, without opening a staging file', async () => {

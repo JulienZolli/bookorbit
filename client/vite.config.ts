@@ -6,10 +6,13 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { lucideIconsPlugin } from './build/vite-plugin-lucide-icons'
 
 const apiAgent = new Agent({ keepAlive: true })
 /** Lets a second dev client point at a throwaway API instance, so restart testing leaves the main stack alone. */
-const apiTarget = process.env.BOOKORBIT_API_TARGET ?? 'http://localhost:3000'
+const apiTarget = process.env.BOOKORBIT_API_TARGET ?? 'http://localhost:6262'
+const offlineShellUrl = '__bookorbit_offline_shell'
+const localeCatalogModule = /[\\/]src[\\/]locales[\\/]([A-Za-z-]+)\.json(?:\?.*)?$/
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -22,6 +25,7 @@ export default defineConfig({
     vue(),
     vueDevTools(),
     tailwindcss(),
+    lucideIconsPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
@@ -89,12 +93,43 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-        globIgnores: ['**/assets/foliate/**'],
-        navigateFallback: 'index.html',
-        navigateFallbackDenylist: [/^\/api\//],
+        // Lucide icon files and non-English catalogs are fetched on demand and cached at runtime
+        // below; precaching them would download every icon and every language on install.
+        globIgnores: ['**/assets/foliate/**', '**/assets/lucide/**', '**/assets/locale-catalog-*.js'],
+        // Keep the offline shell at a separate path. Workbox maps '/' and its query variants to
+        // precached index.html before the NetworkFirst route can contact the auth proxy.
+        manifestTransforms: [
+          (entries) => ({
+            manifest: entries.map((entry) => (entry.url === 'index.html' ? { ...entry, url: offlineShellUrl } : entry)),
+          }),
+        ],
+        navigateFallback: null,
         runtimeCaching: [
           {
-            urlPattern: /^.*\/api\/v1\/books\/\d+\/cover(\?.*)?$/,
+            // Page loads must hit the network first: an edge auth proxy (e.g. Cloudflare Access) needs to
+            // see every navigation to redirect an expired session to its login page. Serving the precached
+            // shell unconditionally (the old `navigateFallback` behavior) hid the request from the proxy
+            // entirely and left the app stuck logged out with no way back in short of clearing site data.
+            urlPattern: ({ request, url }) => request.mode === 'navigate' && !url.pathname.startsWith('/api/'),
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'app-shell',
+              // No networkTimeoutSeconds: a slow proxy redirect must win over the cached page.
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              precacheFallback: {
+                fallbackURL: offlineShellUrl,
+              },
+              // Status 0 here would include an auth proxy's opaqueredirect and cache it as the page.
+              cacheableResponse: {
+                statuses: [200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/books\/\d+\/cover\?(?:[^#]*&)?t=[^#]*$/,
             handler: 'CacheFirst',
             options: {
               cacheName: 'book-covers',
@@ -108,7 +143,7 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /^.*\/api\/v1\/books\/\d+\/thumbnail(\?.*)?$/,
+            urlPattern: /^.*\/api\/v1\/books\/\d+\/thumbnail\?(?:[^#]*&)?t=[^#]*$/,
             handler: 'CacheFirst',
             options: {
               cacheName: 'book-thumbnails',
@@ -121,6 +156,54 @@ export default defineConfig({
               },
             },
           },
+          {
+            urlPattern: /^.*\/api\/v1\/books\/\d+\/cover(\?.*)?$/,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'book-covers',
+              expiration: {
+                maxEntries: 200,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/books\/\d+\/thumbnail(\?.*)?$/,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'book-thumbnails',
+              expiration: {
+                maxEntries: 200,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            // Content-hashed names, so a cached catalog is never stale.
+            urlPattern: /\/assets\/locale-catalog-[^/]+\.js$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'locale-catalogs',
+              expiration: { maxEntries: 4 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+          {
+            // The folder is named after the Lucide version, so a cached icon is never stale.
+            urlPattern: /\/assets\/lucide\/[^/]+\/[a-z0-9-]+\.svg$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'lucide-icons',
+              expiration: { maxEntries: 300 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
         ],
       },
       devOptions: {
@@ -129,6 +212,22 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rolldownOptions: {
+      output: {
+        // Without a group, every icon shared between two chunks becomes its own sub-kilobyte file,
+        // and the first page preloads well over a hundred of them.
+        codeSplitting: {
+          groups: [{ name: 'lucide-icons', test: /[\\/]@lucide[\\/]vue[\\/]/ }],
+        },
+        // A distinct prefix lets the service worker skip languages the user never opens.
+        chunkFileNames: (chunk) => {
+          const locale = chunk.facadeModuleId?.match(localeCatalogModule)?.[1]
+          return locale && locale !== 'en' ? 'assets/locale-catalog-[name]-[hash].js' : 'assets/[name]-[hash].js'
+        },
+      },
+    },
+  },
   resolve: {
     dedupe: ['vue'],
     alias: {
@@ -138,9 +237,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['@tanstack/vue-virtual'],
-    exclude: ['@embedpdf/core', '@embedpdf/core/vue'],
   },
   server: {
+    port: 6263,
+    strictPort: true,
     host: true,
     allowedHosts: true,
     proxy: {

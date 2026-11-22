@@ -1,16 +1,22 @@
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
 import { BadRequestException, ForbiddenException, HttpException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   ACTIVE_BOOK_REQUEST_DOWNLOAD_STATUSES,
   ACTIVE_BOOK_REQUEST_STATUSES,
   BOOK_REQUEST_ACTION_ERROR_CODES,
+  BOOK_REQUEST_LIST_VIEWS,
   BOOK_REQUEST_MEDIA_KINDS,
+  BOOK_REQUEST_SELECT_ALL_LIMIT,
   BOOK_REQUEST_STATUSES,
   BOOK_REQUEST_SUBMIT_ERROR_CODES,
+  BOOK_REQUEST_VIEW_STATUSES,
   CANCELLABLE_BOOK_REQUEST_STATUSES,
   emptyResolvedRequestDestinations,
+  NO_RESOLVED_REQUEST_DESTINATION,
   FULFILLABLE_BOOK_REQUEST_STATUSES,
   isBookRequestFulfiller,
   isCancellableBookRequestStatus,
+  isBookRequestMediaKind,
   isFulfillableBookRequestStatus,
   isSettledBookRequestStatus,
   NotificationType,
@@ -26,37 +32,55 @@ import type {
   BookRequestFailureMeta,
   BookRequestSubmitErrorCode,
   BookRequestItem,
+  BookRequestListView,
+  BookRequestMediaKind,
   BookRequestMetadataSource,
   BookRequestPage,
+  BookRequestPairSubmitResult,
   BookRequestRequesterOption,
   BookRequestStatus,
   BookRequestSubmitResult,
   BookRequestBulkFailure,
   BookRequestBulkResult,
+  BookRequestSelection,
+  BookRequestSelectionEntry,
   BookRequestSourceStatus,
   BookRequestSummary,
+  BookRequestViewCounts,
+  LegacyBookRequestMediaKind,
+  ResolvedRequestDestination,
   ResolvedRequestDestinations,
 } from '@bookorbit/types';
 
 import { StatsCache } from '../../common/cache/stats-cache';
 import { isUniqueViolation } from '../../common/utils/db-error.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import type { RequestUser } from '../../common/types/request-user';
-import type { BookRequestRow } from '../../db/schema';
+import { principalCacheKey, type RequestUser } from '../../common/types/request-user';
+import type { BookRequestRow, NewBookRequestRow } from '../../db/schema';
 import { LibraryService } from '../library/library.service';
 import { BookRequestAttributionService } from './book-request-attribution.service';
-import { BookRequestDedupeService, dedupeKeyCandidates, primaryDedupeKey } from './book-request-dedupe.service';
+import { BookRequestDedupeService, dedupeKeyCandidates, primaryDedupeKey, type WorkIdentity } from './book-request-dedupe.service';
 import { BookRequestGateway } from './book-request.gateway';
 import { BookRequestNotifier } from './book-request-notifier.service';
-import { mapBookRequestRow } from './book-request.mapper';
+import { downloadAlwaysDeletesRemote, mapBookRequestRow } from './book-request.mapper';
 import { BookRequestDownloadRepository } from './fulfillment/book-request-download.repository';
 import { DownloadRemovalService } from './fulfillment/download-removal.service';
-import { BookRequestRepository, type BookRequestJoinedRow } from './book-request.repository';
+import {
+  BookRequestRepository,
+  type BookPlacement,
+  type BookRequestJoinedRow,
+  type BookRequestListRow,
+  type BookRequestSelectionRequest,
+  type RequestListFilters,
+} from './book-request.repository';
 import { RequestAutomationService } from './fulfillment/request-automation.service';
+import { RequestCompanionService } from './fulfillment/request-companion.service';
+import { RETIRED_MEDIUM_REFUSAL } from './retired-media';
 import { RequestAutomationSettingsService } from './fulfillment/request-automation-settings.service';
 import { IndexerConfigService } from './indexers/indexer-config.service';
+import type { BookRequestWorkDto, CreateBookRequestDto } from './dto/create-book-request.dto';
+import type { CreateBookRequestPairDto } from './dto/create-book-request-pair.dto';
 import { RequestIdentifierEnrichmentService } from './request-identifier-enrichment.service';
-import type { CreateBookRequestDto } from './dto/create-book-request.dto';
 import type { DecideBookRequestDto } from './dto/decide-book-request.dto';
 import type { FulfillBookRequestDto } from './dto/fulfill-book-request.dto';
 import type { BulkBookRequestsDto, BulkRejectBookRequestsDto } from './dto/bulk-book-requests.dto';
@@ -139,6 +163,57 @@ function actionForbidden(errorCode: BookRequestActionErrorCode, message: string,
   return new ForbiddenException({ message, errorCode, ...(errorMeta ? { errorMeta } : {}), statusCode: HttpStatus.FORBIDDEN });
 }
 
+/**
+ * A list's filters with one view applied. Without a view the list is exactly what it was before
+ * views existed; with one, the view alone decides whether the viewer's hidden rows are included.
+ */
+function withView(
+  filters: RequestListFilters,
+  viewerId: number,
+  view: BookRequestListView | undefined,
+  includeDismissed: boolean | undefined,
+): RequestListFilters {
+  if (view === undefined) return { ...filters, excludeDismissedFor: includeDismissed ? undefined : viewerId };
+  if (view === 'hidden') return { ...filters, onlyDismissedFor: viewerId };
+  return { ...filters, statuses: BOOK_REQUEST_VIEW_STATUSES[view], excludeDismissedFor: viewerId };
+}
+
+/** What one medium of a submission decides for itself; the work is shared. */
+interface SubmitHalf {
+  mediaKind: BookRequestMediaKind;
+  targetLibraryId: number | null;
+  targetFolderId: number | null;
+  preferredFormats: string[];
+  coverUrl: string | null;
+  /** The book a missing format was requested from, already checked against the requester. */
+  targetBook: BookPlacement | null;
+}
+
+interface PlanBase {
+  work: WorkIdentity;
+  selfServe: boolean;
+  /** The book this half's files should join when they arrive, when there is one to join. */
+  joinsBook: BookPlacement | null;
+}
+
+/** A submission that folds into a request somebody already made. */
+interface JoinPlan extends PlanBase {
+  kind: 'join';
+  existing: BookRequestRow;
+}
+
+/** A submission that becomes a row of its own. */
+interface CreatePlan extends PlanBase {
+  kind: 'create';
+  insert: NewBookRequestRow;
+  aliasKeys: string[];
+  autoApproved: boolean;
+  availableOnCreate: boolean;
+  settledOnCreate: boolean;
+}
+
+type SubmitPlan = JoinPlan | CreatePlan;
+
 function normalizeMetadataSources(sources: CreateBookRequestDto['metadataSources']): BookRequestMetadataSource[] {
   const seen = new Set<string>();
   const normalized: BookRequestMetadataSource[] = [];
@@ -177,6 +252,8 @@ export class BookRequestService {
     private readonly gateway: BookRequestGateway,
     private readonly attribution: BookRequestAttributionService,
     private readonly indexers: IndexerConfigService,
+    private readonly companions: RequestCompanionService,
+    private readonly libraryScope: LibraryScopeService,
     private readonly enrichment: RequestIdentifierEnrichmentService,
   ) {}
 
@@ -199,7 +276,7 @@ export class BookRequestService {
    * instance with hundreds of libraries.
    */
   private async reachableLibraryIds(user: RequestUser): Promise<number[] | null> {
-    return user.isSuperuser ? null : this.libraryService.findAccessibleLibraryIds(user);
+    return this.libraryScope.visibleIdsOrAll(user);
   }
 
   /**
@@ -234,7 +311,202 @@ export class BookRequestService {
     // Everything below asks about the subject and never about the actor: their permissions, their
     // libraries, their cap, their notifications. The actor stays the actor in the audit log.
     const subject = await this.attribution.resolveSubject(actor, dto.userId);
+    const selfServe = this.resolveSelfServe(dto, subject);
 
+    const half: SubmitHalf = {
+      mediaKind: dto.mediaKind,
+      targetLibraryId: dto.targetLibraryId ?? null,
+      targetFolderId: dto.targetFolderId ?? null,
+      preferredFormats: dto.preferredFormats ?? [],
+      coverUrl: dto.coverUrl ?? null,
+      targetBook: dto.targetBookId === undefined ? null : await this.resolveTargetBook(dto.targetBookId, dto.mediaKind, subject),
+    };
+
+    const plan = await this.planSubmission(dto, half, subject, actor, selfServe);
+    if (plan.kind === 'join') return this.joinPlanned(plan, subject);
+
+    let row: BookRequestRow | undefined;
+    // Two people hitting Request on the same book at once: the loser of the insert race is folded
+    // into the winner rather than shown a 500. The winner can be gone by the time we look for it -
+    // cancelled, rejected or deleted in that same instant - and then the claim it held is free
+    // again, so the insert that just lost would now succeed. One retry is the whole difference
+    // between that submission going through and a requester being told a book they can have does
+    // not exist.
+    for (let attempt = 0; row === undefined; attempt++) {
+      const lastAttempt = attempt >= SUBMIT_INSERT_ATTEMPTS - 1;
+      try {
+        row = await this.createRequest(plan.selfServe && !plan.availableOnCreate, plan.insert, plan.aliasKeys);
+      } catch (error: unknown) {
+        if (!isUniqueViolation(error)) throw error;
+        const winner = await this.dedupe.findActiveRequestFor(plan.work);
+        if (!winner) {
+          if (lastAttempt) throw error;
+          continue;
+        }
+        try {
+          return await this.joinPlanned(
+            { kind: 'join', existing: winner, work: plan.work, selfServe: plan.selfServe, joinsBook: plan.joinsBook },
+            subject,
+          );
+        } catch (joinError: unknown) {
+          // The winner was deleted between finding it and reading it back. Same recovery.
+          if (!(joinError instanceof NotFoundException)) throw joinError;
+          if (lastAttempt) throw error;
+        }
+      }
+    }
+
+    this.afterCreate(row, plan);
+    this.gateway.emitChanged();
+
+    if (!plan.settledOnCreate) {
+      await this.notifier.notifyApprovers(NotificationType.BookRequestSubmitted, {
+        title: 'New book request',
+        message: `${subject.name} requested "${row.title}"`,
+        actionUrl: '/requests?tab=all',
+        meta: { requestId: row.id },
+      });
+    }
+
+    const joined = await this.repo.findById(row.id);
+    if (!joined) throw new NotFoundException('Book request not found');
+    return { request: await this.toItem(joined, subject.id), subscribed: false };
+  }
+
+  /**
+   * An ebook and an audiobook of one work, asked for together.
+   *
+   * Each half goes through exactly the rules a single request does - it may join a request that
+   * already exists, arrive already available, or be created - and both are worked out before
+   * either is written, so a half the rules refuse never leaves the other one behind. What the pair
+   * adds is the link between the halves, one announcement for the approvers rather than two, and
+   * the book the second half should join when the first is already on the shelf.
+   */
+  async submitPair(dto: CreateBookRequestPairDto, actor: RequestUser): Promise<BookRequestPairSubmitResult> {
+    const subject = await this.attribution.resolveSubject(actor, dto.userId);
+    const selfServe = this.resolveSelfServe(dto, subject);
+    const halves = BOOK_REQUEST_MEDIA_KINDS.map((mediaKind): SubmitHalf => {
+      const half = dto[mediaKind];
+      return {
+        mediaKind,
+        targetLibraryId: half?.targetLibraryId ?? null,
+        targetFolderId: half?.targetFolderId ?? null,
+        preferredFormats: half?.preferredFormats ?? [],
+        coverUrl: half?.coverUrl ?? dto.coverUrl ?? null,
+        targetBook: null,
+      };
+    });
+
+    for (let attempt = 0; ; attempt++) {
+      const lastAttempt = attempt >= SUBMIT_INSERT_ATTEMPTS - 1;
+      // Sequential on purpose: the second half's ownership probe is the same query as the first's,
+      // and a refusal on the ebook should not have spent the audiobook's lookups.
+      const plans: SubmitPlan[] = [];
+      for (const half of halves) plans.push(await this.planSubmission(dto, half, subject, actor, selfServe));
+      await this.pointAtOwnedCompanion(plans);
+
+      const creates = plans.filter((plan): plan is CreatePlan => plan.kind === 'create');
+      let created: BookRequestRow[] = [];
+      if (creates.length > 0) {
+        const newSelfServe = creates.filter((plan) => plan.selfServe && !plan.availableOnCreate).length;
+        try {
+          const rows = await this.repo.createPair(
+            creates.map((plan) => ({ data: plan.insert, aliasKeys: plan.aliasKeys })),
+            newSelfServe > 0 ? { userId: subject.id, maxLive: MAX_LIVE_SELF_SERVE_REQUESTS, newRows: newSelfServe } : null,
+          );
+          if (!rows) throw this.selfServeLimitRefusal();
+          created = rows;
+        } catch (error: unknown) {
+          // Somebody claimed one of these works between planning and inserting. Both inserts rolled
+          // back together, so planning again sees that request and joins it instead.
+          if (!isUniqueViolation(error) || lastAttempt) throw error;
+          continue;
+        }
+      }
+
+      const results = new Map<BookRequestMediaKind, BookRequestSubmitResult>();
+      const rowIds = new Map<BookRequestMediaKind, number>();
+      for (const plan of plans) {
+        const mediaKind = plan.work.mediaKind as BookRequestMediaKind;
+        if (plan.kind === 'join') {
+          const result = await this.joinPlanned(plan, subject);
+          results.set(mediaKind, result);
+          rowIds.set(mediaKind, result.request.id);
+          continue;
+        }
+        const row = created.find((candidate) => candidate.mediaKind === mediaKind);
+        if (!row) throw new NotFoundException('Book request not found');
+        rowIds.set(mediaKind, row.id);
+        this.afterCreate(row, plan);
+      }
+
+      // Two new halves were linked inside their own transaction; anything that joined an existing
+      // request is linked to its partner here, against whatever that request is paired with now.
+      const ebookId = rowIds.get('ebook')!;
+      const audiobookId = rowIds.get('audiobook')!;
+      if (created.length < 2) await this.repo.linkCompanions(ebookId, audiobookId);
+
+      this.gateway.emitChanged();
+      await this.announcePair(subject, creates, created);
+
+      for (const mediaKind of BOOK_REQUEST_MEDIA_KINDS) {
+        if (results.has(mediaKind)) {
+          // Re-read after linking, so the joined half reports the companion it now has.
+          const joined = await this.repo.findById(rowIds.get(mediaKind)!);
+          if (joined) results.set(mediaKind, { ...results.get(mediaKind)!, request: await this.toItem(joined, subject.id) });
+          continue;
+        }
+        const joined = await this.repo.findById(rowIds.get(mediaKind)!);
+        if (!joined) throw new NotFoundException('Book request not found');
+        results.set(mediaKind, { request: await this.toItem(joined, subject.id), subscribed: false });
+      }
+
+      this.logger.log(
+        `[book_request.create_pair] [end] userId=${subject.id} ebookRequestId=${ebookId} audiobookRequestId=${audiobookId} created=${created.length} - book request pair submitted`,
+      );
+      return { ebook: results.get('ebook')!, audiobook: results.get('audiobook')! };
+    }
+  }
+
+  /**
+   * Explicit rather than inferred from the permission. Inferring it would silently turn
+   * `BookRequestSelfFulfill` into auto-approval for every ordinary request its holder makes.
+   */
+  private resolveSelfServe(dto: { selfServe?: boolean }, subject: RequestUser): boolean {
+    const selfServe = dto.selfServe === true;
+    if (selfServe && !this.canSelfFulfil(subject)) {
+      throw submitForbidden('SUBMIT_SELF_FULFIL_FORBIDDEN', 'You cannot fulfil your own book requests');
+    }
+    return selfServe;
+  }
+
+  /**
+   * The book a missing format was asked for from, checked the way any other reference to a book is:
+   * it has to be somewhere the requester can reach, and it has to actually be missing that format.
+   */
+  private async resolveTargetBook(bookId: number, mediaKind: BookRequestMediaKind, subject: RequestUser): Promise<BookPlacement> {
+    const [placement, reachable] = await Promise.all([this.repo.findBookPlacement(bookId), this.reachableLibraryIds(subject)]);
+    if (!placement || placement.status !== 'present' || (reachable !== null && !reachable.includes(placement.libraryId))) {
+      throw submitRefusal('SUBMIT_TARGET_BOOK_NOT_FOUND', 'That book is not in a library you can reach');
+    }
+    if ((await this.repo.findBookMediaKinds(bookId)).has(mediaKind)) {
+      throw submitRefusal('SUBMIT_TARGET_BOOK_HAS_MEDIUM', `That book already has a ${mediaKind}`, { mediaKind });
+    }
+    return placement;
+  }
+
+  /**
+   * One medium's submission, worked out but not yet written: either the live request it joins, or
+   * the row it would insert. Every refusal a submission can raise is raised here, before anything
+   * is written, which is what lets a pair refuse both halves cleanly.
+   */
+  private async planSubmission(
+    dto: BookRequestWorkDto,
+    half: SubmitHalf,
+    subject: RequestUser,
+    actor: RequestUser,
+    selfServe: boolean,
+  ): Promise<SubmitPlan> {
     const metadataSources = normalizeMetadataSources(dto.metadataSources);
     // Before the dedupe, so a request that gains an ISBN here folds into one filed under it.
     const enriched = dto.title.trim()
@@ -246,30 +518,28 @@ export class BookRequestService {
           coverUrl: dto.coverUrl ?? null,
         })
       : { subtitle: dto.subtitle ?? null, isbn13: dto.isbn13 ?? null };
-    const work = {
+    const work: WorkIdentity = {
       title: dto.title.trim(),
       authors: dto.authors ?? [],
       isbn13: enriched.isbn13,
       providerKey: dto.providerKey ?? null,
       providerId: dto.providerId ?? null,
       metadataSources,
-      mediaKind: dto.mediaKind,
+      mediaKind: half.mediaKind,
     };
 
     if (!work.title) throw submitRefusal('SUBMIT_TITLE_REQUIRED', 'A title is required');
 
-    // Explicit rather than inferred from the permission. Inferring it would silently turn
-    // `BookRequestSelfFulfill` into auto-approval for every ordinary request its holder makes.
-    const selfServe = dto.selfServe === true;
-    if (selfServe && !this.canSelfFulfil(subject)) {
-      throw submitForbidden('SUBMIT_SELF_FULFIL_FORBIDDEN', 'You cannot fulfil your own book requests');
-    }
+    // A book that can hold another format pins where this one lands: next to the format it has.
+    // A loose-file library cannot hold two formats as one book, so there the request lands the way
+    // any other does and becomes a book of its own.
+    const joinsBook = half.targetBook !== null && half.targetBook.organizationMode === 'book_per_folder' ? half.targetBook : null;
 
     // Fold into an existing live request rather than opening a second one. A second grab of the
     // same torrent is exactly what the dedupe claim exists to prevent, so even a self-server is
     // folded - but folded as the person who is going to fulfil it, not as a bystander.
     const existing = await this.dedupe.findActiveRequestFor(work);
-    if (existing) return selfServe ? this.takeOnOrAttach(existing, subject) : this.attachTo(existing.id, subject);
+    if (existing) return { kind: 'join', existing, selfServe, work, joinsBook };
 
     const maySeeRequestedBooks = subject.contentFilters.exemptRequestsFromUserId === subject.id;
     const existingBookId = maySeeRequestedBooks ? await this.dedupe.findOwnedBookFor(work, await this.reachableLibraryIds(subject)) : null;
@@ -277,9 +547,12 @@ export class BookRequestService {
     let targetLibraryId: number | null = null;
     let targetFolderId: number | null = null;
 
-    if (existingBookId === null) {
-      targetLibraryId = await this.resolveRequestedLibrary(dto.targetLibraryId ?? null, subject);
-      targetFolderId = await this.resolveDestinationFolder(dto.targetFolderId ?? null, targetLibraryId);
+    if (existingBookId === null && joinsBook) {
+      targetLibraryId = joinsBook.libraryId;
+      targetFolderId = joinsBook.libraryFolderId;
+    } else if (existingBookId === null) {
+      targetLibraryId = await this.resolveRequestedLibrary(half.targetLibraryId, subject);
+      targetFolderId = await this.resolveDestinationFolder(half.targetFolderId, targetLibraryId);
 
       // The instance default for this medium, which is the last rung: the requester named nowhere,
       // and the medium is the only thing about the eventual file that is known this early.
@@ -288,7 +561,7 @@ export class BookRequestService {
       // operator chose it for the whole instance, and a requester who cannot see that library is
       // exactly who the default exists for.
       if (targetLibraryId === null) {
-        const fallback = await this.automationSettings.resolveDestinationFor(dto.mediaKind);
+        const fallback = await this.automationSettings.resolveDestinationFor(half.mediaKind);
 
         // The one exception to "the operator chose it for the instance". A self-server is the person
         // filing the book, with nobody reviewing where it lands, so an unreachable default would let
@@ -321,15 +594,15 @@ export class BookRequestService {
       throw submitRefusal('SUBMIT_DESTINATION_REQUIRED', 'Pick a destination library: your own requests are approved without a second pair of eyes');
     }
 
-    const insert = {
+    const insert: NewBookRequestRow = {
       userId: subject.id,
       createdByUserId: this.attribution.createdByUserIdFor(actor, subject),
-      mediaKind: dto.mediaKind,
-      status: availableOnCreate ? ('available' as const) : approvedOnCreate ? ('approved' as const) : ('pending' as const),
+      mediaKind: half.mediaKind,
+      status: availableOnCreate ? 'available' : approvedOnCreate ? 'approved' : 'pending',
       selfServe,
       title: work.title,
       subtitle: enriched.subtitle,
-      authors: work.authors,
+      authors: work.authors ?? [],
       seriesName: dto.seriesName ?? null,
       seriesIndex: dto.seriesIndex ?? null,
       isbn10: dto.isbn10 ?? null,
@@ -339,53 +612,70 @@ export class BookRequestService {
       // or nothing at all. The matcher compares codes, so anything else is a filter that either
       // rejects everything or agrees by accident.
       language: toRequestLanguage(dto.language),
-      coverUrl: dto.coverUrl ?? null,
+      coverUrl: half.coverUrl,
       providerKey: dto.providerKey ?? null,
       providerId: dto.providerId ?? null,
       metadataSources,
-      preferredFormats: dto.preferredFormats ?? [],
+      preferredFormats: half.preferredFormats,
       note: dto.note ?? null,
       targetLibraryId,
       targetFolderId,
       matchedBookId: existingBookId,
+      targetBookId: availableOnCreate ? null : (joinsBook?.bookId ?? null),
       dedupeKey: primaryDedupeKey(work),
       decidedByUserId: approvedOnCreate ? subject.id : null,
       decidedAt: approvedOnCreate ? new Date() : null,
     };
-    // Every other key this work could have hashed to, so a later requester who reaches it a
-    // different way still collides with this row rather than opening a second one.
-    const aliasKeys = dedupeKeyCandidates(work);
 
-    let row: BookRequestRow | undefined;
-    // Two people hitting Request on the same book at once: the loser of the insert race is folded
-    // into the winner rather than shown a 500. The winner can be gone by the time we look for it -
-    // cancelled, rejected or deleted in that same instant - and then the claim it held is free
-    // again, so the insert that just lost would now succeed. One retry is the whole difference
-    // between that submission going through and a requester being told a book they can have does
-    // not exist.
-    for (let attempt = 0; row === undefined; attempt++) {
-      const lastAttempt = attempt >= SUBMIT_INSERT_ATTEMPTS - 1;
-      try {
-        row = await this.createRequest(selfServe && !availableOnCreate, insert, aliasKeys);
-      } catch (error: unknown) {
-        if (!isUniqueViolation(error)) throw error;
-        const winner = await this.dedupe.findActiveRequestFor(work);
-        if (!winner) {
-          if (lastAttempt) throw error;
-          continue;
-        }
-        try {
-          return selfServe ? await this.takeOnOrAttach(winner, subject) : await this.attachTo(winner.id, subject);
-        } catch (joinError: unknown) {
-          // The winner was deleted between finding it and reading it back. Same recovery.
-          if (!(joinError instanceof NotFoundException)) throw joinError;
-          if (lastAttempt) throw error;
-        }
-      }
+    return {
+      kind: 'create',
+      work,
+      insert,
+      // Every other key this work could have hashed to, so a later requester who reaches it a
+      // different way still collides with this row rather than opening a second one.
+      aliasKeys: dedupeKeyCandidates(work),
+      selfServe,
+      autoApproved,
+      availableOnCreate,
+      settledOnCreate,
+      joinsBook,
+    };
+  }
+
+  /**
+   * Joining a live request, as the person who is going to fulfil it when they asked to. A request
+   * made from a book's page also tells the joined request which book to land in, unless that
+   * request already lands somewhere else.
+   */
+  private async joinPlanned(plan: JoinPlan, subject: RequestUser): Promise<BookRequestSubmitResult> {
+    const result = plan.selfServe ? await this.takeOnOrAttach(plan.existing, subject) : await this.attachTo(plan.existing.id, subject);
+    if (plan.joinsBook && plan.existing.targetLibraryId === plan.joinsBook.libraryId) {
+      await this.repo.setTargetBookIfUnset(plan.existing.id, plan.joinsBook.bookId);
     }
+    return result;
+  }
 
+  /**
+   * When one half of a pair is already on the shelf, the half still to come should land beside it
+   * rather than wherever its own metadata would file it. Only within one library that keeps a book
+   * per folder: a pair asked for into two different libraries is two books by the requester's own
+   * choice, and a loose-file library cannot hold two formats as one book.
+   */
+  private async pointAtOwnedCompanion(plans: SubmitPlan[]): Promise<void> {
+    const owned = plans.find((plan): plan is CreatePlan => plan.kind === 'create' && plan.availableOnCreate);
+    const pending = plans.find((plan): plan is CreatePlan => plan.kind === 'create' && !plan.availableOnCreate);
+    if (!owned?.insert.matchedBookId || !pending || pending.insert.targetBookId) return;
+
+    const placement = await this.repo.findBookPlacement(owned.insert.matchedBookId);
+    if (!placement || placement.status !== 'present' || placement.organizationMode !== 'book_per_folder') return;
+    if (pending.insert.targetLibraryId !== placement.libraryId) return;
+    pending.insert.targetBookId = placement.bookId;
+  }
+
+  /** Everything a freshly inserted request sets in motion besides the announcement. */
+  private afterCreate(row: BookRequestRow, plan: CreatePlan): void {
     this.logger.log(
-      `[book_request.create] [end] requestId=${row.id} userId=${row.userId} createdByUserId=${row.createdByUserId ?? '-'} mediaKind=${row.mediaKind} autoApproved=${autoApproved} selfServe=${selfServe} availableOnCreate=${availableOnCreate} title="${sanitizeLogValue(row.title)}" - book request created`,
+      `[book_request.create] [end] requestId=${row.id} userId=${row.userId} createdByUserId=${row.createdByUserId ?? '-'} mediaKind=${row.mediaKind} autoApproved=${plan.autoApproved} selfServe=${plan.selfServe} availableOnCreate=${plan.availableOnCreate} title="${sanitizeLogValue(row.title)}" - book request created`,
     );
 
     // An auto-approving user never waits for a decision, so there is nobody to open the picker:
@@ -395,25 +685,35 @@ export class BookRequestService {
     //
     // Never for a self-server, who is on their way to the picker right now. Automation would race
     // them onto a release they did not choose, which is the opposite of what they asked for.
-    if (!availableOnCreate && autoApproved && !selfServe) this.automation.considerRequest(row.id, 'auto_approval');
+    if (!plan.availableOnCreate && plan.autoApproved && !plan.selfServe) this.automation.considerRequest(row.id, 'auto_approval');
+  }
 
-    // Every page answers this with a fetch, so it is what puts a new submission in front of the
-    // approvers without them reloading. After the create rather than after the notification: an
-    // approver whose queue is already open sees the row arrive whether or not they are notified.
-    this.gateway.emitChanged();
+  /**
+   * One announcement for a pair, naming both media when both are waiting. Two notifications for
+   * one ask is the queue counting the same person twice.
+   */
+  private async announcePair(subject: RequestUser, plans: CreatePlan[], rows: BookRequestRow[]): Promise<void> {
+    const waiting = rows.filter((row) => plans.some((plan) => plan.insert.mediaKind === row.mediaKind && !plan.settledOnCreate));
+    if (waiting.length === 0) return;
 
-    if (!settledOnCreate) {
-      await this.notifier.notifyApprovers(NotificationType.BookRequestSubmitted, {
-        title: 'New book request',
-        message: `${subject.name} requested "${row.title}"`,
-        actionUrl: '/requests?tab=all',
-        meta: { requestId: row.id },
-      });
-    }
+    const lead = waiting.find((row) => row.mediaKind === 'ebook') ?? waiting[0]!;
+    await this.notifier.notifyApprovers(NotificationType.BookRequestSubmitted, {
+      title: 'New book request',
+      message:
+        waiting.length > 1 ? `${subject.name} requested "${lead.title}" as an ebook and an audiobook` : `${subject.name} requested "${lead.title}"`,
+      actionUrl: '/requests?tab=all',
+      meta: { requestId: lead.id },
+    });
+  }
 
-    const joined = await this.repo.findById(row.id);
-    if (!joined) throw new NotFoundException('Book request not found');
-    return { request: await this.toItem(joined, subject.id), subscribed: false };
+  private selfServeLimitRefusal(): ForbiddenException {
+    return submitForbidden(
+      'SUBMIT_SELF_SERVE_LIMIT',
+      `Finish or cancel some downloads first: ${MAX_LIVE_SELF_SERVE_REQUESTS} can be in flight at once`,
+      {
+        limit: MAX_LIVE_SELF_SERVE_REQUESTS,
+      },
+    );
   }
 
   /**
@@ -429,13 +729,7 @@ export class BookRequestService {
     if (!selfServe) return this.repo.create(data, aliasKeys);
 
     const row = await this.repo.createWithinSelfServeCap(data, aliasKeys, MAX_LIVE_SELF_SERVE_REQUESTS);
-    if (!row) {
-      throw submitForbidden(
-        'SUBMIT_SELF_SERVE_LIMIT',
-        `Finish or cancel some downloads first: ${MAX_LIVE_SELF_SERVE_REQUESTS} can be in flight at once`,
-        { limit: MAX_LIVE_SELF_SERVE_REQUESTS },
-      );
-    }
+    if (!row) throw this.selfServeLimitRefusal();
     return row;
   }
 
@@ -535,7 +829,7 @@ export class BookRequestService {
   private async resolveRequestedLibrary(targetLibraryId: number | null, user: RequestUser): Promise<number | null> {
     if (targetLibraryId === null) return null;
     try {
-      await this.libraryService.verifyUserAccess(user.id, targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyAccess(user, targetLibraryId);
     } catch (error) {
       // The rule belongs to the library service; only the sentence is ours, and the form has to be
       // able to translate this the way it translates every other reason a submission is refused.
@@ -560,8 +854,11 @@ export class BookRequestService {
    * requester submits with no idea where the book goes. Not filtered by what this user can browse,
    * for the same reason the default itself is not: the operator chose it for the instance, and a
    * requester who cannot see that library is exactly who is looking at an empty select.
+   *
+   * The retired `comic` is still answered, always with no destination: released iOS builds decode
+   * it as a required field, and without it their whole request screen fails to load.
    */
-  async getDefaultDestinations(): Promise<ResolvedRequestDestinations> {
+  async getDefaultDestinations(): Promise<ResolvedRequestDestinations & Record<LegacyBookRequestMediaKind, ResolvedRequestDestination>> {
     const resolved = await Promise.all(
       BOOK_REQUEST_MEDIA_KINDS.map(async (mediaKind) => [mediaKind, await this.automationSettings.resolveDestinationFor(mediaKind)] as const),
     );
@@ -576,38 +873,108 @@ export class BookRequestService {
         folderId: destination.folderId,
       };
     }
-    return destinations;
+    return { ...destinations, comic: { ...NO_RESOLVED_REQUEST_DESTINATION } };
   }
 
   async listMine(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestPage> {
     const { items, total } = await this.repo.findAll({
+      ...withView(this.mineFilters(dto, user), user.id, dto.view, dto.includeDismissed),
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
-      status: dto.status,
-      mediaKind: dto.mediaKind,
-      userId: user.id,
-      selfServe: dto.selfServe,
-      excludeDismissedFor: dto.includeDismissed ? undefined : user.id,
       sortBy: dto.sortBy,
       sortDir: dto.sortDir,
+      groupPairs: dto.groupPairs,
     });
-    return { items: await this.toItems(items, user.id), total };
+    return { items: await this.toListItems(items, user.id, dto.groupPairs === true), total };
   }
 
   async listAll(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestPage> {
     if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
     const { items, total } = await this.repo.findAll({
+      ...withView(this.allFilters(dto), user.id, dto.view, dto.includeDismissed),
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
-      status: dto.status,
-      mediaKind: dto.mediaKind,
-      requesterUserId: dto.requesterUserId,
-      selfServe: dto.selfServe,
-      excludeDismissedFor: dto.includeDismissed ? undefined : user.id,
       sortBy: dto.sortBy,
       sortDir: dto.sortDir,
+      groupPairs: dto.groupPairs,
     });
-    return { items: await this.toItems(items, user.id), total };
+    return { items: await this.toListItems(items, user.id, dto.groupPairs === true), total };
+  }
+
+  async getMineViewCounts(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestViewCounts> {
+    return this.countViews(this.mineFilters(dto, user), user.id);
+  }
+
+  async getAllViewCounts(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestViewCounts> {
+    if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
+    return this.countViews(this.allFilters(dto), user.id);
+  }
+
+  async selectMine(dto: ListBookRequestsDto, user: RequestUser): Promise<BookRequestSelection> {
+    return this.selectMatching(withView(this.mineFilters(dto, user), user.id, dto.view, dto.includeDismissed), dto, user.id);
+  }
+
+  async selectAll(dto: ListAllBookRequestsDto, user: RequestUser): Promise<BookRequestSelection> {
+    if (!this.canManageAll(user)) throw new ForbiddenException('You cannot view all book requests');
+    return this.selectMatching(withView(this.allFilters(dto), user.id, dto.view, dto.includeDismissed), dto, user.id);
+  }
+
+  /** The personal list: what the caller asked for or follows, narrowed by what they filtered on. */
+  private mineFilters(dto: ListBookRequestsDto, user: RequestUser): RequestListFilters {
+    return { status: dto.status, mediaKind: dto.mediaKind, selfServe: dto.selfServe, search: dto.q, userId: user.id };
+  }
+
+  /** The approver queue: everybody's requests, narrowed by what the approver filtered on. */
+  private allFilters(dto: ListAllBookRequestsDto): RequestListFilters {
+    return { status: dto.status, mediaKind: dto.mediaKind, selfServe: dto.selfServe, search: dto.q, requesterUserId: dto.requesterUserId };
+  }
+
+  /**
+   * One count per view, each the total the grouped list would report for that view under the same
+   * filters. Read in parallel, and through the same where clause the list is built from.
+   */
+  private async countViews(filters: RequestListFilters, viewerId: number): Promise<BookRequestViewCounts> {
+    const unhidden: RequestListFilters = { ...filters, excludeDismissedFor: viewerId };
+    const [active, awaitingManualPick, ...perView] = await Promise.all([
+      this.repo.countRows(unhidden),
+      this.repo.countRows({ ...unhidden, statuses: ['approved'], failureCode: 'AUTOMATION_DISABLED' }),
+      ...BOOK_REQUEST_LIST_VIEWS.map((view) => this.repo.countRows(withView(filters, viewerId, view, undefined))),
+    ]);
+    const byView = Object.fromEntries(BOOK_REQUEST_LIST_VIEWS.map((view, index) => [view, perView[index] ?? 0])) as Record<
+      BookRequestListView,
+      number
+    >;
+    return { active, ...byView, awaitingManualPick };
+  }
+
+  /**
+   * "Select all matching": every request in the first rows of the grouped list, in list order. A
+   * pair's companion is reported alongside its lead and under the lead's row, because that is the
+   * row a selection on the page holds it by.
+   */
+  private async selectMatching(
+    filters: RequestListFilters,
+    dto: Pick<ListBookRequestsDto, 'sortBy' | 'sortDir'>,
+    viewerId: number,
+  ): Promise<BookRequestSelection> {
+    const { rows, totalRows } = await this.repo.findSelection(
+      { ...filters, sortBy: dto.sortBy, sortDir: dto.sortDir },
+      viewerId,
+      BOOK_REQUEST_SELECT_ALL_LIMIT,
+    );
+    const entry = (request: BookRequestSelectionRequest, rowId: number): BookRequestSelectionEntry => ({
+      id: request.id,
+      rowId,
+      title: request.title,
+      mediaKind: request.mediaKind as BookRequestMediaKind,
+      status: request.status as BookRequestStatus,
+      userId: request.userId,
+      fulfillerUserId: request.fulfillerUserId,
+      dismissed: request.dismissed,
+      subscribed: request.subscribed && request.userId !== viewerId,
+    });
+    const items = rows.flatMap(({ lead, companion }) => (companion ? [entry(lead, lead.id), entry(companion, lead.id)] : [entry(lead, lead.id)]));
+    return { items, totalRows, truncated: totalRows > BOOK_REQUEST_SELECT_ALL_LIMIT };
   }
 
   listRequesterOptions(dto: ListRequesterOptionsDto): Promise<BookRequestRequesterOption[]> {
@@ -650,7 +1017,7 @@ export class BookRequestService {
    * started, or correct the language the picker is matching against, has taken on work they can
    * only run forwards.
    */
-  private canDrive(request: BookRequestRow, user: RequestUser): boolean {
+  canDrive(request: Pick<BookRequestRow, 'userId' | 'fulfillerUserId'>, user: RequestUser): boolean {
     if (request.userId === user.id || this.canManageAll(user)) return true;
     return this.canSelfFulfil(user) && isBookRequestFulfiller(request, user.id);
   }
@@ -672,14 +1039,15 @@ export class BookRequestService {
 
   /**
    * Stop, at any point before the request has settled. A request that is mid-download is stopped
-   * at its transfer handler too. Torrent data is kept because an import may hardlink from it;
+   * at its transfer handler too. Torrent data is kept because an import may hardlink from it, and a
+   * torrent that already finished is left seeding unless the caller asked for its files to go;
    * partial direct-download staging has no reuse and is deleted.
    *
    * The removal is best-effort on purpose. A download client that is unreachable must not be the
    * reason a stuck request stays stuck, so the cancellation stands either way and the request
    * carries a note that a transfer may still be sitting in the client.
    */
-  async cancel(id: number, user: RequestUser): Promise<BookRequestItem> {
+  async cancel(id: number, user: RequestUser, deleteFiles = false): Promise<BookRequestItem> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
 
@@ -704,7 +1072,7 @@ export class BookRequestService {
     });
     if (!updated) throw await this.staleLifecycleTransition(id, 'cancel');
 
-    const outcome = await this.removal.removeLatestForRequest(id, false, user.username);
+    const outcome = await this.removal.removeLatestForRequest(id, deleteFiles, user.username);
     // The cancellation stands either way; the note is what tells the requester a transfer may
     // still be sitting in the client. Conditional, so it cannot resurrect a row a delete removed.
     if (outcome.error) {
@@ -726,7 +1094,7 @@ export class BookRequestService {
    * This is intentionally separate from `cancel`: the request, its subscribers, and its approval
    * remain intact.
    */
-  async cancelDownload(id: number, downloadId: number, user: RequestUser): Promise<BookRequestItem> {
+  async cancelDownload(id: number, downloadId: number, user: RequestUser, deleteFiles = false): Promise<BookRequestItem> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
     if (!this.canDrive(joined.request, user)) throw new ForbiddenException('You cannot cancel this book request download');
@@ -737,7 +1105,7 @@ export class BookRequestService {
       throw new BadRequestException(`A download that is ${download.status} can no longer be cancelled`);
     }
 
-    const stopped = await this.removal.removeAttempt(id, downloadId, false, user.username);
+    const stopped = await this.removal.removeAttempt(id, downloadId, deleteFiles, user.username);
     if (!stopped) throw new BadRequestException('The download finished before it could be cancelled');
 
     await this.repo.updateIf(id, ACTIVE_TRANSFER_REQUEST_STATUSES, { status: 'approved', statusReason: null });
@@ -814,11 +1182,12 @@ export class BookRequestService {
    * who decided goes with them, which is why this is a moderator action and dismissal is what
    * everyone else gets.
    *
-   * A settled request can still own client state, especially a torrent that keeps seeding after
-   * import, so the attempt is detached first. Deleting the row before that would leave client work
-   * with nothing pointing at it. Torrent files are kept; direct-download staging is disposable.
+   * A settled request can still own client state, so the attempt is detached first: deleting the
+   * row before that would leave a running transfer with nothing pointing at it. A finished torrent
+   * is the exception. Without consent to delete its files it is left seeding, and the client, not
+   * BookOrbit, owns it from then on. Direct-download staging is disposable.
    */
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, deleteFiles = false): Promise<void> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
     if (!this.canManageAll(user)) throw new ForbiddenException('You cannot delete book requests');
@@ -834,7 +1203,7 @@ export class BookRequestService {
       throw await this.staleTransition(id, (status) => `A request that is ${status} is still being worked on; cancel it before deleting it`);
     }
 
-    const outcome = await this.removal.removeLatestForRequest(id, false, user.username);
+    const outcome = await this.removal.removeLatestForRequest(id, deleteFiles, user.username);
     if (outcome.error) {
       if (reservedFailed) await this.repo.updateIf(id, ['cancelled'], { status: 'failed' });
       throw new BadRequestException(`Remove the download from its client first: ${outcome.error}`);
@@ -854,6 +1223,10 @@ export class BookRequestService {
   async approve(id: number, dto: DecideBookRequestDto, user: RequestUser): Promise<BookRequestItem> {
     const joined = await this.repo.findById(id);
     if (!joined) throw new NotFoundException('Book request not found');
+    const mediaKind = joined.request.mediaKind;
+    // A request for a retired medium can still be rejected, cancelled or deleted, but approving it
+    // would hand automation a search for something no source is configured to look for.
+    if (!isBookRequestMediaKind(mediaKind)) throw new BadRequestException(RETIRED_MEDIUM_REFUSAL);
     if (joined.request.status !== 'pending') {
       throw actionRefusal('BOOK_REQUEST_NOT_PENDING', `Only a pending request can be approved; this one is ${joined.request.status}`, {
         action: 'approve',
@@ -864,15 +1237,19 @@ export class BookRequestService {
     // The approver may reroute, but only somewhere they can reach themselves.
     let targetLibraryId = joined.request.targetLibraryId;
     if (dto.targetLibraryId !== undefined && dto.targetLibraryId !== null) {
-      await this.libraryService.verifyUserAccess(user.id, dto.targetLibraryId, user.isSuperuser);
+      await this.libraryService.verifyAccess(user, dto.targetLibraryId);
       targetLibraryId = dto.targetLibraryId;
     }
 
+    // A stored folder belongs to the stored library. Rerouted elsewhere with no folder named, it
+    // would be refused as not part of the new library, and nothing the approver sends can clear it,
+    // so it is left behind and the new library's own folder is used.
+    const rerouted = targetLibraryId !== joined.request.targetLibraryId;
     // Requests made before an instance default existed carry no destination at all, and there is
     // no reason to make the approver retype one the operator has since set.
-    let carriedFolderId = dto.targetFolderId ?? joined.request.targetFolderId;
+    let carriedFolderId = dto.targetFolderId ?? (rerouted ? null : joined.request.targetFolderId);
     if (targetLibraryId === null) {
-      const fallback = await this.automationSettings.resolveDestinationFor(joined.request.mediaKind);
+      const fallback = await this.automationSettings.resolveDestinationFor(mediaKind);
       targetLibraryId = fallback.libraryId;
       carriedFolderId ??= fallback.folderId;
     }
@@ -923,24 +1300,32 @@ export class BookRequestService {
    * from the other side. Nothing is rolled back on a failure either, because an approval that has
    * already reached automation cannot be taken back cleanly; the caller is told which ids fell out
    * instead.
+   *
+   * An action that takes the request off the caller's list has no item to report, so its `run`
+   * resolves to null and the id lands in `removed`. Only those actions report `removed` at all; the
+   * ones that existed before it keep the two-list answer released clients decode.
    */
   private async runBulk(
     event: string,
     ids: number[],
     user: RequestUser,
     fallbackReason: string,
-    run: (id: number) => Promise<BookRequestItem>,
+    run: (id: number) => Promise<BookRequestItem | null>,
+    options: { reportsRemoved?: boolean } = {},
   ): Promise<BookRequestBulkResult> {
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] userId=${user.id} count=${ids.length} - applying an action to a selection of book requests`);
 
     const updated: BookRequestItem[] = [];
+    const removed: number[] = [];
     const failed: BookRequestBulkFailure[] = [];
 
     for (const id of ids) {
       const itemStartedAt = Date.now();
       try {
-        updated.push(await run(id));
+        const item = await run(id);
+        if (item === null) removed.push(id);
+        else updated.push(item);
       } catch (error) {
         // An HttpException is this service refusing on a rule it states, and the reason is the
         // sentence the operator reads. Anything else is a defect, and folding it into the same
@@ -965,10 +1350,10 @@ export class BookRequestService {
     }
 
     this.logger.log(
-      `[${event}] [end] userId=${user.id} updated=${updated.length} failed=${failed.length} durationMs=${Date.now() - startedAt} - selection applied`,
+      `[${event}] [end] userId=${user.id} updated=${updated.length} removed=${removed.length} failed=${failed.length} durationMs=${Date.now() - startedAt} - selection applied`,
     );
 
-    return { updated, failed };
+    return options.reportsRemoved ? { updated, failed, removed } : { updated, failed };
   }
 
   async approveMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
@@ -991,6 +1376,63 @@ export class BookRequestService {
   /** Hiding is personal, so this needs no moderator permission and touches nobody else's list. */
   async dismissMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
     return this.runBulk('book_request.dismiss_many', [...new Set(dto.ids)], user, 'Could not hide that request', (id) => this.dismiss(id, user));
+  }
+
+  /**
+   * Cancelling a selection. Each request's files are deleted exactly when cancelling that one row
+   * from the page would delete them: only where its client always removes the data with the
+   * transfer, so the bulk action never deletes more than the single one would have.
+   */
+  async cancelMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    const ids = [...new Set(dto.ids)];
+    const deletesRemote = await this.remoteDeletingRequestIds(ids);
+    return this.runBulk('book_request.cancel_many', ids, user, 'Could not cancel that request', (id) => this.cancel(id, user, deletesRemote.has(id)));
+  }
+
+  async restoreMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    return this.runBulk('book_request.restore_many', [...new Set(dto.ids)], user, 'Could not restore that request', (id) => this.restore(id, user));
+  }
+
+  /** Leaving a selection of requests somebody else made. Each one leaves the caller's list. */
+  async leaveMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    return this.runBulk(
+      'book_request.leave_many',
+      [...new Set(dto.ids)],
+      user,
+      'Could not leave that request',
+      async (id) => {
+        await this.unsubscribe(id, user);
+        return null;
+      },
+      { reportsRemoved: true },
+    );
+  }
+
+  /** Deleting a selection, with the same file rule `cancelMany` applies. */
+  async removeMany(dto: BulkBookRequestsDto, user: RequestUser): Promise<BookRequestBulkResult> {
+    const ids = [...new Set(dto.ids)];
+    const deletesRemote = await this.remoteDeletingRequestIds(ids);
+    return this.runBulk(
+      'book_request.delete_many',
+      ids,
+      user,
+      'Could not delete that request',
+      async (id) => {
+        await this.remove(id, user, deletesRemote.has(id));
+        return null;
+      },
+      { reportsRemoved: true },
+    );
+  }
+
+  /**
+   * The requests whose latest attempt sits with a client that always deletes the data along with
+   * the transfer, read in one batch. The same test the request's own `download.alwaysDeletesRemote`
+   * answers, which is what the page consults before a single cancel or delete.
+   */
+  private async remoteDeletingRequestIds(ids: number[]): Promise<Set<number>> {
+    const latest = await this.downloads.findLatestForRequests(ids);
+    return new Set([...latest].filter(([, download]) => downloadAlwaysDeletesRemote(download)).map(([id]) => id));
   }
 
   /**
@@ -1052,7 +1494,7 @@ export class BookRequestService {
       throw new BadRequestException(`A ${joined.request.status} request cannot be fulfilled`);
     }
     if (dto.matchedBookId == null && dto.bookDockFileId == null) {
-      throw new BadRequestException('Provide either a book or a Book Dock file to close the request');
+      throw new BadRequestException('Provide either a book or a Library Dock file to close the request');
     }
 
     // Scoped to what this actor can reach, not merely to what exists. `ManageBookRequests` says
@@ -1063,11 +1505,12 @@ export class BookRequestService {
       throw new BadRequestException('That book no longer exists');
     }
     if (dto.bookDockFileId != null && !(await this.repo.bookDockFileExists(dto.bookDockFileId, this.dockUploaderScope(user)))) {
-      throw new BadRequestException('That Book Dock file no longer exists');
+      throw new BadRequestException('That Library Dock file no longer exists');
     }
 
     // Before the transition, like cancel and delete: the person has the book already, so a transfer
-    // still running is work nothing will ever use. Detaching it after the row settled would leave
+    // still running is work nothing will ever use. A finished torrent is a seed, not unused work,
+    // and the removal leaves it in the client. Detaching after the row settled would leave
     // a window where the poll loop still owns an attempt against a filed request; leaving it out
     // altogether, as this used to, left a mid-download torrent running in the client with nothing
     // in BookOrbit pointing at it. Best-effort, so a client that is down cannot block the filing.
@@ -1109,17 +1552,21 @@ export class BookRequestService {
       message: `"${joined.request.title}" is ready`,
       meta: { requestId: id, bookId: dto.matchedBookId ?? null },
     });
+    // Closing one half of a pair by hand still tells the other half where it belongs.
+    if (dto.matchedBookId != null && (await this.companions.handOn(joined.request, dto.matchedBookId))) this.gateway.emitChanged();
 
     return this.getOne(id, user);
   }
 
   async checkAvailability(queries: BookRequestAvailabilityQuery[], user: RequestUser): Promise<BookRequestAvailability[]> {
-    const libraryIds = user.isSuperuser ? null : await this.libraryService.findAccessibleLibraryIds(user);
+    const libraryIds = await this.libraryScope.visibleIdsOrAll(user);
     return this.dedupe.checkAvailability(queries, user.id, libraryIds);
   }
 
   getSummary(user: RequestUser): Promise<BookRequestSummary> {
-    return this.summaryCache.get('book-request-summary', `${user.id}:${this.gateway.changeVersion}`, () => this.loadSummary(user));
+    return this.summaryCache.get('book-request-summary', principalCacheKey(user, `${user.id}:${this.gateway.changeVersion}`), () =>
+      this.loadSummary(user),
+    );
   }
 
   private async loadSummary(user: RequestUser): Promise<BookRequestSummary> {
@@ -1144,6 +1591,23 @@ export class BookRequestService {
     return rows.map((row) =>
       mapBookRequestRow(row, subscribers.get(row.request.id) ?? [], downloads.get(row.request.id) ?? null, dismissed.has(row.request.id)),
     );
+  }
+
+  /**
+   * A page of the list, with each pair's folded-away half attached to the half that leads it. The
+   * companions are read in one batch for the page, never one at a time.
+   */
+  private async toListItems(rows: BookRequestListRow[], viewerId: number, groupPairs: boolean): Promise<BookRequestItem[]> {
+    const items = await this.toItems(rows, viewerId);
+    if (!groupPairs) return items;
+
+    const companionIds = rows.map((row) => row.visibleCompanionId).filter((id): id is number => id !== null);
+    const companions = companionIds.length ? await this.toItems(await this.repo.findByIds(companionIds), viewerId) : [];
+    const byId = new Map(companions.map((item) => [item.id, item]));
+    return items.map((item, index) => {
+      const companionId = rows[index]!.visibleCompanionId;
+      return { ...item, companion: companionId === null ? null : (byId.get(companionId) ?? null) };
+    });
   }
 
   private async toItem(row: BookRequestJoinedRow, viewerId: number): Promise<BookRequestItem> {

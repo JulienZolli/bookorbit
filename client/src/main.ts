@@ -1,5 +1,4 @@
 import './assets/main.css'
-import './lib/echarts'
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
@@ -8,9 +7,7 @@ import App from './App.vue'
 import router from './router'
 import { i18n } from './i18n'
 import { useLocaleStore } from './stores/locale'
-import { useAuth } from './features/auth/composables/useAuth'
-import { useSetupStatus } from './features/auth/composables/useSetupStatus'
-import { useLoginOptions } from './features/auth/composables/useLoginOptions'
+import { bootstrapSession } from './features/auth/composables/useSessionBootstrap'
 
 // Chrome 124+ blocks aria-hidden from being applied to an element that contains
 // a focused descendant. Reka UI's dialog uses the aria-hidden package which sets
@@ -48,30 +45,7 @@ await localeStore.setLocale(localeStore.locale)
 
 // Resolve setup status/auth before installing router.
 // app.use(router) triggers initial navigation and guard execution.
-const { fetchSetupStatus, needsSetup } = useSetupStatus()
-try {
-  await Promise.all([fetchSetupStatus(), useLoginOptions().fetchLoginOptions()])
-} catch {
-  // If setup-status check fails, continue with normal auth bootstrap.
-}
-
-const { init } = useAuth()
-if (needsSetup.value !== true) {
-  await init()
-}
+await bootstrapSession()
 
 app.use(router)
 app.mount('#app')
-
-function prefetchPdfReader() {
-  void Promise.all([import('./features/reader/pdf-v4/PdfV4ReaderView.vue'), import('@embedpdf/pdfium/pdfium.wasm?url')]).then(([, wasm]) => {
-    void fetch(wasm.default, { cache: 'force-cache' })
-  })
-}
-
-const idleWindow = window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }
-if (idleWindow.requestIdleCallback) {
-  idleWindow.requestIdleCallback(prefetchPdfReader, { timeout: 10_000 })
-} else {
-  window.setTimeout(prefetchPdfReader, 5_000)
-}

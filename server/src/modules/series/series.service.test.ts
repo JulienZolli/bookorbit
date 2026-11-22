@@ -65,7 +65,12 @@ describe('SeriesService', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    service = new SeriesService(seriesRepo as any, bookReadService as any, libraryService as any);
+    service = new SeriesService(
+      seriesRepo as any,
+      bookReadService as any,
+      libraryService as any,
+      { enrichCardFaces: vi.fn().mockResolvedValue(undefined) } as any,
+    );
     libraryService.findAll.mockResolvedValue([{ id: 1 }, { id: 2 }]);
     libraryService.findAccessibleLibraryIds.mockResolvedValue([1, 2]);
   });
@@ -220,6 +225,36 @@ describe('SeriesService', () => {
       expect(item.volumesTruncated).toBe(true);
       expect(item.gapCount).toBe(0);
       expect(item.nextBookId).toBe(31);
+      expect(item).toMatchObject({ ownedVolumeCount: 900, readVolumeCount: 0, readingVolumeCount: 0 });
+    });
+
+    it('reports the true volume counts for a series longer than the ladder cap', async () => {
+      seriesRepo.findPage.mockResolvedValue({
+        items: [
+          summaryRow({
+            id: 10,
+            name: 'Hellblazer',
+            bookCount: 300,
+            readCount: 60,
+            members: Array.from({ length: 300 }, (_, i) => ({
+              bookId: 100 + i,
+              seriesIndex: String(i + 1),
+              title: `Issue ${i + 1}`,
+              status: i < 60 ? 'read' : null,
+            })),
+          }),
+        ],
+        total: 1,
+        facets: { ...EMPTY_FACETS, all: 1, inProgress: 1 },
+        page: 0,
+        size: 50,
+      });
+
+      const item = (await service.findAll(reqUser(), {})).items[0]!;
+
+      expect(item.volumes).toHaveLength(60);
+      expect(item.volumesTruncated).toBe(true);
+      expect(item).toMatchObject({ ownedVolumeCount: 300, readVolumeCount: 60, readingVolumeCount: 0 });
     });
 
     it('scopes to specific library when libraryId provided', async () => {
@@ -332,6 +367,35 @@ describe('SeriesService', () => {
       expect(result.seriesInfo.authors).toEqual(['Frank Herbert']);
       expect(result.items).toHaveLength(3);
       expect(result.total).toBe(3);
+    });
+
+    it('reports logical volume counts without changing raw book counts', async () => {
+      seriesRepo.findDetail.mockResolvedValue({
+        id: 42,
+        name: 'Two formats',
+        bookCount: 4,
+        readCount: 2,
+        authors: [],
+        indices: ['1', '1', '2', '2'],
+        expectedBookCount: 3,
+        members: [
+          { seriesIndex: '1', status: null },
+          { seriesIndex: '1', status: 'read' },
+          { seriesIndex: '2', status: 'reading' },
+          { seriesIndex: '2', status: 'read' },
+        ],
+      });
+      seriesRepo.findBookIds.mockResolvedValue({ bookIds: [], total: 4 });
+
+      const result = await service.findBooks(reqUser(), 42, {});
+
+      expect(result.seriesInfo).toMatchObject({
+        bookCount: 4,
+        readCount: 2,
+        ownedVolumeCount: 2,
+        readVolumeCount: 2,
+        possibleGaps: [3],
+      });
     });
 
     it('preserves book order from repository', async () => {
@@ -448,6 +512,8 @@ describe('SeriesService', () => {
       expect(result.seriesInfo.authors).toEqual(['Frank Herbert']);
       expect(result.seriesInfo.possibleGaps).toEqual([]);
       expect(result.seriesInfo.bookCount).toBe(0);
+      expect(result.seriesInfo.ownedVolumeCount).toBe(0);
+      expect(result.seriesInfo.readVolumeCount).toBe(0);
     });
 
     it('throws 404 when series does not exist in any library', async () => {
@@ -462,6 +528,57 @@ describe('SeriesService', () => {
       seriesRepo.findBookIds.mockResolvedValue({ bookIds: [], total: 0 });
 
       await expect(service.findBooks(reqUser(), 42, {})).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('libraries hidden from Series', () => {
+    const hidingUser = () => ({ ...reqUser(), settings: { libraryVisibility: { hidden: { series: [2] } } } });
+    const dune = { id: 42, name: 'Dune', bookCount: 1, readCount: 0, authors: [], indices: ['1'] };
+
+    it('lists series from shown libraries only', async () => {
+      seriesRepo.findPage.mockResolvedValue({ items: [], total: 0, facets: EMPTY_FACETS, page: 0, size: 50 });
+
+      await service.findAll(hidingUser(), {});
+
+      expect(seriesRepo.findPage).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [1] }));
+    });
+
+    it('still lists a hidden library picked in the library filter', async () => {
+      seriesRepo.findPage.mockResolvedValue({ items: [], total: 0, facets: EMPTY_FACETS, page: 0, size: 50 });
+
+      await service.findAll(hidingUser(), { libraryId: 2 });
+
+      expect(seriesRepo.findPage).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [2] }));
+    });
+
+    it('counts series the way the Series page lists them', async () => {
+      seriesRepo.countSeries.mockResolvedValue(3);
+
+      await service.countAll(hidingUser());
+
+      expect(seriesRepo.countSeries).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [1] }));
+    });
+
+    it('shows a mixed series with the books from shown libraries', async () => {
+      seriesRepo.findDetail.mockResolvedValue(dune);
+      seriesRepo.findBookIds.mockResolvedValue({ bookIds: [], total: 0 });
+
+      await service.findBooks(hidingUser(), 42, {});
+
+      expect(seriesRepo.findDetail).toHaveBeenCalledTimes(1);
+      expect(seriesRepo.findDetail).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [1] }));
+      expect(seriesRepo.findBookIds).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [1] }));
+    });
+
+    it('opens a series kept only in hidden libraries with all its books', async () => {
+      seriesRepo.findDetail.mockResolvedValueOnce(null).mockResolvedValueOnce(dune);
+      seriesRepo.findBookIds.mockResolvedValue({ bookIds: [], total: 0 });
+
+      const result = await service.findBooks(hidingUser(), 42, {});
+
+      expect(result.seriesInfo.name).toBe('Dune');
+      expect(seriesRepo.findDetail).toHaveBeenLastCalledWith(expect.objectContaining({ libraryIds: [1, 2] }));
+      expect(seriesRepo.findBookIds).toHaveBeenLastCalledWith(expect.objectContaining({ libraryIds: [1, 2] }));
     });
   });
 
@@ -611,13 +728,24 @@ describe('SeriesService', () => {
       expect([...params.formats].sort()).toEqual(['cb7', 'cbr', 'cbz']);
     });
 
-    it('allows every readable format when no group is requested', async () => {
+    it('offers DjVu only to a caller that says it can open it', async () => {
+      seriesRepo.findNextReadableBook.mockResolvedValue(null);
+
+      await service.findNextBook(reqUser(), 42, 90, { formatGroup: 'cbx', includeDjvu: true });
+      await service.findNextBook(reqUser(), 42, 90, { includeDjvu: true });
+
+      expect([...seriesRepo.findNextReadableBook.mock.calls[0]![0].formats].sort()).toEqual(['cb7', 'cbr', 'cbz', 'djvu']);
+      expect(seriesRepo.findNextReadableBook.mock.calls[1]![0].formats).toContain('djvu');
+    });
+
+    it('allows every readable format except opt-in ones when no group is requested', async () => {
       seriesRepo.findNextReadableBook.mockResolvedValue(null);
 
       await service.findNextBook(reqUser(), 42, 90, {});
 
       const params = seriesRepo.findNextReadableBook.mock.calls[0]![0];
       expect(params.formats).toEqual(expect.arrayContaining(['epub', 'pdf', 'cbz', 'm4b']));
+      expect(params.formats).not.toContain('djvu');
     });
 
     it('applies the user content filters and exempts superusers', async () => {

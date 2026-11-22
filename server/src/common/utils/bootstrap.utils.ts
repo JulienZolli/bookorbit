@@ -116,6 +116,18 @@ export function shouldInjectEmptyJsonBody(method: string, headers: IncomingHttpH
   return contentLength === undefined || contentLength === '0';
 }
 
+// The injected '{}' rewrites content-length and becomes the parsed body, so only this marker still
+// says the client sent nothing. App Attest needs that to hash the bytes the client really signed.
+const requestsWithInjectedEmptyBody = new WeakSet<object>();
+
+export function markEmptyBodyInjected(request: object): void {
+  requestsWithInjectedEmptyBody.add(request);
+}
+
+export function hasInjectedEmptyBody(request: object): boolean {
+  return requestsWithInjectedEmptyBody.has(request);
+}
+
 export function buildEmptyJsonBodyStream(headers: IncomingHttpHeaders): Readable {
   headers['content-length'] = String(Buffer.byteLength(EMPTY_JSON_BODY));
   return Readable.from([Buffer.from(EMPTY_JSON_BODY)]);
@@ -171,4 +183,18 @@ export function applyDeclaredBodyLimit(route: { config?: unknown; bodyLimit?: nu
 
 export function registerDeclaredBodyLimits(fastify: FastifyInstance): void {
   fastify.addHook('onRoute', applyDeclaredBodyLimit);
+}
+
+/**
+ * `@fastify/compress` reads its per-route opt-out from the route options, which Nest's
+ * `@RouteConfig({ compress: false })` cannot reach. Raw file routes need it: the plugin's default
+ * type check gzips `+xml` and `octet-stream` bodies (FB2, unknown formats) and drops Content-Length.
+ * Register before the compress plugin so this hook runs first.
+ */
+export function applyDeclaredCompressionOptOut(route: { config?: unknown; compress?: unknown }): void {
+  if ((route.config as { compress?: unknown } | undefined)?.compress === false) route.compress = false;
+}
+
+export function registerDeclaredCompressionOptOuts(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredCompressionOptOut);
 }

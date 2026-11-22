@@ -15,6 +15,7 @@ export interface BookRenameData {
     relPath: string | null;
     format: string | null;
     role: string;
+    mediaOverlayAvailable: boolean;
   };
   libraryId: number;
   libraryName: string;
@@ -29,6 +30,7 @@ export interface BookRenameData {
     subtitle: string | null;
     publisher: string | null;
     language: string | null;
+    isbn10: string | null;
     isbn13: string | null;
     publishedYear: number | null;
     seriesName: string | null;
@@ -44,6 +46,14 @@ export interface BookFilePathUpdate {
   relPath: string | null;
 }
 
+export interface FolderOwner {
+  bookId: number;
+  title: string | null;
+  primaryAuthor: string | null;
+}
+
+const FOLDER_OWNER_BATCH_SIZE = 500;
+
 @Injectable()
 export class FileRenameRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
@@ -56,6 +66,7 @@ export class FileRenameRepository {
         relPath: bookFiles.relPath,
         format: bookFiles.format,
         role: bookFiles.role,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryFolderId: bookFiles.libraryFolderId,
         libraryFolderPath: libraryFolders.path,
         libraryId: books.libraryId,
@@ -68,6 +79,7 @@ export class FileRenameRepository {
         subtitle: bookMetadata.subtitle,
         publisher: bookMetadata.publisher,
         language: bookMetadata.language,
+        isbn10: bookMetadata.isbn10,
         isbn13: bookMetadata.isbn13,
         publishedYear: bookMetadata.publishedYear,
         seriesName: bookMetadata.seriesName,
@@ -104,6 +116,7 @@ export class FileRenameRepository {
         relPath: row.relPath,
         format: row.format,
         role: row.role,
+        mediaOverlayAvailable: row.mediaOverlayAvailable,
       },
       libraryId: row.libraryId,
       libraryName: row.libraryName,
@@ -118,6 +131,7 @@ export class FileRenameRepository {
         subtitle: row.subtitle,
         publisher: row.publisher,
         language: row.language,
+        isbn10: row.isbn10,
         isbn13: row.isbn13,
         publishedYear: row.publishedYear,
         seriesName: row.seriesName,
@@ -137,6 +151,7 @@ export class FileRenameRepository {
         role: bookFiles.role,
         format: bookFiles.format,
         sortOrder: bookFiles.sortOrder,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
       })
       .from(bookFiles)
       .where(eq(bookFiles.bookId, bookId))
@@ -160,66 +175,47 @@ export class FileRenameRepository {
     });
   }
 
-  async findBookByExactFolderPath(
-    libraryId: number,
-    folderPath: string,
-  ): Promise<Pick<typeof books.$inferSelect, 'id' | 'folderPath' | 'primaryFileId' | 'status'> | null> {
-    const [row] = await this.db
-      .select({
-        id: books.id,
-        folderPath: books.folderPath,
-        primaryFileId: books.primaryFileId,
-        status: books.status,
-      })
-      .from(books)
-      .where(and(eq(books.libraryId, libraryId), eq(books.folderPath, folderPath)))
-      .limit(1);
+  /** The book that holds each folder, keyed by folder path. Folders no book holds are absent. */
+  async findFolderOwners(libraryId: number, folderPaths: string[]): Promise<Map<string, FolderOwner>> {
+    const owners = new Map<string, FolderOwner>();
+    const uniquePaths = [...new Set(folderPaths)];
 
-    return row ?? null;
-  }
-
-  async applyExistingFolderMerge(input: {
-    sourceBookId: number;
-    targetBookId: number;
-    updates: BookFilePathUpdate[];
-    fallbackPrimaryFileId: number | null;
-  }): Promise<void> {
-    if (input.sourceBookId === input.targetBookId) return;
-
-    await this.db.transaction(async (tx) => {
-      const now = new Date();
-      const [target] = await tx
-        .select({ libraryFolderId: books.libraryFolderId, primaryFileId: books.primaryFileId })
+    for (let i = 0; i < uniquePaths.length; i += FOLDER_OWNER_BATCH_SIZE) {
+      const batch = uniquePaths.slice(i, i + FOLDER_OWNER_BATCH_SIZE);
+      const rows = await this.db
+        .select({ bookId: books.id, folderPath: books.folderPath, title: bookMetadata.title })
         .from(books)
-        .where(eq(books.id, input.targetBookId))
-        .for('update')
-        .limit(1);
-      if (!target) return;
+        .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
+        .where(and(eq(books.libraryId, libraryId), inArray(books.folderPath, batch)));
+      if (rows.length === 0) continue;
 
-      for (const update of input.updates) {
-        await tx
-          .update(bookFiles)
-          .set({
-            bookId: input.targetBookId,
-            libraryFolderId: target.libraryFolderId,
-            absolutePath: update.absolutePath,
-            relPath: update.relPath,
-            updatedAt: now,
-          })
-          .where(eq(bookFiles.id, update.id));
+      const ownerIds = rows.map((row) => row.bookId);
+      const authorRows = await this.db
+        .select({ bookId: bookAuthors.bookId, name: authors.name })
+        .from(bookAuthors)
+        .innerJoin(authors, eq(authors.id, bookAuthors.authorId))
+        .where(inArray(bookAuthors.bookId, ownerIds))
+        .orderBy(asc(bookAuthors.bookId), asc(bookAuthors.displayOrder));
+      const primaryAuthorByBookId = new Map<number, string>();
+      for (const author of authorRows) {
+        if (!primaryAuthorByBookId.has(author.bookId)) primaryAuthorByBookId.set(author.bookId, author.name);
       }
 
-      await tx.delete(books).where(eq(books.id, input.sourceBookId));
+      for (const row of rows) {
+        owners.set(row.folderPath, {
+          bookId: row.bookId,
+          title: row.title ?? null,
+          primaryAuthor: primaryAuthorByBookId.get(row.bookId) ?? null,
+        });
+      }
+    }
 
-      await tx
-        .update(books)
-        .set({
-          ...(target?.primaryFileId == null && input.fallbackPrimaryFileId != null ? { primaryFileId: input.fallbackPrimaryFileId } : {}),
-          status: 'present',
-          updatedAt: now,
-        })
-        .where(eq(books.id, input.targetBookId));
-    });
+    return owners;
+  }
+
+  /** Runs a rename-merge's database half: the caller passes the transaction to `BookConsolidationService`. */
+  transaction<T>(work: (tx: Parameters<Parameters<Db['transaction']>[0]>[0]) => Promise<T>): Promise<T> {
+    return this.db.transaction(work);
   }
 
   async checkPathTakenByOtherBook(absolutePath: string, currentBookId: number): Promise<boolean> {

@@ -10,7 +10,9 @@ import {
   CARD_INFO_MODES,
   CARD_OVERLAY_KEYS,
   COVER_SIZE_SCOPES,
+  FORMAT_BADGE_STYLES,
   GRID_CARD_LABEL_FIELDS,
+  PLACEHOLDER_COVER_STYLES,
   SERIES_CARD_COVER_MODES,
   TABLE_DENSITIES,
   type AuthorCoverShape,
@@ -24,7 +26,9 @@ import {
   type CardOverlayKey,
   type CoverSizeScope,
   type DisplayPreferences,
+  type FormatBadgeStyle,
   type GridCardLabelField,
+  type PlaceholderCoverStyle,
   type SeriesCardCoverMode,
   type TableDensity,
 } from '@bookorbit/types'
@@ -42,7 +46,9 @@ export type {
   CardOverlayKey,
   CoverSizeScope,
   DisplayPreferences,
+  FormatBadgeStyle,
   GridCardLabelField,
+  PlaceholderCoverStyle,
   SeriesCardCoverMode,
   TableDensity,
 } from '@bookorbit/types'
@@ -55,8 +61,16 @@ const DEFAULT_BOOK_SHADOW_STRENGTH: BookShadowStrength = 'default'
 const DEFAULT_BOOK_COVER_DISPLAY_MODE: BookCoverDisplayMode = 'blurred-fit'
 const DEFAULT_BOOK_DETAIL_COVER_TINT: BookDetailCoverTint = 'off'
 const DEFAULT_SERIES_CARD_COVER_MODE: SeriesCardCoverMode = 'stack'
-const DEFAULT_BOOK_THUMBNAIL_CLICK_ACTION: BookThumbnailClickAction = 'reader'
+const DEFAULT_BOOK_THUMBNAIL_CLICK_ACTION: BookThumbnailClickAction = 'details'
+const DEFAULT_PLACEHOLDER_COVER_STYLE: PlaceholderCoverStyle = 'bauhaus'
 const DEFAULT_CARD_OVERLAYS: CardOverlayKey[] = ['progress-bar', 'format', 'rating', 'read-status', 'series-position']
+const DEFAULT_FORMAT_BADGE_STYLE: FormatBadgeStyle = 'underline'
+
+function normalizeFormatBadgeStyle(value: unknown): FormatBadgeStyle {
+  return typeof value === 'string' && FORMAT_BADGE_STYLES.includes(value as FormatBadgeStyle)
+    ? (value as FormatBadgeStyle)
+    : DEFAULT_FORMAT_BADGE_STYLE
+}
 
 function normalizeBookSpineOverlay(value: unknown): BookSpineOverlay {
   return typeof value === 'string' && BOOK_SPINE_OVERLAYS.includes(value as BookSpineOverlay)
@@ -90,6 +104,12 @@ function normalizeSeriesCardCoverMode(value: unknown): SeriesCardCoverMode {
 
 function normalizeCardInfoMode(value: unknown): CardInfoMode {
   return typeof value === 'string' && CARD_INFO_MODES.includes(value as CardInfoMode) ? (value as CardInfoMode) : 'hover-overlay'
+}
+
+function normalizePlaceholderCoverStyle(value: unknown): PlaceholderCoverStyle {
+  return typeof value === 'string' && PLACEHOLDER_COVER_STYLES.includes(value as PlaceholderCoverStyle)
+    ? (value as PlaceholderCoverStyle)
+    : DEFAULT_PLACEHOLDER_COVER_STYLE
 }
 
 function normalizeThumbnailClickAction(value: unknown): BookThumbnailClickAction {
@@ -150,6 +170,7 @@ function normalizeViewMode(v: unknown): BookViewMode {
 
 const viewMode = ref<BookViewMode>(normalizeViewMode(storage.get('viewMode', 'grid')))
 const cardOverlays = ref<CardOverlayKey[]>(normalizeCardOverlays(storage.get('cardOverlays', DEFAULT_CARD_OVERLAYS)))
+const formatBadgeStyle = ref<FormatBadgeStyle>(normalizeFormatBadgeStyle(storage.get('formatBadgeStyle', DEFAULT_FORMAT_BADGE_STYLE)))
 const showJumpRails = ref(storage.get<boolean>('showJumpRails', true) !== false)
 const smartScopeFilterExpanded = ref(storage.get<boolean>('smartScopeFilterExpanded', true) === true)
 const authorCoverSize = ref(normalizePositiveInteger(storage.get('authorCoverSize', 120), 120, 100, 400))
@@ -173,6 +194,10 @@ const cardInfoMode = ref<CardInfoMode>(normalizeCardInfoMode(storage.get('cardIn
 const thumbnailClickAction = ref<BookThumbnailClickAction>(
   normalizeThumbnailClickAction(storage.get('thumbnailClickAction', DEFAULT_BOOK_THUMBNAIL_CLICK_ACTION)),
 )
+const openHighlightsInPeek = ref(storage.get<boolean>('openHighlightsInPeek', false) === true)
+const placeholderCoverStyle = ref<PlaceholderCoverStyle>(
+  normalizePlaceholderCoverStyle(storage.get('placeholderCoverStyle', DEFAULT_PLACEHOLDER_COVER_STYLE)),
+)
 
 watch(portraitCoverSize, (v) => storage.set('portraitCoverSize', v))
 watch(squareCoverSize, (v) => storage.set('squareCoverSize', v))
@@ -182,6 +207,7 @@ watch(portraitGridGap, (v) => storage.set('portraitGridGap', v))
 watch(squareGridGap, (v) => storage.set('squareGridGap', v))
 watch(viewMode, (v) => storage.set('viewMode', v))
 watch(cardOverlays, (v) => storage.set('cardOverlays', normalizeCardOverlays(v)), { deep: true })
+watch(formatBadgeStyle, (v) => storage.set('formatBadgeStyle', normalizeFormatBadgeStyle(v)))
 watch(showJumpRails, (v) => storage.set('showJumpRails', v))
 watch(smartScopeFilterExpanded, (v) => storage.set('smartScopeFilterExpanded', v))
 watch(authorCoverSize, (v) => storage.set('authorCoverSize', v))
@@ -200,6 +226,8 @@ watch(gridCardPrimaryLabel, (value) => storage.set('gridCardPrimaryLabel', norma
 watch(gridCardSecondaryLabel, (value) => storage.set('gridCardSecondaryLabel', normalizeGridCardLabelField(value)))
 watch(cardInfoMode, (value) => storage.set('cardInfoMode', normalizeCardInfoMode(value)))
 watch(thumbnailClickAction, (value) => storage.set('thumbnailClickAction', normalizeThumbnailClickAction(value)))
+watch(openHighlightsInPeek, (v) => storage.set('openHighlightsInPeek', v))
+watch(placeholderCoverStyle, (value) => storage.set('placeholderCoverStyle', normalizePlaceholderCoverStyle(value)))
 
 export function getDisplayPreferencesSnapshot(): DisplayPreferences {
   return {
@@ -211,6 +239,7 @@ export function getDisplayPreferencesSnapshot(): DisplayPreferences {
     squareGridGap: normalizePositiveInteger(squareGridGap.value, DEFAULT_GRID_GAP, 1, 80),
     viewMode: normalizeViewMode(viewMode.value),
     cardOverlays: normalizeCardOverlays(cardOverlays.value),
+    formatBadgeStyle: normalizeFormatBadgeStyle(formatBadgeStyle.value),
     showJumpRails: showJumpRails.value !== false,
     smartScopeFilterExpanded: smartScopeFilterExpanded.value === true,
     authorCoverSize: normalizePositiveInteger(authorCoverSize.value, 120, 100, 400),
@@ -229,6 +258,8 @@ export function getDisplayPreferencesSnapshot(): DisplayPreferences {
     gridCardSecondaryLabel: normalizeGridCardLabelField(gridCardSecondaryLabel.value),
     cardInfoMode: normalizeCardInfoMode(cardInfoMode.value),
     thumbnailClickAction: normalizeThumbnailClickAction(thumbnailClickAction.value),
+    openHighlightsInPeek: openHighlightsInPeek.value === true,
+    placeholderCoverStyle: normalizePlaceholderCoverStyle(placeholderCoverStyle.value),
   }
 }
 
@@ -247,6 +278,7 @@ export function sanitizeDisplayPreferences(raw: unknown): Partial<DisplayPrefere
   if (typeof obj.squareGridGap === 'number') out.squareGridGap = normalizePositiveInteger(obj.squareGridGap, DEFAULT_GRID_GAP, 1, 80)
   if (BOOK_VIEW_MODES.includes(obj.viewMode as BookViewMode)) out.viewMode = obj.viewMode as BookViewMode
   if (Array.isArray(obj.cardOverlays)) out.cardOverlays = normalizeCardOverlays(obj.cardOverlays)
+  if (FORMAT_BADGE_STYLES.includes(obj.formatBadgeStyle as FormatBadgeStyle)) out.formatBadgeStyle = obj.formatBadgeStyle as FormatBadgeStyle
   if (typeof obj.showJumpRails === 'boolean') out.showJumpRails = obj.showJumpRails
   if (typeof obj.smartScopeFilterExpanded === 'boolean') out.smartScopeFilterExpanded = obj.smartScopeFilterExpanded
   if (typeof obj.authorCoverSize === 'number') out.authorCoverSize = normalizePositiveInteger(obj.authorCoverSize, 120, 100, 400)
@@ -280,6 +312,10 @@ export function sanitizeDisplayPreferences(raw: unknown): Partial<DisplayPrefere
   if (BOOK_THUMBNAIL_CLICK_ACTION.includes(obj.thumbnailClickAction as BookThumbnailClickAction)) {
     out.thumbnailClickAction = obj.thumbnailClickAction as BookThumbnailClickAction
   }
+  if (typeof obj.openHighlightsInPeek === 'boolean') out.openHighlightsInPeek = obj.openHighlightsInPeek
+  if (PLACEHOLDER_COVER_STYLES.includes(obj.placeholderCoverStyle as PlaceholderCoverStyle)) {
+    out.placeholderCoverStyle = obj.placeholderCoverStyle as PlaceholderCoverStyle
+  }
 
   return out
 }
@@ -294,6 +330,7 @@ export function applyDisplayPreferences(raw: unknown): void {
   if (prefs.squareGridGap !== undefined) squareGridGap.value = prefs.squareGridGap
   if (prefs.viewMode !== undefined) viewMode.value = prefs.viewMode
   if (prefs.cardOverlays !== undefined) cardOverlays.value = prefs.cardOverlays
+  if (prefs.formatBadgeStyle !== undefined) formatBadgeStyle.value = prefs.formatBadgeStyle
   if (prefs.showJumpRails !== undefined) showJumpRails.value = prefs.showJumpRails
   if (prefs.smartScopeFilterExpanded !== undefined) smartScopeFilterExpanded.value = prefs.smartScopeFilterExpanded
   if (prefs.authorCoverSize !== undefined) authorCoverSize.value = prefs.authorCoverSize
@@ -312,6 +349,8 @@ export function applyDisplayPreferences(raw: unknown): void {
   if (prefs.gridCardSecondaryLabel !== undefined) gridCardSecondaryLabel.value = prefs.gridCardSecondaryLabel
   if (prefs.cardInfoMode !== undefined) cardInfoMode.value = prefs.cardInfoMode
   if (prefs.thumbnailClickAction !== undefined) thumbnailClickAction.value = prefs.thumbnailClickAction
+  if (prefs.openHighlightsInPeek !== undefined) openHighlightsInPeek.value = prefs.openHighlightsInPeek
+  if (prefs.placeholderCoverStyle !== undefined) placeholderCoverStyle.value = prefs.placeholderCoverStyle
 }
 
 export function useDisplaySettings() {
@@ -324,6 +363,7 @@ export function useDisplaySettings() {
     squareGridGap,
     viewMode,
     cardOverlays,
+    formatBadgeStyle,
     showJumpRails,
     smartScopeFilterExpanded,
     authorCoverSize,
@@ -342,5 +382,7 @@ export function useDisplaySettings() {
     gridCardSecondaryLabel,
     cardInfoMode,
     thumbnailClickAction,
+    openHighlightsInPeek,
+    placeholderCoverStyle,
   }
 }

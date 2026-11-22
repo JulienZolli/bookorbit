@@ -36,7 +36,7 @@ function handleCancel(): void {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="handleCancel">
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-scrim" @click.self="handleCancel">
     <div class="bg-card border border-border rounded-lg shadow-lg w-full max-w-lg mx-4 overflow-hidden flex flex-col h-150 max-h-[85vh]">
       <div class="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
         <h3 class="text-base font-semibold flex items-center gap-2">
@@ -73,7 +73,7 @@ function handleCancel(): void {
         </div>
 
         <label class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer shrink-0 mt-4">
-          <input v-model="writeFiles" type="checkbox" class="rounded accent-primary" />
+          <input v-model="writeFiles" type="checkbox" class="rounded-xs accent-primary" />
           {{ t('tools.entityManager.writeChangesToFiles') }}
         </label>
       </div>

@@ -13,14 +13,18 @@ import type { CommunityRatingProviderKey } from "./metadata-fetch";
  * - `startedAt` - from `user_book_status.started_at` (per-user)
  * - `finishedAt` - from `user_book_status.finished_at` (per-user)
  * - `author` - resolved via `book_authors` join to `authors.name`
+ * - `authorGender` - resolved via `book_authors` join to `authors.gender`
  * - `genre` - resolved via `book_genres` join to `genres.name`
  * - `tag` - resolved via `book_tags` join to `tags.name`
  * - `collection` - resolved via `collection_books` join to `collections.name`
  * - `library` - resolved via `books.library_id` join to `libraries.name`
- * - `format` - resolved via `book_files.format` (primary file)
+ * - `format` - matches `book_files.format` on any of the book's files, not only the primary one
+ * - `storyGuide` - whether any of the book's files has a built Story Guide artifact
  * - `fileSize` - resolved via `book_files.size_bytes` (primary file; rule values are bytes)
  * - `isbn` - matches both `isbn10` and `isbn13` in `book_metadata`
  * - `publishedDate` - uses full dates when available and falls back to published year
+ * - `cover` - either cover slot filled (`book_metadata.cover_source` is the summary of both)
+ * - `audioCover` - books whose cover media include audio, by whether their audio cover slot is filled
  * - `lockStatus` - derived from `book_metadata.locked_fields` (non-empty array = locked)
  * - `seriesStatus` - computed per-user: "up next in series" (next unstarted book whose earlier series entries are all finished)
  *
@@ -36,11 +40,13 @@ export type StaticRuleField =
   | "publishedYear"
   | "pageCount"
   | "author"
+  | "authorGender"
   | "genre"
   | "tag"
   | "collection"
   | "library"
   | "format"
+  | "storyGuide"
   | "fileSize"
   | "addedAt"
   | "startedAt"
@@ -55,6 +61,7 @@ export type StaticRuleField =
   | "isbn"
   | "metadataScore"
   | "cover"
+  | "audioCover"
   | "lockStatus"
   | "seriesStatus";
 
@@ -91,6 +98,7 @@ export type RuleOperator =
   | "before"
   | "after"
   | "withinLast"
+  | "moreThanAgo"
   | "isMissing"
   | "isPresent"
   | "isUnread"
@@ -108,19 +116,21 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
   language: ["eq", "notEq", "includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   series: ["contains", "notContains", "eq", "notEq", "includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   author: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
+  authorGender: ["includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   genre: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
   tag: ["includesAny", "includesAll", "excludesAll", "isEmpty", "isNotEmpty"],
   collection: ["includesAny", "excludesAll", "isEmpty", "isNotEmpty"],
   library: ["includesAny", "excludesAll"],
   format: ["includesAny", "excludesAll"],
+  storyGuide: ["isMissing", "isPresent"],
   fileSize: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
-  publishedDate: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
+  publishedDate: ["before", "after", "between", "withinLast", "moreThanAgo", "isEmpty", "isNotEmpty"],
   publishedYear: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   seriesIndex: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   pageCount: ["gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
-  addedAt: ["before", "after", "between", "withinLast"],
-  startedAt: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
-  finishedAt: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
+  addedAt: ["before", "after", "between", "withinLast", "moreThanAgo"],
+  startedAt: ["before", "after", "between", "withinLast", "moreThanAgo", "isEmpty", "isNotEmpty"],
+  finishedAt: ["before", "after", "between", "withinLast", "moreThanAgo", "isEmpty", "isNotEmpty"],
   fileAvailability: ["isMissing", "isPresent"],
   rating: ["eq", "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty"],
   communityRating: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
@@ -131,6 +141,7 @@ export const FIELD_OPERATORS: Record<StaticRuleField, RuleOperator[]> = {
   isbn: ["isEmpty", "isNotEmpty", "eq"],
   metadataScore: ["gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   cover: ["isMissing", "isPresent"],
+  audioCover: ["isMissing", "isPresent"],
   lockStatus: ["isLocked", "isUnlocked"],
   seriesStatus: ["isUpNext"],
 };
@@ -148,7 +159,7 @@ export const CUSTOM_FIELD_TYPE_OPERATORS: Record<CustomMetadataFieldType, RuleOp
   text: ["contains", "notContains", "startsWith", "endsWith", "eq", "notEq", "isEmpty", "isNotEmpty"],
   url: ["contains", "notContains", "startsWith", "endsWith", "eq", "notEq", "isEmpty", "isNotEmpty"],
   number: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
-  date: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
+  date: ["before", "after", "between", "withinLast", "moreThanAgo", "isEmpty", "isNotEmpty"],
   boolean: ["isTrue", "isFalse", "isEmpty", "isNotEmpty"],
 };
 
@@ -179,6 +190,7 @@ export const RULE_OPERATORS: RuleOperator[] = [
   "before",
   "after",
   "withinLast",
+  "moreThanAgo",
   "isMissing",
   "isPresent",
   "isUnread",
@@ -392,6 +404,11 @@ export type BookQuery = {
   sort: SortSpec[];
   pagination: { page: number; size: number };
   collapseSeries?: boolean;
+  /**
+   * Fold linked books into one card per group (the lead, else a stable representative). Released
+   * clients never send it, so their lists keep every book.
+   */
+  collapseLinked?: boolean;
   q?: string;
   /**
    * Shuffle seed for the `random` sort field. Every page of one listing must send the same

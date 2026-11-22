@@ -1,4 +1,4 @@
-import { MetadataProviderKey } from '@bookorbit/types';
+import { MetadataProviderKey, type ConcreteBookMediaKind } from '@bookorbit/types';
 
 export interface MetadataSearchParams {
   title?: string;
@@ -23,12 +23,21 @@ export interface MetadataSearchParams {
   // Media type of the edition being searched. Providers that carry both editions of a title use it to
   // pick one (e.g. the iTunes ebook vs audiobook entity), so it must describe the book, not the provider set.
   isAudiobook?: boolean;
+  // The medium of the book the search is for, when known. Ranking prefers a candidate of that medium
+  // over one its provider says is another (a light novel over its manga, for an EPUB), and never
+  // drops a candidate for it.
+  mediaKind?: ConcreteBookMediaKind;
   // Lets audiobook-only providers run for a book that is not an audiobook, for the flows where they were
   // explicitly asked for. Defaults to isAudiobook.
   includeAudiobookProviders?: boolean;
   // Hint for providers to cap deep candidate exploration in non-interactive flows
   // (e.g. auto-fill/background refresh where there is no manual candidate picking).
   maxCandidatesPerProvider?: number;
+  // How many ranked candidates each provider contributes. Browsing searches ask for more than matching
+  // one book needs; providers that can return that many from one request widen their page to match.
+  resultsPerProvider?: number;
+  // Automatic pipelines must not select a ComicVine run from equally plausible volume matches.
+  requireUnambiguousMatch?: boolean;
   // Interactive result lists can afford bounded cover checks. Bulk metadata pipelines must not
   // multiply one provider lookup into many thumbnail requests.
   validateCoverPlaceholders?: boolean;

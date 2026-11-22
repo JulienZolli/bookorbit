@@ -1,7 +1,14 @@
 export const CARD_OVERLAY_KEYS = ["progress-bar", "format", "rating", "read-status", "lock-status", "series-position"] as const;
 export type CardOverlayKey = (typeof CARD_OVERLAY_KEYS)[number];
 
-export const GRID_CARD_LABEL_FIELDS = ["hidden", "book-title", "series-title", "series-title-position", "author"] as const;
+/**
+ * How the file format overlay draws a book that has several formats. `primary` is one pill for the
+ * format the card opens; the others fold every format into one badge.
+ */
+export const FORMAT_BADGE_STYLES = ["primary", "bubble", "underline", "pips", "seal", "dots", "kinds"] as const;
+export type FormatBadgeStyle = (typeof FORMAT_BADGE_STYLES)[number];
+
+export const GRID_CARD_LABEL_FIELDS =["hidden", "book-title", "series-title", "series-title-position", "author"] as const;
 export type GridCardLabelField = (typeof GRID_CARD_LABEL_FIELDS)[number];
 
 export const COVER_SIZE_SCOPES = ["per-view", "synced"] as const;
@@ -37,6 +44,20 @@ export type CardInfoMode = (typeof CARD_INFO_MODES)[number];
 export const BOOK_THUMBNAIL_CLICK_ACTION = ["reader", "details"] as const;
 export type BookThumbnailClickAction = (typeof BOOK_THUMBNAIL_CLICK_ACTION)[number];
 
+/** The artwork drawn for a book that has no cover. */
+export const PLACEHOLDER_COVER_STYLES = [
+  "bauhaus",
+  "constructivist",
+  "memphis",
+  "clothbound",
+  "poster",
+  "aurora",
+  "vista",
+  "marbled",
+  "paperback",
+] as const;
+export type PlaceholderCoverStyle = (typeof PLACEHOLDER_COVER_STYLES)[number];
+
 export interface DisplayPreferences {
   portraitCoverSize: number;
   squareCoverSize: number;
@@ -46,6 +67,7 @@ export interface DisplayPreferences {
   squareGridGap: number;
   viewMode: BookViewMode;
   cardOverlays: CardOverlayKey[];
+  formatBadgeStyle: FormatBadgeStyle;
   showJumpRails: boolean;
   smartScopeFilterExpanded: boolean;
   authorCoverSize: number;
@@ -65,4 +87,7 @@ export interface DisplayPreferences {
   gridCardSecondaryLabel: GridCardLabelField;
   cardInfoMode: CardInfoMode;
   thumbnailClickAction: BookThumbnailClickAction;
+  /** Jumping to a highlight opens the book in Peek mode, leaving progress and read status untouched. */
+  openHighlightsInPeek: boolean;
+  placeholderCoverStyle: PlaceholderCoverStyle;
 }

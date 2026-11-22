@@ -7,6 +7,7 @@ import { formatDate as formatLocaleDate } from '@/i18n/formatters'
 import {
   AlertTriangle,
   Archive,
+  ArrowRight,
   ArchiveRestore,
   BookOpen,
   Calendar,
@@ -17,11 +18,14 @@ import {
   ChevronUp,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
+  Info,
   KeyRound,
   Library,
   Link2,
+  Pencil,
   RefreshCw,
   Search,
   Smartphone,
@@ -34,13 +38,22 @@ import type {
   BookCard,
   KoreaderDeviceInfo,
   KoreaderDeviceSweepInfo,
+  KoreaderLinkSuggestionCandidate,
   KoreaderManualHashLink,
   KoreaderUnmatchedBook,
+  KoreaderUnmatchedBookSuggestion,
   UpdateKoreaderCredentialsPayload,
 } from '@bookorbit/types'
+import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import SettingsTabs from './components/SettingsTabs.vue'
 import KoreaderCredentialsDialog from './KoreaderCredentialsDialog.vue'
+import KoreaderDeliverySettings from './KoreaderDeliverySettings.vue'
+import ReadAloudDeliverySelect from '@/features/delivery/components/ReadAloudDeliverySelect.vue'
+import { useReadAloudDelivery } from '@/features/delivery/composables/useReadAloudDelivery'
+import type { ReadAloudDeliveryPreference } from '@bookorbit/types'
 import KoreaderFileNamingSettings from './KoreaderFileNamingSettings.vue'
+import KoreaderDeviceRenameDialog from '@/features/koreader/components/KoreaderDeviceRenameDialog.vue'
+import { koreaderDeviceLabel, koreaderDeviceModelHint } from '@/features/koreader/lib/device-label'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import { copyToClipboard } from '@/lib/clipboard'
 import { useKoreaderSync } from '@/features/koreader/composables/useKoreaderSync'
@@ -104,23 +117,27 @@ const {
   syncStatus,
   unmatchedBooks,
   manualHashLinks,
+  linkSuggestions,
   loading,
   unmatchedLoading,
   manualLinksLoading,
   fetchSyncStatus,
   fetchUnmatchedBooks,
   fetchManualHashLinks,
+  fetchLinkSuggestions,
   createCredentials,
   updateCredentials,
   deleteCredentials,
   getSyncUrl,
   downloadPluginPackage,
   linkUnmatchedBook,
+  linkSuggestedBooks,
   dismissUnmatchedBook,
   dismissAllUnmatchedBooks,
   relinkManualHashLink,
   unlinkManualHashLink,
   setDeviceRetired,
+  setDeviceName,
   removeDevice,
 } = useKoreaderSync()
 
@@ -140,13 +157,18 @@ const selectedUnmatched = ref<KoreaderUnmatchedBook | null>(null)
 const selectedManualLink = ref<KoreaderManualHashLink | null>(null)
 const linkSearchQuery = ref('')
 const linkingBookId = ref<number | null>(null)
-const pendingLinkTarget = ref<BookCard | null>(null)
+type LinkTarget = { id: number; title: string | null; detail: string }
+const pendingLinkTarget = ref<LinkTarget | null>(null)
+const bulkLinkOpen = ref(false)
+const bulkLinking = ref(false)
 const unlinkConfirmLink = ref<KoreaderManualHashLink | null>(null)
 const unlinkingHash = ref<string | null>(null)
 const removeDeviceConfirmTarget = ref<KoreaderDeviceInfo | null>(null)
 const removingDeviceId = ref<string | null>(null)
 const retiringDeviceId = ref<string | null>(null)
 const retiredDevicesOpen = ref(false)
+const renameDeviceTarget = ref<KoreaderDeviceInfo | null>(null)
+const renamingDevice = ref(false)
 const dismissConfirmBook = ref<KoreaderUnmatchedBook | null>(null)
 const dismissingHash = ref<string | null>(null)
 const dismissAllConfirmOpen = ref(false)
@@ -170,6 +192,10 @@ onUnmounted(() => {
 })
 
 const syncUrl = computed(() => new URL('/api/v1/koreader', getSyncUrl()).toString())
+const { supported: deliverySupported } = useReadAloudDelivery('koreader-delivery-settings')
+const newReadAloudDelivery = ref<ReadAloudDeliveryPreference>('audioless_epub')
+const savingHideAudioOnlyBooks = ref(false)
+
 const hasCredentials = computed(() => !!credentials.value)
 const activeDevices = computed(() => (syncStatus.value?.devices ?? []).filter((device) => device.retiredAt === null))
 const retiredDevices = computed(() => (syncStatus.value?.devices ?? []).filter((device) => device.retiredAt !== null))
@@ -209,6 +235,13 @@ const pagedUnmatchedBooks = computed(() => {
 const unmatchedPageStart = computed(() => (unmatchedBooks.value.length === 0 ? 0 : (clampedUnmatchedPage.value - 1) * unmatchedPageSize + 1))
 const unmatchedPageEnd = computed(() => Math.min(clampedUnmatchedPage.value * unmatchedPageSize, unmatchedBooks.value.length))
 const showUnmatchedPager = computed(() => unmatchedBooks.value.length > unmatchedPageSize)
+const pagedReviewRows = computed(() =>
+  pagedUnmatchedBooks.value.map((book) => {
+    const suggestion = suggestionFor(book)
+    const single = suggestion && isSingleSuggestion(suggestion) ? suggestion.candidates[0]! : null
+    return { book, suggestion, single, matchesLabel: suggestion && !single ? possibleMatchesLabel(suggestion) : null }
+  }),
+)
 const hasPluginActivity = computed(
   () =>
     sweeps.value.length > 0 ||
@@ -236,6 +269,19 @@ const selectedLinkSubtitle = computed(() => {
 const selectedLinkLastOpen = computed(() => selectedUnmatched.value?.lastOpen ?? selectedManualLink.value?.koreaderLastOpen ?? null)
 const linkDialogTitle = computed(() =>
   selectedManualLink.value ? t('settings.reader.koreader.hashLinks.changeLinkTitle') : t('settings.reader.koreader.hashLinks.linkBookTitle'),
+)
+const suggestionsByHash = computed(() => new Map(linkSuggestions.value.map((suggestion) => [suggestion.hash, suggestion])))
+const selectedSuggestion = computed(() => (selectedUnmatched.value ? (suggestionsByHash.value.get(selectedUnmatched.value.hash) ?? null) : null))
+const selectedSuggestionLabel = computed(() => {
+  const suggestion = selectedSuggestion.value
+  if (!suggestion) return ''
+  return isSingleSuggestion(suggestion) ? t('settings.reader.koreader.hashLinks.suggestedMatch') : possibleMatchesLabel(suggestion)
+})
+const singleSuggestionLinks = computed(() =>
+  unmatchedBooks.value.flatMap((book) => {
+    const suggestion = suggestionsByHash.value.get(book.hash)
+    return suggestion && isSingleSuggestion(suggestion) ? [{ book, candidate: suggestion.candidates[0]! }] : []
+  }),
 )
 
 watch(unmatchedTotalPages, (totalPages) => {
@@ -287,8 +333,18 @@ function unmatchedBookTitle(book: KoreaderUnmatchedBook): string {
   )
 }
 
+// KOReader reports several authors on separate lines.
+function koreaderAuthorsLabel(authors: string | null | undefined): string {
+  return (authors ?? '')
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .join(', ')
+}
+
 function unmatchedBookSubtitle(book: KoreaderUnmatchedBook): string {
-  if (book.authors?.trim()) return book.authors
+  const authors = koreaderAuthorsLabel(book.authors)
+  if (authors) return authors
   return book.title?.trim() ? t('settings.reader.koreader.hashLinks.unknownAuthor') : t('settings.reader.koreader.hashLinks.noTitleOrAuthor')
 }
 
@@ -302,7 +358,8 @@ function manualLinkTitle(link: KoreaderManualHashLink): string {
 }
 
 function manualLinkSubtitle(link: KoreaderManualHashLink): string {
-  if (link.koreaderAuthors?.trim()) return link.koreaderAuthors
+  const authors = koreaderAuthorsLabel(link.koreaderAuthors)
+  if (authors) return authors
   return link.koreaderTitle?.trim() ? t('settings.reader.koreader.hashLinks.unknownAuthor') : t('settings.reader.koreader.hashLinks.noTitleOrAuthor')
 }
 
@@ -331,7 +388,7 @@ function pluginUpdateClass(sweep: KoreaderDeviceSweepInfo): string {
 onMounted(async () => {
   try {
     await fetchSyncStatus()
-    if (credentials.value) await Promise.all([fetchUnmatchedBooks(), fetchManualHashLinks()])
+    if (credentials.value) await Promise.all([fetchUnmatchedBooks(), fetchManualHashLinks(), fetchLinkSuggestions()])
   } catch (e) {
     error.value = e instanceof Error ? e.message : t('settings.reader.koreader.loadFailed')
   }
@@ -343,6 +400,7 @@ async function handleCreate() {
     await createCredentials({
       username: newUsername.value,
       password: newPassword.value,
+      ...(deliverySupported.value ? { readAloudDelivery: newReadAloudDelivery.value } : {}),
     })
     showSetupForm.value = false
     helpOpen.value = false
@@ -414,6 +472,18 @@ async function handleToggleSync(newValue: boolean) {
   }
 }
 
+async function handleToggleHideAudioOnlyBooks(newValue: boolean) {
+  savingHideAudioOnlyBooks.value = true
+  try {
+    await updateCredentials({ hideAudioOnlyBooks: newValue })
+    toast.success(newValue ? t('settings.reader.koreader.audioOnlyBooksHidden') : t('settings.reader.koreader.audioOnlyBooksShown'))
+  } catch {
+    toast.error(t('settings.reader.koreader.toggleAudioOnlyBooksFailed'))
+  } finally {
+    savingHideAudioOnlyBooks.value = false
+  }
+}
+
 async function handleDelete() {
   try {
     await deleteCredentials()
@@ -443,7 +513,7 @@ async function handleCopySyncUrl() {
 async function handleRefresh() {
   try {
     await fetchSyncStatus(true)
-    if (credentials.value) await Promise.all([fetchUnmatchedBooks(), fetchManualHashLinks()])
+    if (credentials.value) await Promise.all([fetchUnmatchedBooks(), fetchManualHashLinks(), fetchLinkSuggestions()])
     toast.success(t('settings.reader.koreader.statusRefreshed'))
   } catch {
     toast.error(t('settings.reader.koreader.refreshFailed'))
@@ -452,11 +522,11 @@ async function handleRefresh() {
 
 async function handleRefreshUnmatched() {
   try {
-    await fetchUnmatchedBooks()
+    await Promise.all([fetchUnmatchedBooks(), fetchLinkSuggestions()])
     unmatchedPage.value = 1
-    toast.success(t('settings.reader.koreader.hashLinks.toast.unmatchedRefreshed'))
+    toast.success(t('settings.reader.koreader.hashLinks.toast.reviewRefreshed'))
   } catch {
-    toast.error(t('settings.reader.koreader.hashLinks.toast.unmatchedRefreshFailed'))
+    toast.error(t('settings.reader.koreader.hashLinks.toast.reviewRefreshFailed'))
   }
 }
 
@@ -499,10 +569,10 @@ async function handleDismissUnmatchedBook() {
   dismissingHash.value = dismissConfirmBook.value.hash
   try {
     await dismissUnmatchedBook(dismissConfirmBook.value.hash)
-    toast.success(t('settings.reader.koreader.hashLinks.toast.unmatchedDismissed'))
+    toast.success(t('settings.reader.koreader.hashLinks.toast.reviewDismissed'))
     handleCloseDismiss()
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : t('settings.reader.koreader.hashLinks.toast.dismissFailed'))
+    toast.error(e instanceof Error ? e.message : t('settings.reader.koreader.hashLinks.toast.reviewDismissFailed'))
   } finally {
     dismissingHash.value = null
   }
@@ -521,14 +591,14 @@ async function handleDismissAllUnmatchedBooks() {
   try {
     const result = await dismissAllUnmatchedBooks()
     toast.success(
-      t('settings.reader.koreader.hashLinks.toast.allDismissed', {
+      t('settings.reader.koreader.hashLinks.toast.reviewAllDismissed', {
         count: result.count,
       }),
     )
     dismissAllConfirmOpen.value = false
     unmatchedPage.value = 1
   } catch (e) {
-    toast.error(e instanceof Error ? e.message : t('settings.reader.koreader.hashLinks.toast.dismissAllFailed'))
+    toast.error(e instanceof Error ? e.message : t('settings.reader.koreader.hashLinks.toast.reviewDismissAllFailed'))
   } finally {
     dismissingAll.value = false
   }
@@ -552,7 +622,80 @@ function handleCloseLink() {
 }
 
 function handleChooseLinkTarget(book: BookCard) {
-  pendingLinkTarget.value = book
+  pendingLinkTarget.value = { id: book.id, title: book.title ?? null, detail: bookSearchSubtitle(book) }
+}
+
+function handleChooseSuggestedTarget(candidate: KoreaderLinkSuggestionCandidate) {
+  pendingLinkTarget.value = { id: candidate.bookId, title: candidateTitle(candidate), detail: candidateDetail(candidate) }
+}
+
+function suggestionFor(book: KoreaderUnmatchedBook): KoreaderUnmatchedBookSuggestion | null {
+  return suggestionsByHash.value.get(book.hash) ?? null
+}
+
+function isSingleSuggestion(suggestion: KoreaderUnmatchedBookSuggestion): boolean {
+  return suggestion.candidates.length === 1 && !suggestion.moreCandidates
+}
+
+function possibleMatchesLabel(suggestion: KoreaderUnmatchedBookSuggestion): string {
+  const count = suggestion.candidates.length
+  return suggestion.moreCandidates
+    ? t('settings.reader.koreader.hashLinks.morePossibleMatches', { count })
+    : t('settings.reader.koreader.hashLinks.possibleMatches', { count })
+}
+
+function candidateTitle(candidate: KoreaderLinkSuggestionCandidate): string {
+  const title = candidate.title?.trim()
+  if (!title) return t('settings.reader.koreader.hashLinks.untitledBook')
+  const subtitle = candidate.subtitle?.trim()
+  return subtitle ? `${title}: ${subtitle}` : title
+}
+
+function candidateDetail(candidate: KoreaderLinkSuggestionCandidate): string {
+  const authors = candidate.authors.length > 0 ? candidate.authors.join(', ') : t('settings.reader.koreader.hashLinks.unknownAuthor')
+  return [authors, candidate.format, candidate.libraryName, candidate.publishedYear, candidate.language]
+    .filter((part) => part !== null && part !== '')
+    .join(' - ')
+}
+
+function candidateHref(candidate: KoreaderLinkSuggestionCandidate): string {
+  return `${import.meta.env.BASE_URL}book/${candidate.bookId}`
+}
+
+function handleOpenSuggestion(book: KoreaderUnmatchedBook) {
+  handleOpenLink(book)
+  const suggestion = suggestionFor(book)
+  if (suggestion && isSingleSuggestion(suggestion)) handleChooseSuggestedTarget(suggestion.candidates[0]!)
+}
+
+function handleOpenBulkLink() {
+  bulkLinkOpen.value = true
+}
+
+function handleCancelBulkLink() {
+  if (!bulkLinking.value) bulkLinkOpen.value = false
+}
+
+async function handleConfirmBulkLink() {
+  const links = singleSuggestionLinks.value.map(({ book, candidate }) => ({ hash: book.hash, bookId: candidate.bookId }))
+  if (links.length === 0) return
+  bulkLinking.value = true
+  try {
+    const outcome = await linkSuggestedBooks(links)
+    if (outcome.failed.length === 0) {
+      toast.success(t('settings.reader.koreader.hashLinks.toast.suggestedLinked', { count: outcome.linked }))
+    } else if (outcome.linked > 0) {
+      toast.error(t('settings.reader.koreader.hashLinks.toast.suggestedPartlyLinked', { linked: outcome.linked, failed: outcome.failed.length }))
+    } else {
+      toast.error(t('settings.reader.koreader.hashLinks.toast.suggestedLinkFailed'))
+    }
+    bulkLinkOpen.value = false
+    unmatchedPage.value = 1
+  } catch {
+    toast.error(t('settings.reader.koreader.hashLinks.toast.suggestedLinkFailed'))
+  } finally {
+    bulkLinking.value = false
+  }
 }
 
 function handleClearLinkTarget() {
@@ -634,6 +777,46 @@ function handleRetireDevice(device: KoreaderDeviceInfo) {
 
 function handleRestoreDevice(device: KoreaderDeviceInfo) {
   return applyDeviceRetired(device, false)
+}
+
+const renameDialogDevice = computed(() => {
+  const device = renameDeviceTarget.value
+  return device ? { deviceId: device.deviceId, model: device.device, deviceName: device.deviceName ?? null } : null
+})
+
+function deviceLabel(device: KoreaderDeviceInfo): string {
+  return koreaderDeviceLabel(device.device, device.deviceName)
+}
+
+function deviceModelHint(device: KoreaderDeviceInfo): string | null {
+  return koreaderDeviceModelHint(device.device, device.deviceName)
+}
+
+function sweepLabel(sweep: KoreaderDeviceSweepInfo): string {
+  return koreaderDeviceLabel(sweep.deviceModel, sweep.deviceName)
+}
+
+function handleOpenRenameDevice(device: KoreaderDeviceInfo) {
+  renameDeviceTarget.value = device
+}
+
+function handleCloseRenameDevice() {
+  if (!renamingDevice.value) renameDeviceTarget.value = null
+}
+
+async function handleSaveDeviceName(name: string) {
+  const device = renameDeviceTarget.value
+  if (!device || renamingDevice.value) return
+  renamingDevice.value = true
+  try {
+    await setDeviceName(device.deviceId, name)
+    toast.success(name ? t('settings.reader.koreader.renameDevice.saved') : t('settings.reader.koreader.renameDevice.cleared'))
+    renameDeviceTarget.value = null
+  } catch {
+    toast.error(t('settings.reader.koreader.renameDevice.failed'))
+  } finally {
+    renamingDevice.value = false
+  }
 }
 
 function handleOpenRemoveDevice(device: KoreaderDeviceInfo) {
@@ -722,6 +905,7 @@ async function handleDownloadPlugin() {
           <p class="text-xs text-muted-foreground">
             {{ t('settings.reader.koreader.createFormHint') }}
           </p>
+          <ReadAloudDeliverySelect v-if="deliverySupported" v-model="newReadAloudDelivery" :disabled="creating" explicit-only />
           <div>
             <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('settings.reader.koreader.username') }}</label>
             <input
@@ -863,6 +1047,32 @@ async function handleDownloadPlugin() {
 
         <div class="mb-8">
           <p class="settings-group-label">
+            {{ t('settings.reader.koreader.pluginLibrary') }}
+          </p>
+          <div class="settings-card">
+            <div class="flex flex-col gap-3 px-4 py-3.5 bg-card md:flex-row md:items-center md:justify-between md:px-5 md:py-4">
+              <div class="min-w-0">
+                <p id="koreader-hide-audio-only-label" class="settings-label">
+                  {{ t('settings.reader.koreader.hideAudioOnlyBooks') }}
+                </p>
+                <p id="koreader-hide-audio-only-hint" class="settings-hint">
+                  {{ t('settings.reader.koreader.hideAudioOnlyBooksHint') }}
+                </p>
+              </div>
+              <ToggleSwitch
+                :model-value="credentials?.hideAudioOnlyBooks ?? true"
+                :disabled="savingHideAudioOnlyBooks"
+                aria-labelledby="koreader-hide-audio-only-label"
+                aria-describedby="koreader-hide-audio-only-hint"
+                class="self-start md:self-auto"
+                @update:model-value="handleToggleHideAudioOnlyBooks"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-8">
+          <p class="settings-group-label">
             {{ t('settings.reader.koreader.setup') }}
           </p>
           <div class="settings-card">
@@ -948,33 +1158,46 @@ async function handleDownloadPlugin() {
           </div>
           <div v-else class="settings-card">
             <div v-for="device in activeDevices" :key="device.deviceId" class="px-4 py-4 bg-card md:px-5">
-              <div class="flex items-start gap-3">
-                <div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center text-muted-foreground shrink-0 border border-border">
-                  <Smartphone :size="16" />
-                </div>
-                <div class="flex-1 min-w-0">
-                  <p class="settings-label truncate">{{ device.device }}</p>
-                  <div class="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                    <p class="min-w-0">
-                      {{ t('settings.reader.koreader.lastSyncLabel') }}
-                      <span class="text-foreground">{{ formatLastSync(device.lastSyncAt) }}</span>
-                    </p>
-                    <p class="min-w-0 truncate">
-                      {{ t('settings.reader.koreader.lastBookLabel') }}
-                      <span class="text-foreground">{{ device.lastBookTitle ?? t('settings.reader.koreader.noneYet') }}</span>
-                    </p>
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start">
+                <div class="flex flex-1 min-w-0 items-start gap-3">
+                  <div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center text-muted-foreground shrink-0 border border-border">
+                    <Smartphone :size="16" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <p class="settings-label truncate">{{ deviceLabel(device) }}</p>
+                    <p v-if="deviceModelHint(device)" class="truncate text-xs text-muted-foreground">{{ deviceModelHint(device) }}</p>
+                    <div class="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                      <p class="min-w-0">
+                        {{ t('settings.reader.koreader.lastSyncLabel') }}
+                        <span class="text-foreground">{{ formatLastSync(device.lastSyncAt) }}</span>
+                      </p>
+                      <p class="min-w-0 truncate">
+                        {{ t('settings.reader.koreader.lastBookLabel') }}
+                        <span class="text-foreground">{{ device.lastBookTitle ?? t('settings.reader.koreader.noneYet') }}</span>
+                      </p>
+                    </div>
                   </div>
                 </div>
-                <Button
-                  variant="destructive-outline"
-                  size="sm"
-                  class="shrink-0"
-                  :disabled="retiringDeviceId === device.deviceId"
-                  @click="handleRetireDevice(device)"
-                >
-                  <Archive :size="12" />
-                  {{ retiringDeviceId === device.deviceId ? t('settings.reader.koreader.retiring') : t('settings.reader.koreader.retire') }}
-                </Button>
+                <div class="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :aria-label="t('settings.reader.koreader.renameDevice.actionLabel', { device: deviceLabel(device) })"
+                    @click="handleOpenRenameDevice(device)"
+                  >
+                    <Pencil :size="12" aria-hidden="true" />
+                    {{ t('settings.reader.koreader.renameDevice.action') }}
+                  </Button>
+                  <Button
+                    variant="destructive-outline"
+                    size="sm"
+                    :disabled="retiringDeviceId === device.deviceId"
+                    @click="handleRetireDevice(device)"
+                  >
+                    <Archive :size="12" />
+                    {{ retiringDeviceId === device.deviceId ? t('settings.reader.koreader.retiring') : t('settings.reader.koreader.retire') }}
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
@@ -1000,7 +1223,8 @@ async function handleDownloadPlugin() {
                       <Archive :size="16" />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="settings-label truncate">{{ device.device }}</p>
+                      <p class="settings-label truncate">{{ deviceLabel(device) }}</p>
+                      <p v-if="deviceModelHint(device)" class="truncate text-xs text-muted-foreground">{{ deviceModelHint(device) }}</p>
                       <p class="mt-1 text-xs text-muted-foreground">
                         {{ t('settings.reader.koreader.retiredOnLabel') }}
                         <span class="text-foreground">{{ formatRetiredAt(device.retiredAt) }}</span>
@@ -1023,6 +1247,14 @@ async function handleDownloadPlugin() {
           </div>
         </div>
 
+        <KoreaderDeliverySettings
+          v-if="deliverySupported"
+          :credentials="credentials"
+          :devices="syncStatus?.devices ?? []"
+          :sweeps="syncStatus?.sweeps ?? []"
+          @updated="handleRefresh"
+        />
+
         <div class="mb-8">
           <p class="settings-group-label">
             {{ t('settings.reader.koreader.pluginActivity') }}
@@ -1039,7 +1271,7 @@ async function handleDownloadPlugin() {
                 <div class="flex-1 min-w-0">
                   <div class="flex flex-wrap items-center gap-2">
                     <p class="settings-label truncate">
-                      {{ sweep.deviceModel }}
+                      {{ sweepLabel(sweep) }}
                       <span v-if="sweep.pluginVersion" class="font-normal text-muted-foreground"> v{{ sweep.pluginVersion }}</span>
                     </p>
                     <span class="rounded-md border px-2 py-0.5 text-[11px] font-medium" :class="pluginUpdateClass(sweep)">
@@ -1152,9 +1384,19 @@ async function handleDownloadPlugin() {
         <div class="mb-8">
           <div class="mb-2 flex items-center justify-between gap-3">
             <p class="settings-group-label mb-0">
-              {{ t('settings.reader.koreader.hashLinks.unmatchedTitle') }}
+              {{ t('settings.reader.koreader.hashLinks.reviewTitle') }}
             </p>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center justify-end gap-2">
+              <Button
+                v-if="singleSuggestionLinks.length > 0"
+                size="sm"
+                :disabled="unmatchedLoading || bulkLinking"
+                @click="handleOpenBulkLink"
+                type="button"
+              >
+                <Link2 :size="12" />
+                {{ t('settings.reader.koreader.hashLinks.linkSuggested', { count: singleSuggestionLinks.length }) }}
+              </Button>
               <Button
                 v-if="unmatchedBooks.length > 0"
                 variant="destructive-outline"
@@ -1171,48 +1413,65 @@ async function handleDownloadPlugin() {
               </Button>
             </div>
           </div>
+          <p class="settings-hint mb-3">{{ t('settings.reader.koreader.hashLinks.reviewHint') }}</p>
           <div class="settings-card">
             <div v-if="unmatchedLoading" class="px-4 py-5 bg-card text-sm text-muted-foreground md:px-5">
-              {{ t('settings.reader.koreader.hashLinks.loadingUnmatched') }}
+              {{ t('settings.reader.koreader.hashLinks.loadingReview') }}
             </div>
             <div v-else-if="unmatchedBooks.length === 0" class="px-4 py-5 bg-card text-sm text-muted-foreground md:px-5">
-              {{ t('settings.reader.koreader.hashLinks.noUnmatched') }}
+              {{ t('settings.reader.koreader.hashLinks.noReview') }}
             </div>
             <template v-else>
-              <div v-for="book in pagedUnmatchedBooks" :key="book.hash" class="px-4 py-4 bg-card md:px-5">
+              <div v-for="row in pagedReviewRows" :key="row.book.hash" class="px-4 py-4 bg-card md:px-5">
                 <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div class="min-w-0">
+                  <div class="min-w-0 flex-1">
                     <p class="settings-label truncate">
-                      {{ unmatchedBookTitle(book) }}
+                      {{ unmatchedBookTitle(row.book) }}
                     </p>
                     <p class="settings-hint truncate">
-                      {{ unmatchedBookSubtitle(book) }}
+                      {{ unmatchedBookSubtitle(row.book) }}
                     </p>
                     <div class="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <p class="min-w-0 truncate">
                         {{ t('settings.reader.koreader.hashLinks.hash') }}
-                        <span class="font-mono text-foreground">{{ book.hash }}</span>
+                        <span class="font-mono text-foreground">{{ row.book.hash }}</span>
                       </p>
                       <p>
                         {{ t('settings.reader.koreader.hashLinks.lastOpened') }}
-                        <span class="text-foreground">{{ formatEpochSeconds(book.lastOpen) }}</span>
+                        <span class="text-foreground">{{ formatEpochSeconds(row.book.lastOpen) }}</span>
                       </p>
                       <p>
                         {{ t('settings.reader.koreader.hashLinks.firstSeen') }}
-                        <span class="text-foreground">{{ formatDateTime(book.firstSeenAt) }}</span>
+                        <span class="text-foreground">{{ formatDateTime(row.book.firstSeenAt) }}</span>
                       </p>
                       <p>
                         {{ t('settings.reader.koreader.hashLinks.lastSeen') }}
-                        <span class="text-foreground">{{ formatDateTime(book.lastSeenAt) }}</span>
+                        <span class="text-foreground">{{ formatDateTime(row.book.lastSeenAt) }}</span>
+                      </p>
+                    </div>
+                    <div v-if="row.suggestion" class="mt-3 min-w-0 rounded-md border border-border bg-muted/30 px-3 py-2">
+                      <p class="text-xs font-medium text-muted-foreground">
+                        {{ row.single ? t('settings.reader.koreader.hashLinks.suggestedMatch') : row.matchesLabel }}
+                      </p>
+                      <template v-if="row.single">
+                        <p class="mt-0.5 truncate text-sm font-medium text-foreground">{{ candidateTitle(row.single) }}</p>
+                        <p class="truncate text-xs text-muted-foreground">{{ candidateDetail(row.single) }}</p>
+                      </template>
+                      <p v-else class="mt-0.5 text-xs text-muted-foreground">
+                        {{ t('settings.reader.koreader.hashLinks.possibleMatchesHint') }}
                       </p>
                     </div>
                   </div>
-                  <div class="flex gap-2 self-start md:self-auto">
-                    <Button size="sm" @click="handleOpenLink(book)" type="button">
+                  <div class="flex flex-wrap gap-2 self-start md:shrink-0 md:flex-nowrap md:self-auto">
+                    <Button v-if="row.suggestion" size="sm" @click="handleOpenSuggestion(row.book)" type="button">
+                      <Link2 :size="12" />
+                      {{ row.single ? t('settings.reader.koreader.hashLinks.reviewMatch') : t('settings.reader.koreader.hashLinks.chooseMatch') }}
+                    </Button>
+                    <Button :variant="row.suggestion ? 'outline' : 'default'" size="sm" @click="handleOpenLink(row.book)" type="button">
                       <Link2 :size="12" />
                       {{ t('settings.reader.koreader.hashLinks.link') }}
                     </Button>
-                    <Button variant="destructive-outline" size="sm" @click="handleOpenDismiss(book)">
+                    <Button variant="destructive-outline" size="sm" @click="handleOpenDismiss(row.book)">
                       <Trash2 :size="12" />
                       {{ t('settings.reader.koreader.hashLinks.dismiss') }}
                     </Button>
@@ -1297,6 +1556,10 @@ async function handleDownloadPlugin() {
                         <p>
                           {{ t('settings.reader.koreader.hashLinks.lastOpened') }}
                           <span class="text-foreground">{{ formatEpochSeconds(link.koreaderLastOpen) }}</span>
+                        </p>
+                        <p v-if="link.positionCompatible === false" class="flex gap-1.5">
+                          <Info :size="12" class="mt-0.5 shrink-0" aria-hidden="true" />
+                          <span>{{ t('settings.reader.koreader.hashLinks.differentCopyHint') }}</span>
                         </p>
                       </div>
                     </div>
@@ -1438,7 +1701,7 @@ async function handleDownloadPlugin() {
         class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
         @click.self="handleCloseDeleteConfirm"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseDeleteConfirm" />
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseDeleteConfirm" />
         <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
           <p class="text-base font-semibold text-foreground">
             {{ t('settings.reader.koreader.deleteConfirmTitle') }}
@@ -1462,14 +1725,14 @@ async function handleDownloadPlugin() {
         class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
         @click.self="handleCloseUnlink"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseUnlink" />
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseUnlink" />
         <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
           <p class="text-base font-semibold text-foreground">
             {{ t('settings.reader.koreader.hashLinks.unlinkConfirmTitle') }}
           </p>
           <p class="mt-1 text-sm text-muted-foreground">
             {{
-              t('settings.reader.koreader.hashLinks.unlinkConfirmBody', {
+              t('settings.reader.koreader.hashLinks.manualUnlinkConfirmBody', {
                 title: linkedBookTitle(unlinkConfirmLink),
               })
             }}
@@ -1502,12 +1765,12 @@ async function handleDownloadPlugin() {
         class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
         @click.self="handleCloseRemoveDevice"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseRemoveDevice" />
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseRemoveDevice" />
         <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
           <p class="text-base font-semibold text-foreground">
             {{
               t('settings.reader.koreader.deleteDeviceDataConfirmTitle', {
-                device: removeDeviceConfirmTarget.device,
+                device: deviceLabel(removeDeviceConfirmTarget),
               })
             }}
           </p>
@@ -1534,7 +1797,7 @@ async function handleDownloadPlugin() {
         class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
         @click.self="handleCloseDismiss"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseDismiss" />
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseDismiss" />
         <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
           <p class="text-base font-semibold text-foreground">
             {{
@@ -1544,7 +1807,7 @@ async function handleDownloadPlugin() {
             }}
           </p>
           <p class="mt-1 text-sm text-muted-foreground">
-            {{ t('settings.reader.koreader.hashLinks.dismissConfirmBody') }}
+            {{ t('settings.reader.koreader.hashLinks.reviewDismissConfirmBody') }}
           </p>
           <div class="mt-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <p class="font-mono text-foreground truncate">
@@ -1571,11 +1834,11 @@ async function handleDownloadPlugin() {
         class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
         @click.self="handleCloseDismissAll"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseDismissAll" />
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseDismissAll" />
         <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
           <p class="text-base font-semibold text-foreground">
             {{
-              t('settings.reader.koreader.hashLinks.dismissAllConfirmTitle', {
+              t('settings.reader.koreader.hashLinks.reviewDismissAllConfirmTitle', {
                 count: unmatchedBooks.length,
               })
             }}
@@ -1583,7 +1846,7 @@ async function handleDownloadPlugin() {
           <div class="mt-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <AlertTriangle :size="14" class="mt-0.5 shrink-0" />
             <p>
-              {{ t('settings.reader.koreader.hashLinks.dismissAllConfirmBody') }}
+              {{ t('settings.reader.koreader.hashLinks.reviewDismissAllConfirmBody') }}
             </p>
           </div>
           <div class="mt-4 flex items-center justify-end gap-2">
@@ -1603,20 +1866,66 @@ async function handleDownloadPlugin() {
         @click.self="handleCloseLink"
         @keydown.esc="handleCloseLink"
       >
-        <button class="absolute inset-0 bg-black/45" @click="handleCloseLink" />
-        <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-2xl md:rounded-lg md:p-5">
+        <button class="absolute inset-0 bg-scrim" @click="handleCloseLink" />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="koreader-link-dialog-title"
+          data-testid="koreader-link-dialog"
+          class="relative max-h-[calc(100svh-1rem)] w-full overflow-y-auto overscroll-contain rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-h-[calc(100svh-2rem)] md:max-w-2xl md:rounded-lg md:p-5"
+        >
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
-              <p class="text-base font-semibold text-foreground">
+              <p id="koreader-link-dialog-title" class="text-base font-semibold text-foreground">
                 {{ linkDialogTitle }}
               </p>
               <p class="mt-1 text-sm text-muted-foreground truncate">
                 {{ selectedLinkLabel }}
               </p>
             </div>
-            <button class="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground" @click="handleCloseLink">
-              <X :size="16" />
+            <button
+              class="rounded-md p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+              :aria-label="t('common.close')"
+              @click="handleCloseLink"
+            >
+              <X :size="16" aria-hidden="true" />
             </button>
+          </div>
+          <div v-if="selectedSuggestion" class="mt-4">
+            <p class="text-xs font-medium text-muted-foreground">{{ selectedSuggestionLabel }}</p>
+            <p class="mt-0.5 mb-1.5 text-xs text-muted-foreground">{{ t('settings.reader.koreader.hashLinks.possibleMatchesHint') }}</p>
+            <div class="max-h-48 overflow-y-auto rounded-md border border-border divide-y divide-border">
+              <div v-for="candidate in selectedSuggestion.candidates" :key="candidate.bookId" class="flex items-center gap-1 pe-2">
+                <button
+                  type="button"
+                  class="flex min-w-0 flex-1 items-start justify-between gap-3 px-3 py-3 text-left hover:bg-muted/70 disabled:opacity-60"
+                  :disabled="linkingBookId !== null"
+                  @click="handleChooseSuggestedTarget(candidate)"
+                >
+                  <span class="min-w-0">
+                    <span class="block truncate text-sm font-medium text-foreground">{{ candidateTitle(candidate) }}</span>
+                    <span class="block truncate text-xs text-muted-foreground">{{ candidateDetail(candidate) }}</span>
+                  </span>
+                  <span class="shrink-0 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground">
+                    {{
+                      pendingLinkTarget?.id === candidate.bookId
+                        ? t('settings.reader.koreader.hashLinks.selected')
+                        : t('settings.reader.koreader.hashLinks.select')
+                    }}
+                  </span>
+                </button>
+                <a
+                  :href="candidateHref(candidate)"
+                  target="_blank"
+                  rel="noopener"
+                  class="shrink-0 rounded-md p-2 text-foreground hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                  :aria-label="t('settings.reader.koreader.hashLinks.openCandidate', { title: candidateTitle(candidate) })"
+                  :title="t('settings.reader.koreader.hashLinks.openCandidate', { title: candidateTitle(candidate) })"
+                >
+                  <ExternalLink :size="14" aria-hidden="true" />
+                </a>
+              </div>
+            </div>
           </div>
           <div class="mt-4">
             <label class="block text-xs font-medium text-muted-foreground mb-1.5">{{ t('settings.reader.koreader.hashLinks.bookOrbitBook') }}</label>
@@ -1703,7 +2012,7 @@ async function handleDownloadPlugin() {
                   {{ pendingLinkTarget.title ?? t('settings.reader.koreader.hashLinks.untitledBook') }}
                 </p>
                 <p class="text-xs text-muted-foreground truncate">
-                  {{ bookSearchSubtitle(pendingLinkTarget) }}
+                  {{ pendingLinkTarget.detail }}
                 </p>
                 <p class="mt-1 text-xs text-muted-foreground">
                   {{
@@ -1718,6 +2027,12 @@ async function handleDownloadPlugin() {
               <AlertTriangle :size="14" class="mt-0.5 shrink-0" />
               <p>
                 {{ t('settings.reader.koreader.hashLinks.syncedStatsNote') }}
+              </p>
+            </div>
+            <div class="mt-2 flex gap-2 rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+              <Info :size="14" class="mt-0.5 shrink-0" aria-hidden="true" />
+              <p>
+                {{ t('settings.reader.koreader.hashLinks.copyNote') }}
               </p>
             </div>
             <div class="mt-3 flex items-center justify-end gap-2">
@@ -1735,6 +2050,41 @@ async function handleDownloadPlugin() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        :open="bulkLinkOpen"
+        :title="t('settings.reader.koreader.hashLinks.bulkLinkTitle', { count: singleSuggestionLinks.length })"
+        :description="t('settings.reader.koreader.hashLinks.bulkLinkDescription')"
+        :confirm-label="t('settings.reader.koreader.hashLinks.bulkLinkConfirm', { count: singleSuggestionLinks.length })"
+        :busy="bulkLinking"
+        :destructive="false"
+        :confirm-disabled="singleSuggestionLinks.length === 0"
+        @confirm="handleConfirmBulkLink"
+        @cancel="handleCancelBulkLink"
+      >
+        <ul
+          class="mt-3 max-h-64 overflow-y-auto rounded-md border border-border divide-y divide-border"
+          :aria-label="t('settings.reader.koreader.hashLinks.bulkLinkListLabel')"
+        >
+          <li v-for="entry in singleSuggestionLinks" :key="entry.book.hash" class="min-w-0 px-3 py-2">
+            <p class="truncate text-sm font-medium text-foreground">{{ unmatchedBookTitle(entry.book) }}</p>
+            <p class="truncate text-xs text-muted-foreground">{{ unmatchedBookSubtitle(entry.book) }}</p>
+            <p class="mt-1 flex min-w-0 items-center gap-1.5 text-sm text-foreground">
+              <ArrowRight :size="12" class="shrink-0 rtl:rotate-180" aria-hidden="true" />
+              <span class="truncate">{{ candidateTitle(entry.candidate) }}</span>
+            </p>
+            <p class="truncate ps-[18px] text-xs text-muted-foreground">{{ candidateDetail(entry.candidate) }}</p>
+          </li>
+        </ul>
+        <p class="mt-3 text-xs text-muted-foreground">{{ t('settings.reader.koreader.hashLinks.copyNote') }}</p>
+      </ConfirmDialog>
+
+      <KoreaderDeviceRenameDialog
+        :device="renameDialogDevice"
+        :saving="renamingDevice"
+        @save="handleSaveDeviceName"
+        @cancel="handleCloseRenameDevice"
+      />
     </template>
   </div>
 

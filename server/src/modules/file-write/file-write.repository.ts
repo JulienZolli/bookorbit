@@ -1,5 +1,6 @@
+import { recordBookFileHashHistory } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type { WriteResult, WriteLogEntry } from '@bookorbit/types';
@@ -27,9 +28,22 @@ import {
 
 type Db = NodePgDatabase<typeof schema>;
 
+const READ_ALONG_LOOKUP_BATCH_SIZE = 1000;
+
 @Injectable()
 export class FileWriteRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  async recordChapterWriteProvenance(
+    bookId: number,
+    fileId: number,
+    provenance: NonNullable<typeof bookFiles.$inferSelect.chapterWriteProvenance>,
+  ): Promise<void> {
+    await this.db
+      .update(bookFiles)
+      .set({ chapterWriteProvenance: provenance })
+      .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.id, fileId)));
+  }
 
   async findPrimaryFileForBook(bookId: number) {
     const [row] = await this.db
@@ -39,10 +53,24 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
       })
       .from(books)
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
+      .where(eq(books.id, bookId))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** The library scope of a book that may have no primary file, which only the all-files mode can still write. */
+  async findFileWriteScopeForBook(bookId: number): Promise<{ libraryId: number; fileWriteAllFiles: boolean } | null> {
+    const [row] = await this.db
+      .select({ libraryId: books.libraryId, fileWriteAllFiles: libraries.fileWriteAllFiles })
+      .from(books)
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
       .where(eq(books.id, bookId))
       .limit(1);
     return row ?? null;
@@ -78,6 +106,9 @@ export class FileWriteRepository {
         fileWriteKindleMaxFileSizeMb: libraries.fileWriteKindleMaxFileSizeMb,
         fileWriteAudioEnabled: libraries.fileWriteAudioEnabled,
         fileWriteAudioMaxFileSizeMb: libraries.fileWriteAudioMaxFileSizeMb,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
+        fileWriteReadAlongEnabled: libraries.fileWriteReadAlongEnabled,
+        fileWriteReadAlongMaxFileSizeMb: libraries.fileWriteReadAlongMaxFileSizeMb,
       })
       .from(libraries)
       .where(eq(libraries.id, libraryId))
@@ -93,12 +124,35 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        role: bookFiles.role,
+        sortOrder: bookFiles.sortOrder,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
       })
       .from(bookFiles)
       .innerJoin(books, eq(books.id, bookFiles.bookId))
       .where(eq(bookFiles.bookId, bookId))
       .orderBy(asc(bookFiles.sortOrder), asc(bookFiles.id));
+  }
+
+  /** The books among `bookIds` that hold a read-along EPUB, in the order given. Read in batches, since a selection can be a whole library. */
+  async findBookIdsWithReadAlongFiles(bookIds: readonly number[]): Promise<number[]> {
+    const withReadAlong = new Set<number>();
+    for (let offset = 0; offset < bookIds.length; offset += READ_ALONG_LOOKUP_BATCH_SIZE) {
+      const rows = await this.db
+        .selectDistinct({ bookId: bookFiles.bookId })
+        .from(bookFiles)
+        .where(
+          and(
+            inArray(bookFiles.bookId, bookIds.slice(offset, offset + READ_ALONG_LOOKUP_BATCH_SIZE)),
+            inArray(bookFiles.role, ['content', 'primary']),
+            sql`lower(${bookFiles.format}) = 'epub'`,
+            eq(bookFiles.mediaOverlayAvailable, true),
+          ),
+        );
+      for (const row of rows) withReadAlong.add(row.bookId);
+    }
+    return bookIds.filter((bookId) => withReadAlong.has(bookId));
   }
 
   async findNonMissingPrimaryFilesByLibrary(libraryId: number) {
@@ -120,7 +174,15 @@ export class FileWriteRepository {
     bookId: number,
     bookFileId: number,
     previousFileHash: string | null,
-    fields: { fileHash?: string; mtime?: Date; sizeBytes?: number; ino?: bigint },
+    fields: {
+      fileHash?: string;
+      mtime?: Date;
+      sizeBytes?: number;
+      ino?: bigint;
+      mediaOverlayAvailable?: boolean;
+      mediaOverlayDurationSeconds?: number | null;
+      mediaOverlayCheckedAt?: Date | null;
+    },
   ): Promise<void> {
     const updateFile = (db: Pick<Db, 'update'>) =>
       db
@@ -155,7 +217,7 @@ export class FileWriteRepository {
   }
 
   async recordHashHistory(bookFileId: number, fileHash: string, reason: string): Promise<void> {
-    await this.db.insert(schema.bookFileHashHistory).values({ bookFileId, fileHash, reason }).onConflictDoNothing();
+    await recordBookFileHashHistory(this.db, bookFileId, fileHash, reason);
   }
 
   async loadPayload(bookId: number) {
@@ -236,7 +298,7 @@ export class FileWriteRepository {
       publishedDate: meta.publishedDate,
       publishedYear: meta.publishedYear,
       language: meta.language,
-      pageCount: meta.pageCount,
+      pageCount: typeof meta.pageCount === 'number' && meta.pageCount > 0 ? meta.pageCount : null,
       seriesName: meta.seriesName,
       seriesIndex: meta.seriesIndex,
       isbn10: meta.isbn10,

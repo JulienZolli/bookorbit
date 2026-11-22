@@ -1,11 +1,14 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
-import type { AchievementCatalogueResponse, AchievementCelebrationClaim } from '@bookorbit/types';
+import { Controller, Get, Header, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
+import type { AchievementCatalogueResponse, AchievementCelebrationClaim, AchievementHintsResponse, Locale } from '@bookorbit/types';
 
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RequestLocale } from '../../common/decorators/request-locale.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { RequireAppAttest } from '../app-attest/app-attest.guard';
 import { AchievementService } from './achievement.service';
 import { AchievementBackfillService, type BackfillResult } from './achievement-backfill.service';
+import { AchievementHintsService } from './achievement-hints.service';
 
 @Controller('achievements')
 @UseGuards(JwtAuthGuard)
@@ -13,19 +16,29 @@ export class AchievementController {
   constructor(
     private readonly service: AchievementService,
     private readonly backfillService: AchievementBackfillService,
+    private readonly hintsService: AchievementHintsService,
   ) {}
 
   @Get()
-  async getCatalogue(@CurrentUser() user: RequestUser): Promise<AchievementCatalogueResponse> {
-    return this.service.getCatalogue(user);
+  @Header('Vary', 'Accept-Language')
+  async getCatalogue(@CurrentUser() user: RequestUser, @RequestLocale() locale: Locale): Promise<AchievementCatalogueResponse> {
+    return this.service.getCatalogue(user, locale);
+  }
+
+  @Get('hints')
+  async getHints(@CurrentUser() user: RequestUser): Promise<AchievementHintsResponse> {
+    return this.hintsService.getHints(user);
   }
 
   @Post('celebrations/claim')
-  async claimCelebration(@CurrentUser() user: RequestUser): Promise<AchievementCelebrationClaim | null> {
-    return this.service.claimCelebration(user);
+  @RequireAppAttest()
+  @Header('Vary', 'Accept-Language')
+  async claimCelebration(@CurrentUser() user: RequestUser, @RequestLocale() locale: Locale): Promise<AchievementCelebrationClaim | null> {
+    return this.service.claimCelebration(user, locale);
   }
 
   @Post('celebrations/:claimId/acknowledge')
+  @RequireAppAttest()
   @HttpCode(HttpStatus.NO_CONTENT)
   async acknowledgeCelebration(@CurrentUser() user: RequestUser, @Param('claimId', new ParseUUIDPipe()) claimId: string): Promise<void> {
     await this.service.acknowledgeCelebration(user, claimId);

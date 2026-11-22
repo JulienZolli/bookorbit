@@ -1,12 +1,15 @@
-import { Logger, OnModuleDestroy, OnModuleInit, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
+import { LibraryScopeService } from '../../common/library-scope/library-scope.service';
+import { Inject, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import type {
-  AuthenticationMethod,
+  BookMergedEvent,
+  BookLinksChangedEvent,
+  BookDuplicateResolutionEvent,
+  BookMergeJobEvent,
   BookMissingEvent,
   BookMovedEvent,
   BookProgressChangedEvent,
@@ -17,14 +20,18 @@ import type {
   ScanBooksAddedEvent,
   ScanProgressEvent,
 } from '@bookorbit/types';
-import { AuthService } from '../auth/auth.service';
 import {
   ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED,
   AchievementEventsService,
   type BookProgressChangedPayload,
 } from '../achievement/achievement-events.service';
 import { ScanJobStore } from './scan-job-store.service';
-import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { ScannerRepository } from './scanner.repository';
+import type { RequestUser } from '../../common/types/request-user';
+import { rejectSocketConnection, resolveSocketUser, trackSocketHandshake } from '../../common/utils/ws-auth.utils';
+import { appConfig } from '../../config/config';
+import { BOOK_COVER_CHANGED, BookCoverEventsService } from '../book-cover-store/book-cover-events.service';
+import { AuthenticatorService } from '../auth/authenticator.service';
 
 @WebSocketGateway({ namespace: '/scan', cors: { credentials: true } })
 export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy {
@@ -34,23 +41,30 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private readonly handleBookProgressChanged = (payload: BookProgressChangedPayload): void => {
     this.emitBookProgressChanged(payload);
   };
+  private readonly handleCoverChanged = (event: CoverRefreshedEvent): void => {
+    this.emitCoverRefreshed(event);
+  };
 
   constructor(
-    private readonly jwtService: JwtService,
-    private readonly authService: AuthService,
+    private readonly authenticator: AuthenticatorService,
     private readonly scanJobStore: ScanJobStore,
+    private readonly scannerRepository: ScannerRepository,
     private readonly achievementEvents: AchievementEventsService,
-    config: ConfigService,
+    private readonly libraryScope: LibraryScopeService,
+    @Inject(appConfig.KEY) app: ConfigType<typeof appConfig>,
+    @Optional() private readonly coverEvents?: BookCoverEventsService,
   ) {
-    this.clientOrigin = config.get<string>('app.appUrl') ?? 'http://localhost:5173';
+    this.clientOrigin = app.appUrl;
   }
 
   onModuleInit(): void {
     this.achievementEvents.on(ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED, this.handleBookProgressChanged);
+    this.coverEvents?.on(BOOK_COVER_CHANGED, this.handleCoverChanged);
   }
 
   onModuleDestroy(): void {
     this.achievementEvents.removeListener(ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED, this.handleBookProgressChanged);
+    this.coverEvents?.removeListener(BOOK_COVER_CHANGED, this.handleCoverChanged);
   }
 
   afterInit(server: Server): void {
@@ -63,22 +77,22 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   async handleConnection(client: Socket): Promise<void> {
+    await trackSocketHandshake(client, this.authenticate(client));
+  }
+
+  private async authenticate(client: Socket): Promise<RequestUser | null> {
     try {
-      const token = client.handshake.auth?.token as string | undefined;
-      if (!token) throw new UnauthorizedException('No token provided');
-      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
-        algorithms: ['HS256'],
-      });
-      const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
-      if (!user) throw new UnauthorizedException('User not found or token revoked');
+      const user = await this.authenticator.authenticateSocket(client);
       (client.data as Record<string, unknown>).user = user;
       await client.join(`user:${user.id}`);
       this.logger.debug(`[scanner.ws_connection] [start] userId=${user.id} socketId=${client.id} - websocket connected`);
+      return user;
     } catch (err) {
       this.logger.warn(
         `[scanner.ws_connection] [fail] socketId=${client.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - websocket rejected`,
       );
       rejectSocketConnection(client, err);
+      return null;
     }
   }
 
@@ -86,9 +100,19 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     this.logger.debug(`[scanner.ws_connection] [end] socketId=${client.id} - websocket disconnected`);
   }
 
+  /**
+   * A library room carries the library's book cards and scan counts, so joining one needs the same
+   * access as reading the library over HTTP.
+   */
   @SubscribeMessage('subscribe:library')
-  handleSubscribeLibrary(client: Socket, libraryId: number): void {
-    void client.join(`library:${libraryId}`);
+  async handleSubscribeLibrary(client: Socket, libraryId: number): Promise<void> {
+    const user = await resolveSocketUser(client);
+    if (!user || !Number.isSafeInteger(libraryId) || libraryId <= 0) return;
+    if (!(await this.libraryScope.canSee(user, libraryId))) {
+      this.logger.debug(`[scanner.ws_subscribe] [fail] userId=${user.id} libraryId=${libraryId} socketId=${client.id} - no library access`);
+      return;
+    }
+    await client.join(`library:${libraryId}`);
     // Send current snapshot immediately so reconnecting clients catch up.
     const entry = this.scanJobStore.get(libraryId);
     if (entry) {
@@ -117,6 +141,7 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   emitCoverRefreshed(event: CoverRefreshedEvent): void {
+    if (event.libraryId === undefined) return;
     this.server?.to(`library:${event.libraryId}`).emit('cover:refreshed', event);
   }
 
@@ -140,6 +165,27 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       `[scanner.ws_emit] [book:transferred] fromLibraryId=${event.fromLibraryId} toLibraryId=${event.toLibraryId} bookCount=${event.bookIds.length}`,
     );
     this.server?.to([`library:${event.fromLibraryId}`, `library:${event.toLibraryId}`]).emit('book:transferred', event);
+  }
+
+  /** To the room of every library the merge touched: viewers of a library the books left must drop them too. */
+  emitBookMerged(event: BookMergedEvent): void {
+    const libraryIds = [...new Set([event.libraryId, ...(event.sourceLibraryIds ?? [])])];
+    this.logger.debug(
+      `[scanner.ws_emit] [book:merged] libraryId=${event.libraryId} libraryIds=${libraryIds.join(',')} targetBookId=${event.targetBookId} sourceCount=${event.sourceBookIds.length}`,
+    );
+    this.server?.to(libraryIds.map((id) => `library:${id}`)).emit('book:merged', event);
+  }
+
+  emitBookMergeJob(userId: number, phase: 'progress' | 'finished', event: BookMergeJobEvent): void {
+    this.server?.to(`user:${userId}`).emit(`book-merge:${phase}`, event);
+  }
+
+  emitDuplicateResolution(userId: number, phase: 'progress' | 'finished', event: BookDuplicateResolutionEvent): void {
+    this.server?.to(`user:${userId}`).emit(`book-duplicates:resolution-${phase}`, event);
+  }
+
+  emitBookLinksChanged(event: BookLinksChangedEvent): void {
+    this.server?.to(`library:${event.libraryId}`).emit('book:links-changed', event);
   }
 
   emitBookProgressChanged(payload: BookProgressChangedPayload): void {

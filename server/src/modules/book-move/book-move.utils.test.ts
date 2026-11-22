@@ -1,11 +1,13 @@
+import { createHash, randomBytes } from 'crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Readable } from 'stream';
 
 // Cross-device behaviour cannot be provoked with a real temp directory, so rename is
-// forced to report EXDEV and the destination read is corrupted on demand.
-const control = vi.hoisted(() => ({ forceExdev: false, corruptReadPath: null as string | null }));
+// forced to report EXDEV, the destination read is corrupted on demand, and the source
+// can be appended to after its first chunk has been read.
+const control = vi.hoisted(() => ({ forceExdev: false, corruptReadPath: null as string | null, growDuringReadPath: null as string | null }));
 
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
@@ -31,7 +33,23 @@ vi.mock('fs', async (importOriginal) => {
       if (control.corruptReadPath !== null && path === control.corruptReadPath) {
         return Readable.from([Buffer.from('bytes that do not match the source')]);
       }
-      return (actual.createReadStream as (p: string, o?: unknown) => unknown)(path, options);
+      const stream = (actual.createReadStream as (p: string, o?: unknown) => AsyncIterable<Buffer>)(path, options);
+      if (control.growDuringReadPath !== null && path === control.growDuringReadPath) {
+        control.growDuringReadPath = null;
+        return Readable.from(
+          (async function* () {
+            let grown = false;
+            for await (const chunk of stream) {
+              yield chunk;
+              if (!grown) {
+                grown = true;
+                actual.appendFileSync(path, 'appended while the copy was running');
+              }
+            }
+          })(),
+        );
+      }
+      return stream;
     },
   };
 });
@@ -46,6 +64,8 @@ import {
   pathExists,
   removeEmptyDirs,
   withCollisionSuffix,
+  selectMovedPrimary,
+  type MovedPrimaryCandidate,
 } from './book-move.utils';
 
 let workDir: string;
@@ -54,7 +74,16 @@ beforeEach(async () => {
   workDir = await mkdtemp(join(tmpdir(), 'bookorbit-move-utils-'));
   control.forceExdev = false;
   control.corruptReadPath = null;
+  control.growDuringReadPath = null;
 });
+
+// Above both the 64 KiB read-stream high-water mark and the sixteen chunks an unread
+// object-mode stage buffers, the point where a hash pipeline with no consumer stalls.
+const LARGE_FILE_BYTES = 2 * 1024 * 1024 + 4099;
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
 
 afterEach(async () => {
   await rm(workDir, { recursive: true, force: true });
@@ -150,6 +179,50 @@ describe('moveFile', () => {
     expect(await pathExists(to)).toBe(false);
   });
 
+  it('completes a cross-device move of a file larger than the stream buffers', async () => {
+    const from = join(workDir, 'src', 'book.m4b');
+    const to = join(workDir, 'dst', 'book.m4b');
+    const payload = randomBytes(LARGE_FILE_BYTES);
+    await mkdir(join(workDir, 'src'), { recursive: true });
+    await writeFile(from, payload);
+    control.forceExdev = true;
+
+    const result = await moveFile(from, to);
+
+    expect(result.crossDevice).toBe(true);
+    expect(result.stat.sizeBytes).toBe(LARGE_FILE_BYTES);
+    expect(sha256(await readFile(to))).toBe(sha256(payload));
+    expect(await pathExists(from)).toBe(false);
+  });
+
+  it('moves an empty file across devices', async () => {
+    const from = join(workDir, 'empty.epub');
+    const to = join(workDir, 'dst', 'empty.epub');
+    await writeFile(from, '');
+    control.forceExdev = true;
+
+    const result = await moveFile(from, to);
+
+    expect(result.crossDevice).toBe(true);
+    expect(result.stat.sizeBytes).toBe(0);
+    expect((await readFile(to)).length).toBe(0);
+    expect(await pathExists(from)).toBe(false);
+  });
+
+  it('rejects, keeps the source and removes the partial copy when the source grows mid-copy', async () => {
+    const from = join(workDir, 'book.m4b');
+    const to = join(workDir, 'dst', 'book.m4b');
+    await writeFile(from, randomBytes(LARGE_FILE_BYTES));
+    control.forceExdev = true;
+    control.growDuringReadPath = from;
+
+    await expect(moveFile(from, to)).rejects.toThrow(/source changed/i);
+
+    expect(await pathExists(from)).toBe(true);
+    expect((await stat(from)).size).toBeGreaterThan(LARGE_FILE_BYTES);
+    expect(await pathExists(to)).toBe(false);
+  });
+
   it('propagates non-EXDEV rename failures without copying', async () => {
     const from = join(workDir, 'missing.epub');
     const to = join(workDir, 'dst', 'missing.epub');
@@ -170,6 +243,34 @@ describe('moveFileBack', () => {
 
     expect(await readFile(original, 'utf8')).toBe('payload');
     expect(await pathExists(moved)).toBe(false);
+  });
+
+  it('restores a large file across devices with a verified copy', async () => {
+    const original = join(workDir, 'src', 'book.m4b');
+    const moved = join(workDir, 'dst', 'book.m4b');
+    const payload = randomBytes(LARGE_FILE_BYTES);
+    await mkdir(join(workDir, 'dst'), { recursive: true });
+    await writeFile(moved, payload);
+    control.forceExdev = true;
+
+    await moveFileBack(moved, original);
+
+    expect(sha256(await readFile(original))).toBe(sha256(payload));
+    expect(await pathExists(moved)).toBe(false);
+  });
+
+  it('keeps the moved file and removes the partial restore when verification fails', async () => {
+    const original = join(workDir, 'src', 'book.epub');
+    const moved = join(workDir, 'dst', 'book.epub');
+    await mkdir(join(workDir, 'dst'), { recursive: true });
+    await writeFile(moved, 'payload');
+    control.forceExdev = true;
+    control.corruptReadPath = original;
+
+    await expect(moveFileBack(moved, original)).rejects.toThrow(/verification failed/i);
+
+    expect(await readFile(moved, 'utf8')).toBe('payload');
+    expect(await pathExists(original)).toBe(false);
   });
 });
 
@@ -282,6 +383,21 @@ describe('computeContentHash', () => {
     expect(await computeContentHash(first)).not.toBe(await computeContentHash(second));
   });
 
+  it('settles for a file larger than the stream buffers', async () => {
+    const path = join(workDir, 'large.bin');
+    const payload = randomBytes(LARGE_FILE_BYTES);
+    await writeFile(path, payload);
+
+    expect(await computeContentHash(path)).toBe(sha256(payload));
+  });
+
+  it('hashes an empty file', async () => {
+    const path = join(workDir, 'empty.bin');
+    await writeFile(path, '');
+
+    expect(await computeContentHash(path)).toBe(sha256(Buffer.alloc(0)));
+  });
+
   it('is stable for identical content', async () => {
     const first = join(workDir, 'a.bin');
     const second = join(workDir, 'b.bin');
@@ -298,5 +414,39 @@ describe('isCrossDeviceError', () => {
     expect(isCrossDeviceError(Object.assign(new Error('x'), { code: 'ENOENT' }))).toBe(false);
     expect(isCrossDeviceError(new Error('x'))).toBe(false);
     expect(isCrossDeviceError(null)).toBe(false);
+  });
+});
+
+describe('selectMovedPrimary', () => {
+  const file = (id: number, format: string, overrides: Partial<MovedPrimaryCandidate> = {}): MovedPrimaryCandidate => ({
+    id,
+    role: 'content',
+    format,
+    sizeBytes: 100,
+    sortOrder: id,
+    mediaOverlayAvailable: false,
+    ...overrides,
+  });
+
+  it('picks what the target ranks first, as a scan of it would', () => {
+    const files = [file(1, 'epub'), file(2, 'm4b')];
+    expect(selectMovedPrimary(files, 1, { formatPriority: ['m4b', 'epub'], allowedFormats: [] })?.id).toBe(2);
+    expect(selectMovedPrimary(files, 2, { formatPriority: ['epub', 'm4b'], allowedFormats: [] })?.id).toBe(1);
+  });
+
+  it('chooses only among the formats the target allows', () => {
+    const files = [file(1, 'epub'), file(2, 'm4b')];
+    expect(selectMovedPrimary(files, 1, { formatPriority: ['epub', 'm4b'], allowedFormats: ['M4B'] })?.id).toBe(2);
+    expect(selectMovedPrimary(files, 1, { formatPriority: ['epub'], allowedFormats: ['pdf'] })).toBeNull();
+  });
+
+  it('keeps the current primary when another file only ties with it', () => {
+    const files = [file(1, 'epub'), file(2, 'epub')];
+    expect(selectMovedPrimary(files, 2, { formatPriority: ['epub'], allowedFormats: [] })?.id).toBe(2);
+  });
+
+  it('ignores covers, sidecars and empty files', () => {
+    const files = [file(1, 'jpg', { role: 'cover' }), file(2, 'm4b', { sizeBytes: 0 }), file(3, 'epub')];
+    expect(selectMovedPrimary(files, null, { formatPriority: ['m4b', 'epub'], allowedFormats: [] })?.id).toBe(3);
   });
 });

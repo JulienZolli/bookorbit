@@ -5,6 +5,8 @@ import type { RequestUser } from '../../common/types/request-user';
 import type { BookmarkExchangeAckDto, BookmarkExchangeDto } from './dto';
 import { KoreaderBookmarkExchangeService, buildBookmarkKey } from './koreader-bookmark-exchange.service';
 
+import { exchangeDeviceId } from '../../common/utils/koreader-exchange-device.utils';
+
 const DEVICE_ID = 'device-1234';
 const HASH_A = 'a'.repeat(32);
 const HASH_B = 'b'.repeat(32);
@@ -20,6 +22,7 @@ function makeBookmarkRow(overrides: Record<string, unknown> = {}) {
     id: 100,
     userId: 7,
     bookId: 20,
+    bookFileId: 10,
     cfi: 'epubcfi(/6/8!/4/2/14/1:0)',
     title: 'Chapter 3',
     positionSeconds: null,
@@ -54,20 +57,23 @@ function makeBook(overrides: Partial<BookmarkExchangeDto['books'][number]> = {})
   return { hash: HASH_A, keys: [], keysComplete: false, changes: [], ...overrides } as BookmarkExchangeDto['books'][number];
 }
 
+let accessibleLibraryIds: ReturnType<typeof vi.fn>;
+const libraryScopeStub = () => ({ visibleIdsOrAll: accessibleLibraryIds, visibleIdsOrAllForUserId: accessibleLibraryIds });
+
 describe('KoreaderBookmarkExchangeService', () => {
-  let koreaderRepo: { getAccessibleLibraryIds: ReturnType<typeof vi.fn>; resolveBookFilesByHashes: ReturnType<typeof vi.fn> };
+  let koreaderRepo: { resolveBookFilesByHashes: ReturnType<typeof vi.fn> };
   let bookmarkRepo: Record<string, ReturnType<typeof vi.fn>>;
   let bookmarkSync: Record<string, ReturnType<typeof vi.fn>>;
   let positionConverter: Record<string, ReturnType<typeof vi.fn>>;
   let service: KoreaderBookmarkExchangeService;
 
   beforeEach(() => {
+    accessibleLibraryIds = vi.fn().mockResolvedValue([1]);
     vi.restoreAllMocks();
     vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 
     koreaderRepo = {
-      getAccessibleLibraryIds: vi.fn().mockResolvedValue([1]),
       resolveBookFilesByHashes: vi.fn().mockResolvedValue(new Map([[HASH_A, { bookFileId: 10, bookId: 20, libraryId: 1 }]])),
     };
     bookmarkRepo = {
@@ -89,7 +95,13 @@ describe('KoreaderBookmarkExchangeService', () => {
       cfiPointToXpointer: vi.fn().mockResolvedValue({ status: 'exact', pos0: POS }),
     };
 
-    service = new KoreaderBookmarkExchangeService(koreaderRepo as never, bookmarkRepo as never, bookmarkSync as never, positionConverter as never);
+    service = new KoreaderBookmarkExchangeService(
+      koreaderRepo as never,
+      bookmarkRepo as never,
+      bookmarkSync as never,
+      positionConverter as never,
+      libraryScopeStub() as never,
+    );
   });
 
   describe('exchange', () => {
@@ -97,7 +109,23 @@ describe('KoreaderBookmarkExchangeService', () => {
       const result = await service.exchange(makeUser(), makeExchangeDto([makeBook({ hash: HASH_B })]));
 
       expect(result.unmatched).toEqual([HASH_B]);
+      expect(result.positionIncompatible).toEqual([]);
       expect(result.results).toEqual([]);
+      expect(bookmarkSync.listForSync).not.toHaveBeenCalled();
+    });
+
+    it('reports a matched copy whose bytes differ from the library file apart from unmatched books', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(
+        new Map([[HASH_A, { bookFileId: 10, bookId: 20, libraryId: 1, progressCompatible: false }]]),
+      );
+
+      const result = await service.exchange(
+        makeUser(),
+        makeExchangeDto([makeBook({ changes: [{ datetime: DATETIME, pos: POS, pageno: 42, chapter: 'Chapter 3' }] }), makeBook({ hash: HASH_B })]),
+      );
+
+      expect(result).toEqual({ results: [], unmatched: [HASH_B], positionIncompatible: [HASH_A] });
+      expect(bookmarkSync.upsertFromDevice).not.toHaveBeenCalled();
       expect(bookmarkSync.listForSync).not.toHaveBeenCalled();
     });
 
@@ -114,6 +142,7 @@ describe('KoreaderBookmarkExchangeService', () => {
 
       expect(positionConverter.xpointerPointToCfi).toHaveBeenCalledWith({ bookFileId: 10, pos: POS });
       expect(bookmarkSync.upsertFromDevice).toHaveBeenCalledWith(7, 20, {
+        bookFileId: 10,
         cfi: 'epubcfi(/6/8!/4/2/14/1:0)',
         title: 'Chapter 3',
         devicePos: POS,
@@ -122,7 +151,7 @@ describe('KoreaderBookmarkExchangeService', () => {
       expect(bookmarkRepo.upsertLink).toHaveBeenCalledWith({
         bookmarkId: 101,
         userId: 7,
-        deviceId: DEVICE_ID,
+        deviceId: exchangeDeviceId(DEVICE_ID, HASH_A),
         koreaderKey: buildBookmarkKey(DATETIME, POS),
         deviceDatetime: DATETIME,
       });
@@ -180,6 +209,20 @@ describe('KoreaderBookmarkExchangeService', () => {
       expect(result.results[0]).toMatchObject({ accepted: 0, duplicates: 1 });
     });
 
+    it('keeps a newer server rename and pushes it over the stale device title', async () => {
+      const bookmark = makeBookmarkRow({ title: 'Renamed elsewhere', updatedAt: new Date('2026-06-03T10:00:00Z') });
+      bookmarkSync.listForSync.mockResolvedValue([bookmark]);
+      bookmarkRepo.findLinksForBookmarks.mockResolvedValue([makeLinkRow()]);
+
+      const result = await service.exchange(
+        makeUser(),
+        makeExchangeDto([makeBook({ changes: [{ datetime: DATETIME, pos: POS, pageno: 42, chapter: 'Chapter 3' }] })]),
+      );
+
+      expect(bookmarkSync.applyDeviceEdit).not.toHaveBeenCalled();
+      expect(result.results[0].toApply.add).toEqual([{ serverId: 100, pos: POS, pageno: null, title: 'Renamed elsewhere' }]);
+    });
+
     it('leaves an unchanged known key alone', async () => {
       bookmarkSync.listForSync.mockResolvedValue([makeBookmarkRow({ title: 'Chapter 3' })]);
       bookmarkRepo.findLinksForBookmarks.mockResolvedValue([makeLinkRow()]);
@@ -194,7 +237,7 @@ describe('KoreaderBookmarkExchangeService', () => {
 
       const result = await service.exchange(makeUser(), makeExchangeDto([makeBook()]));
 
-      expect(positionConverter.cfiPointToXpointer).toHaveBeenCalledWith({ bookFileId: 10, cfi: 'epubcfi(/6/8!/4/2/14/1:0)' });
+      expect(positionConverter.cfiPointToXpointer).toHaveBeenCalledWith({ bookFileId: 10, sourceBookFileId: 10, cfi: 'epubcfi(/6/8!/4/2/14/1:0)' });
       expect(result.results[0].toApply.add).toEqual([{ serverId: 100, pos: POS, pageno: 7, title: 'Chapter 3' }]);
       expect(result.results[0].skippedConversion).toBe(0);
     });
@@ -206,6 +249,17 @@ describe('KoreaderBookmarkExchangeService', () => {
 
       expect(positionConverter.cfiPointToXpointer).not.toHaveBeenCalled();
       expect(result.results[0].toApply.add[0]).toMatchObject({ serverId: 100, pos: POS, pageno: 3 });
+    });
+
+    it.each([null, POS])('retains a legacy bookmark without source provenance when its stored pointer is %s', async (devicePos) => {
+      bookmarkSync.listForSync.mockResolvedValue([makeBookmarkRow({ bookFileId: null, devicePos })]);
+
+      const result = await service.exchange(makeUser(), makeExchangeDto([makeBook()]));
+
+      expect(result.results[0].toApply.add).toEqual([]);
+      expect(result.results[0].skippedConversion).toBe(1);
+      expect(positionConverter.cfiPointToXpointer).not.toHaveBeenCalled();
+      expect(bookmarkSync.tombstone).not.toHaveBeenCalled();
     });
 
     it('counts an unconvertible web bookmark as skipped instead of pushing it', async () => {
@@ -246,7 +300,7 @@ describe('KoreaderBookmarkExchangeService', () => {
       const result = await service.exchange(makeUser(), makeExchangeDto([makeBook({ keys: [], keysComplete: true })]));
 
       expect(bookmarkSync.tombstone).toHaveBeenCalledWith(7, [100]);
-      expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, DEVICE_ID, [100]);
+      expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, exchangeDeviceId(DEVICE_ID, HASH_A), [100]);
       expect(result.results[0].deviceDeleted).toBe(1);
     });
 
@@ -290,12 +344,73 @@ describe('KoreaderBookmarkExchangeService', () => {
 
       expect(bookmarkSync.purge).not.toHaveBeenCalled();
     });
+
+    describe('a lost or replaced copy', () => {
+      const deviceId = exchangeDeviceId(DEVICE_ID, HASH_A);
+      const first = makeBookmarkRow({ id: 100 });
+      const second = makeBookmarkRow({ id: 101, cfi: 'epubcfi(/6/10!/4/2/1:0)' });
+      const firstLink = makeLinkRow({ bookmarkId: 100 });
+      const secondLink = makeLinkRow({ id: 901, bookmarkId: 101, koreaderKey: buildBookmarkKey(DATETIME, `${POS}x`) });
+
+      beforeEach(() => {
+        bookmarkSync.listForSync.mockResolvedValue([first, second]);
+        bookmarkRepo.findLinksForBookmarks.mockResolvedValueOnce([firstLink, secondLink]).mockResolvedValue([]);
+        bookmarkRepo.deleteLinks.mockResolvedValue(2);
+      });
+
+      it('re-offers every dogear when the device reports a new sidecar, and tombstones nothing', async () => {
+        const result = await service.exchange(makeUser(), makeExchangeDto([makeBook({ keys: [], keysComplete: true, sidecarState: 'new' })]));
+
+        expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, deviceId, [100, 101]);
+        expect(bookmarkSync.tombstone).not.toHaveBeenCalled();
+        expect(result.results[0].toApply.add.map((entry) => entry.serverId)).toEqual([100, 101]);
+      });
+
+      it('reads a complete set that keeps none of two applied dogears as a lost copy for an older plugin', async () => {
+        await service.exchange(makeUser(), makeExchangeDto([makeBook({ keys: [], keysComplete: true })]));
+
+        expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, deviceId, [100, 101]);
+        expect(bookmarkSync.tombstone).not.toHaveBeenCalled();
+      });
+
+      it('still deletes when a known sidecar reports none of them', async () => {
+        bookmarkSync.tombstone.mockResolvedValue(2);
+
+        await service.exchange(makeUser(), makeExchangeDto([makeBook({ keys: [], keysComplete: true, sidecarState: 'known' })]));
+
+        expect(bookmarkSync.tombstone).toHaveBeenCalledWith(7, [100, 101]);
+      });
+
+      it('still deletes the only dogear an older plugin had', async () => {
+        bookmarkSync.listForSync.mockResolvedValue([first]);
+        bookmarkRepo.findLinksForBookmarks.mockReset().mockResolvedValue([firstLink]);
+        bookmarkSync.tombstone.mockResolvedValue(1);
+
+        await service.exchange(makeUser(), makeExchangeDto([makeBook({ keys: [], keysComplete: true })]));
+
+        expect(bookmarkSync.tombstone).toHaveBeenCalledWith(7, [100]);
+      });
+    });
   });
 
   describe('exchangeAck', () => {
     function makeAckDto(books: BookmarkExchangeAckDto['books']): BookmarkExchangeAckDto {
       return { deviceId: DEVICE_ID, deviceModel: 'Kobo', pluginVersion: '0.5.0', books } as BookmarkExchangeAckDto;
     }
+
+    it('acknowledges nothing for a copy whose bytes differ from the library file', async () => {
+      koreaderRepo.resolveBookFilesByHashes.mockResolvedValue(
+        new Map([[HASH_A, { bookFileId: 10, bookId: 20, libraryId: 1, progressCompatible: false }]]),
+      );
+
+      const result = await service.exchangeAck(
+        makeUser(),
+        makeAckDto([{ hash: HASH_A, applied: [{ serverId: 100, status: 'applied', key: 'f'.repeat(32), datetime: DATETIME }], deleted: [] }]),
+      );
+
+      expect(result).toEqual({ results: [], unmatched: [], positionIncompatible: [HASH_A] });
+      expect(bookmarkRepo.upsertLink).not.toHaveBeenCalled();
+    });
 
     it('links an applied bookmark under the identity the device reported', async () => {
       bookmarkSync.listForSync.mockResolvedValue([makeBookmarkRow()]);
@@ -308,7 +423,7 @@ describe('KoreaderBookmarkExchangeService', () => {
       expect(bookmarkRepo.upsertLink).toHaveBeenCalledWith({
         bookmarkId: 100,
         userId: 7,
-        deviceId: DEVICE_ID,
+        deviceId: exchangeDeviceId(DEVICE_ID, HASH_A),
         koreaderKey: 'f'.repeat(32),
         deviceDatetime: DATETIME,
       });
@@ -366,7 +481,7 @@ describe('KoreaderBookmarkExchangeService', () => {
         makeAckDto([{ hash: HASH_A, applied: [], deleted: [{ serverId: 100, status: 'applied' }] }]),
       );
 
-      expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, DEVICE_ID, [100]);
+      expect(bookmarkRepo.deleteLinks).toHaveBeenCalledWith(7, exchangeDeviceId(DEVICE_ID, HASH_A), [100]);
       expect(result.results).toEqual([{ hash: HASH_A, acked: 1 }]);
     });
 

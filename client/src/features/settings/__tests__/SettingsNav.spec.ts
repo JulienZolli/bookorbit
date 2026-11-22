@@ -14,10 +14,14 @@ const routeState = { name: 'settings-appearance-theme' }
 
 const push = vi.fn<(to: { name: string }) => void>()
 
-vi.mock('vue-router', () => ({
-  useRoute: () => ({ name: routeState.name }),
-  useRouter: () => ({ push }),
-}))
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  return {
+    ...actual,
+    useRoute: () => ({ name: routeState.name }),
+    useRouter: () => ({ push }),
+  }
+})
 
 const navStatus = vi.hoisted(() => ({ scanning: false }))
 
@@ -117,8 +121,8 @@ describe('SettingsNav', () => {
   })
 
   describe('group visibility', () => {
-    it('shows only the personal group to a user without permissions', () => {
-      expect(groupLabels(mountNav())).toEqual(['You'])
+    it('shows personal and library preferences to a user without permissions', () => {
+      expect(groupLabels(mountNav())).toEqual(['You', 'Library'])
     })
 
     it('shows every group to a superuser', () => {
@@ -157,8 +161,15 @@ describe('SettingsNav', () => {
       expect(childLabels(mountNav({ perms: ['manage_libraries'], routeName: 'settings-metadata-custom-fields' }))).toContain('Custom Fields')
     })
 
-    it('drops the metadata row entirely when no child is reachable', () => {
-      expect(itemLabels(mountNav({ perms: ['manage_app_settings'] }))).not.toContain('Metadata')
+    it('shows personal reminders without exposing administrative metadata pages', () => {
+      const wrapper = mountNav({ routeName: 'settings-metadata-reminders' })
+      expect(itemLabels(wrapper)).toContain('Metadata')
+      expect(childLabels(wrapper)).toEqual(['Missing-field reminders'])
+    })
+
+    it('places personal reminders last after the genre blocklist', () => {
+      const wrapper = mountNav({ su: true, routeName: 'settings-metadata-reminders' })
+      expect(childLabels(wrapper).slice(-2)).toEqual(['Genre Blocklist', 'Missing-field reminders'])
     })
 
     it('shows file naming and maintenance with manage_app_settings', () => {
@@ -226,7 +237,7 @@ describe('SettingsNav', () => {
     })
 
     it('shows the book dock with manage_book_dock', () => {
-      expect(itemLabels(mountNav({ perms: ['manage_book_dock'] }))).toContain('Book Dock')
+      expect(itemLabels(mountNav({ perms: ['manage_book_dock'] }))).toContain('Library Dock')
     })
   })
 

@@ -1,0 +1,45 @@
+import { Module } from '@nestjs/common';
+
+import { AuthModule } from '../auth/auth.module';
+import { BookModule } from '../book/book.module';
+import { FileWriteModule } from '../file-write/file-write.module';
+import { JobsModule } from '../jobs/jobs.module';
+import { LibraryModule } from '../library/library.module';
+import { NotificationModule } from '../notification/notification.module';
+import { UploadModule } from '../upload/upload.module';
+import { UserModule } from '../user/user.module';
+import { ReadAlongJobSource } from './read-along-job-source';
+import { ReadAloudActivityService } from './read-aloud-activity.service';
+import { ReadAloudEventRepository } from './read-aloud-event.repository';
+import { ReadAloudJobRepository } from './read-aloud-job.repository';
+import { ReadAloudLifecycleService } from './read-aloud-lifecycle.service';
+import { ReadAloudNotifier } from './read-aloud-notifier.service';
+import { ReadAloudPresenter } from './read-aloud-presenter.service';
+import { ReadAloudPublisher } from './read-aloud-publisher.service';
+import { ReadAloudController } from './read-aloud.controller';
+import { ReadAloudGateway } from './read-aloud.gateway';
+import { ReadAloudService } from './read-aloud.service';
+import { ReadAloudWorkerClientService } from './read-aloud-worker-client.service';
+import { ReadAloudWorkerService } from './read-aloud-worker.service';
+import { ReadAloudWorkspace } from './read-aloud-workspace.service';
+
+@Module({
+  imports: [AuthModule, BookModule, FileWriteModule, JobsModule, LibraryModule, NotificationModule, UploadModule, UserModule],
+  controllers: [ReadAloudController],
+  providers: [
+    ReadAloudActivityService,
+    ReadAloudEventRepository,
+    ReadAloudGateway,
+    ReadAloudJobRepository,
+    ReadAloudLifecycleService,
+    ReadAloudNotifier,
+    ReadAloudPresenter,
+    ReadAloudPublisher,
+    ReadAloudService,
+    ReadAloudWorkerClientService,
+    ReadAloudWorkerService,
+    ReadAloudWorkspace,
+    ReadAlongJobSource,
+  ],
+})
+export class ReadAloudModule {}

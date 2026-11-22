@@ -1,23 +1,25 @@
 import {
+  AudioLines,
   BookPlus,
   FileCog,
   FolderSync,
   HardDriveDownload,
+  Layers,
   Mail,
-  Podcast,
   RefreshCw,
   ScanLine,
+  Sparkles,
   Tags,
   Trophy,
   Users,
   type LucideIcon,
 } from '@lucide/vue'
-import { APP_FEATURES, type NotificationCategory } from '@bookorbit/types'
+import type { NotificationCategory } from '@bookorbit/types'
 
 export const NOTIFICATION_CATEGORY_GROUPS = [
-  { id: 'library', categories: ['scanning', 'metadata', 'authorEnrichment'] },
-  { id: 'files', categories: ['fileWriteBack', 'fileRename', 'bulkRename', 'migration'] },
-  { id: 'integrations', categories: ['bookDock', 'bookRequests', 'email', ...(APP_FEATURES.podcasts ? (['podcasts'] as const) : [])] },
+  { id: 'library', categories: ['scanning', 'metadata', 'authorEnrichment', 'bulkActions'] },
+  { id: 'files', categories: ['fileWriteBack', 'fileRename', 'bulkRename', 'readAloud', 'storyGuides', 'migration'] },
+  { id: 'integrations', categories: ['bookDock', 'bookRequests', 'email'] },
   { id: 'personal', categories: ['achievements'] },
 ] as const satisfies ReadonlyArray<{ id: string; categories: readonly NotificationCategory[] }>
 
@@ -28,10 +30,12 @@ export const NOTIFICATION_CATEGORY_ICONS: Record<NotificationCategory, LucideIco
   fileWriteBack: HardDriveDownload,
   fileRename: FileCog,
   bulkRename: FileCog,
+  bulkActions: Layers,
   migration: RefreshCw,
   bookDock: FolderSync,
   bookRequests: BookPlus,
   email: Mail,
-  podcasts: Podcast,
+  readAloud: AudioLines,
+  storyGuides: Sparkles,
   achievements: Trophy,
 }

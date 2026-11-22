@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { BookCopy } from '@lucide/vue'
 import EntityIndexView from '@/components/entity-index/EntityIndexView.vue'
 import LibraryCreatorModal from '@/features/library/components/LibraryCreatorModal.vue'
 import { useLibraries } from '@/features/library/composables/useLibraries'
@@ -17,9 +18,6 @@ const { handleLibraryCreated } = useLibraryCreationRedirect()
 
 const createOpen = ref(false)
 const canManageLibraries = computed(() => hasPermission('manage_libraries'))
-
-/** Podcast libraries have their own index; listing them here would route them to the book view. */
-const bookLibraries = computed(() => libraries.value.filter((library) => library.type !== 'podcasts'))
 
 function openCreate() {
   createOpen.value = true
@@ -41,12 +39,12 @@ onMounted(() => {
 
 <template>
   <div class="h-full">
-    <LibraryCreatorModal v-if="createOpen" initial-type="books" @close="closeCreate" @saved="onLibrarySaved" />
+    <LibraryCreatorModal v-if="createOpen" @close="closeCreate" @saved="onLibrarySaved" />
     <EntityIndexView
       :title="t('titles.libraries')"
-      title-icon="BookCopy"
-      fallback-icon="BookCopy"
-      :items="bookLibraries"
+      :title-icon="BookCopy"
+      :fallback-icon="BookCopy"
+      :items="libraries"
       route-name="library"
       :loading="loading"
       :search-placeholder="t('components.sidebar.filterLibrariesPlaceholder')"

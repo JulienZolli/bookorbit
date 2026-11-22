@@ -6,6 +6,9 @@ export type ReadingSessionSource = (typeof READING_SESSION_SOURCES)[number];
 export const CLIENT_READING_SESSION_SOURCES = ["ios", "watchos", "android"] as const;
 export type ClientReadingSessionSource = (typeof CLIENT_READING_SESSION_SOURCES)[number];
 
+export const READING_SESSION_TYPES = ["read", "tts", "listen"] as const;
+export type ReadingSessionType = (typeof READING_SESSION_TYPES)[number];
+
 export interface BookReadingSession {
   id: number;
   bookFileId: number | null;
@@ -19,6 +22,20 @@ export interface BookReadingSession {
   // The reading attempt this session was recorded against, when one was open at the time.
   // Sessions logged before attempts existed, or outside any attempt, carry null.
   attemptId: number | null;
+  // How the session was spent: reading the text, listening to text to speech, or listening to
+  // audio. Optional because servers before this field omit it; clients fall back to the format.
+  sessionType?: ReadingSessionType;
+  // The KOReader device that recorded the session, when it can be told. Null for other sources,
+  // and optional because servers before this field omit it.
+  device?: BookReadingSessionDevice | null;
+}
+
+export interface BookReadingSessionDevice {
+  deviceId: string;
+  // The model the device reports, as the KOReader device settings list it.
+  model: string | null;
+  // The name the user gave the device.
+  name: string | null;
 }
 
 export interface BookReadingSourceSlice {

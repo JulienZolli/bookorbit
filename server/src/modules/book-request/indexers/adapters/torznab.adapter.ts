@@ -14,6 +14,7 @@ import {
   type ResolvedIndexerConfig,
   type TorrentFetchResult,
 } from '../indexer-adapter';
+import { publicReleaseGuid } from '../release-guid';
 import { normalizeProviderSeedRatio, normalizeTorznabSeedTimeSeconds } from '../seed-goal.utils';
 // An ISBN is the one query a tracker almost never indexes, so it stays out of the search text.
 import { buildSearchText } from '../search-text';
@@ -33,6 +34,7 @@ const MAX_XML_RESPONSE_BYTES = 16 * 1024 * 1024;
  */
 const MAX_FEED_ITEMS = 500;
 const MAX_FEED_FIELD_CHARS = MAX_INDEXER_RELEASE_GUID_LENGTH;
+const HEX_INFO_HASH = /^[0-9a-f]{40}$/i;
 const REQUEST_TIMEOUT_MS = 25_000;
 /** The same ceiling the direct fetcher uses, and for the same reason: a chain, not a loop. */
 const MAX_REDIRECTS = 5;
@@ -44,6 +46,8 @@ interface TorznabItem {
   title?: string;
   guid?: unknown;
   link?: string;
+  /** The release's details page on the tracker, which Jackett and Prowlarr both publish here. */
+  comments?: unknown;
   size?: string | number;
   pubDate?: string;
   enclosure?: { '@_url'?: string; '@_length'?: string | number } | Array<{ '@_url'?: string; '@_length'?: string | number }>;
@@ -64,7 +68,7 @@ export class TorznabAdapter implements IndexerAdapter {
   readonly type = 'torznab' as const;
   readonly label = 'Torznab';
   /** Whatever the proxy behind it indexes, which is every medium a request can ask for. */
-  readonly mediaKinds: readonly BookRequestMediaKind[] = ['ebook', 'audiobook', 'comic'];
+  readonly mediaKinds: readonly BookRequestMediaKind[] = ['ebook', 'audiobook'];
   readonly supportsIsbnSearch = false;
   /** Jackett and Prowlarr want an API key, but a self-hosted proxy may be left open. */
   readonly requiresCredential = false;
@@ -265,13 +269,20 @@ function parseItems(xml: string, indexerId: number): ReleaseCandidate[] {
 
     const attrs = attrMap(item);
     const enclosure = toArray(item.enclosure)[0];
-    const guid = readGuid(item) ?? enclosure?.['@_url'] ?? title;
-    if (!withinFieldBound(guid)) continue;
-    // A proxy may publish the release as a magnet in `link`, in an enclosure, or in an attribute.
-    const link = withinFieldBound(item.link ?? enclosure?.['@_url']) ? (item.link ?? enclosure?.['@_url']) : undefined;
-    const magnet = attrs.get('magneturl') ?? (link?.startsWith('magnet:') ? link : undefined);
-    const downloadUrl = link && !link.startsWith('magnet:') ? link : undefined;
+    const feedGuid = readGuid(item);
+    const sourceGuid = feedGuid ?? enclosure?.['@_url'] ?? title;
+    if (!withinFieldBound(sourceGuid)) continue;
+    const guid = publicReleaseGuid(indexerId, sourceGuid);
+    // A proxy may publish the release as a magnet in `link`, an enclosure, an attribute, or the guid.
+    const publishedLink = item.link ?? enclosure?.['@_url'];
+    const link = withinFieldBound(publishedLink) ? publishedLink : undefined;
     const infoHash = attrs.get('infohash');
+    const magnet =
+      attrs.get('magneturl') ??
+      (isMagnetLink(link) ? link : undefined) ??
+      (link === undefined && isMagnetLink(feedGuid) ? feedGuid : undefined) ??
+      (link === undefined ? magnetFromInfoHash(infoHash, title) : undefined);
+    const downloadUrl = link && !isMagnetLink(link) ? link : undefined;
     // A bare count includes cover art, so it is a scoring penalty rather than a hard filter.
     const fileCount = toNumber(attrs.get('files'));
     const publishedAt = parseDate(item.pubDate);
@@ -280,12 +291,14 @@ function parseItems(xml: string, indexerId: number): ReleaseCandidate[] {
     const seedRatioGoal = normalizeProviderSeedRatio(toNumber(attrs.get('minimumratio')));
     const seedTimeMinutes = normalizeTorznabSeedTimeSeconds(toNumber(attrs.get('minimumseedtime')));
     const bookTitle = attrs.get('booktitle')?.trim();
+    const infoUrl = readText(item.comments);
 
     releases.push({
       indexerId,
       guid,
       title,
       ...(bookTitle ? { bookTitle } : {}),
+      ...(infoUrl && withinFieldBound(infoUrl) ? { infoUrl } : {}),
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(magnet ? { magnet } : {}),
       ...(infoHash ? { infoHash: infoHash.toLowerCase() } : {}),
@@ -341,13 +354,28 @@ function withinFieldBound(value: string | undefined): boolean {
   return value === undefined || value.length <= MAX_FEED_FIELD_CHARS;
 }
 
+function isMagnetLink(value: string | undefined): value is string {
+  return value !== undefined && /^magnet:/i.test(value);
+}
+
+function magnetFromInfoHash(infoHash: string | undefined, title: string): string | undefined {
+  if (!infoHash || !HEX_INFO_HASH.test(infoHash)) return undefined;
+  const base = `magnet:?xt=urn:btih:${infoHash.toLowerCase()}`;
+  const named = `${base}&dn=${encodeURIComponent(title)}`;
+  return withinFieldBound(named) ? named : base;
+}
+
 /** `guid` is a bare string on some proxies and `{ '#text', '@_isPermaLink' }` on others. */
 function readGuid(item: TorznabItem): string | undefined {
-  const guid = item.guid;
-  if (typeof guid === 'string' && guid.trim()) return guid.trim();
-  if (typeof guid === 'number') return String(guid);
-  if (guid && typeof guid === 'object') {
-    const text = (guid as { '#text'?: unknown })['#text'];
+  return readText(item.guid);
+}
+
+/** An element's text, whether the parser handed it over bare or as `{ '#text', ...attributes }`. */
+function readText(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number') return String(value);
+  if (value && typeof value === 'object') {
+    const text = (value as { '#text'?: unknown })['#text'];
     if (typeof text === 'string' && text.trim()) return text.trim();
     if (typeof text === 'number') return String(text);
   }

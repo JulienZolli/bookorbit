@@ -1,12 +1,23 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
+import type { Readable } from 'stream';
 import { createReadStream } from 'fs';
-import { basename } from 'path';
+import { openDeliveryStream } from '../book/delivery-stream';
+import type { DeliveryArtifactMetadata, EmailSendAccepted } from '@bookorbit/types';
+import { ConflictException } from '@nestjs/common';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { basename, join } from 'path';
 
-import { NotificationType } from '@bookorbit/types';
+import { Permission, NotificationType } from '@bookorbit/types';
+import { DeliveryArtifactService, type DeliveryArtifact } from '../book/delivery-artifact.service';
+import { UserService } from '../user/user.service';
+import type { ReadAloudDeliveryPreference } from '@bookorbit/types';
 import type { BookFile } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
 import { NotificationService } from '../notification/notification.service';
+import { AudiolessEpubService } from '../book/audioless-epub.service';
 import { BookService } from '../book/book.service';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { EmailBookAccessService } from './email-book-access.service';
 import { EmailFileSelector } from './email-file-selector';
 import { EmailPreferencesService } from './email-preferences.service';
@@ -30,6 +41,9 @@ interface SendTask {
   deviceType: string | null;
   preferredFormat: string | null;
   effectiveTemplateId: number | null;
+  deliveryPolicy?: ReadAloudDeliveryPreference;
+  sourceRevision?: string;
+  capturedArtifact?: DeliveryArtifactMetadata;
 }
 
 const EMAIL_SEND_EVENT = 'email.send';
@@ -54,9 +68,12 @@ export class EmailSendOrchestrator {
     private readonly sendLogService: EmailSendLogService,
     private readonly transportService: EmailTransportService,
     private readonly notificationService: NotificationService,
+    @Optional() private readonly audiolessEpubService?: AudiolessEpubService,
+    @Optional() private readonly artifacts?: DeliveryArtifactService,
+    @Optional() private readonly users?: UserService,
   ) {}
 
-  async send(dto: SendBookDto, user: RequestUser): Promise<{ queued: number }> {
+  async send(dto: SendBookDto, user: RequestUser): Promise<EmailSendAccepted> {
     const startedAt = Date.now();
     const requestedRecipientCount = (dto.recipientIds?.length ?? 0) + (dto.groupIds?.length ?? 0);
     this.logger.log(
@@ -91,7 +108,7 @@ export class EmailSendOrchestrator {
     }
   }
 
-  async resend(logEntryId: number, user: RequestUser): Promise<{ queued: number }> {
+  async resend(logEntryId: number, user: RequestUser): Promise<EmailSendAccepted> {
     const startedAt = Date.now();
     this.logger.log(`[${EMAIL_RESEND_EVENT}] [start] userId=${user.id} logEntryId=${logEntryId} - resend enqueue started`);
 
@@ -108,7 +125,8 @@ export class EmailSendOrchestrator {
       const template = await this.templateService.resolveTemplate(logEntry.templateId ?? null, user);
       const context = await this.templateContextService.buildForBook(logEntry.bookId, file.id, user.name);
       const rendered = renderTemplate(template.subject, template.bodyText, context);
-      const effectiveSubject = logEntry.subject === KINDLE_CONVERT_SUBJECT ? KINDLE_CONVERT_SUBJECT : rendered.subject;
+      const capturedDeviceType = logEntry.sourceRevision ? logEntry.deviceType : logEntry.subject === KINDLE_CONVERT_SUBJECT ? 'kindle' : null;
+      const effectiveSubject = capturedDeviceType === 'kindle' ? KINDLE_CONVERT_SUBJECT : rendered.subject;
 
       const newLog = await this.sendLogService.create({
         userId: user.id,
@@ -119,15 +137,24 @@ export class EmailSendOrchestrator {
         toEmail: logEntry.toEmail,
         toName: logEntry.toName ?? '',
         subject: effectiveSubject,
+        deliveryPolicy: logEntry.deliveryPolicy ?? null,
+        sourceRevision: logEntry.sourceRevision,
+        deviceType: capturedDeviceType,
+        recipientId: logEntry.recipientId,
+        dispatchPhase: 'queued',
+        deliveryMetadata: logEntry.deliveryMetadata,
       });
 
       const task: SendTask = {
         bookId: logEntry.bookId,
         userId: user.id,
-        recipientId: 0,
+        recipientId: logEntry.recipientId ?? 0,
         recipientEmail: logEntry.toEmail,
         recipientName: logEntry.toName ?? '',
-        deviceType: logEntry.subject === KINDLE_CONVERT_SUBJECT ? 'kindle' : null,
+        deviceType: capturedDeviceType,
+        deliveryPolicy: logEntry.deliveryPolicy ?? null,
+        sourceRevision: logEntry.sourceRevision ?? undefined,
+        capturedArtifact: logEntry.deliveryMetadata ?? undefined,
         preferredFormat: null,
         effectiveTemplateId: logEntry.templateId ?? null,
       };
@@ -146,7 +173,7 @@ export class EmailSendOrchestrator {
     }
   }
 
-  async quickSend(bookId: number, user: RequestUser): Promise<{ queued: number }> {
+  async quickSend(bookId: number, user: RequestUser): Promise<EmailSendAccepted> {
     const startedAt = Date.now();
     this.logger.log(`[${EMAIL_QUICK_SEND_EVENT}] [start] userId=${user.id} bookId=${bookId} - quick send enqueue started`);
 
@@ -169,6 +196,7 @@ export class EmailSendOrchestrator {
           recipientName: recipient.name,
           deviceType: recipient.deviceType,
           preferredFormat: recipient.preferredFormat,
+          deliveryPolicy: recipient.readAloudDelivery ?? null,
           effectiveTemplateId: recipient.defaultTemplateId ?? prefs.defaultTemplateId ?? null,
         },
         resolved,
@@ -208,6 +236,7 @@ export class EmailSendOrchestrator {
       recipientName: recipient.name,
       deviceType: recipient.deviceType,
       preferredFormat: recipient.preferredFormat,
+      deliveryPolicy: recipient.readAloudDelivery ?? null,
       effectiveTemplateId: dto.templateId ?? recipient.defaultTemplateId ?? defaultTemplateId,
     }));
   }
@@ -218,7 +247,11 @@ export class EmailSendOrchestrator {
     fileId: number | null,
     user: RequestUser,
   ) {
-    const file = await this.fileSelector.select(task.bookId, fileId, task.preferredFormat);
+    const file =
+      task.deliveryPolicy === 'original' && task.deviceType !== 'kindle'
+        ? await this.fileSelector.select(task.bookId, fileId, task.preferredFormat, true)
+        : await this.fileSelector.select(task.bookId, fileId, task.preferredFormat);
+    if (task.deliveryPolicy === 'original' && task.deviceType === 'kindle') throw new BadRequestException({ code: 'KINDLE_ORIGINAL_UNAVAILABLE' });
     const template = await this.templateService.resolveTemplate(task.effectiveTemplateId, user);
     const context = await this.templateContextService.buildForBook(task.bookId, file.id, user.name);
     const rendered = renderTemplate(template.subject, template.bodyText, context);
@@ -234,7 +267,25 @@ export class EmailSendOrchestrator {
       toEmail: task.recipientEmail,
       toName: task.recipientName,
       subject: effectiveSubject,
+      deliveryPolicy: task.deliveryPolicy ?? null,
+      sourceRevision: task.sourceRevision ?? null,
+      deviceType: task.deviceType,
+      recipientId: task.recipientId || null,
+      dispatchPhase: 'queued',
     });
+
+    if (this.artifacts) {
+      try {
+        const source = await this.artifacts.prepare(file, 'original');
+        task.sourceRevision = source.sourceRevision;
+        await source.release();
+        await this.sendLogService.updateDelivery(logEntry.id, { sourceRevision: task.sourceRevision });
+      } catch (error) {
+        await this.sendLogService.updateDelivery(logEntry.id, { dispatchPhase: 'failed', failureCode: 'DELIVERY_PREPARATION_FAILED' });
+        await this.sendLogService.markFailed(logEntry.id, this.getErrorMessage(error), 2);
+        throw error;
+      }
+    }
 
     setImmediate(() => void this.dispatchSend(logEntry.id, resolved.config, task, file, effectiveSubject, rendered.bodyText, 0));
   }
@@ -248,11 +299,37 @@ export class EmailSendOrchestrator {
     bodyText: string,
     attemptCount: number,
   ) {
+    let attachment: { path: string; cleanup: () => Promise<void>; artifact?: DeliveryArtifact } | undefined;
+    let attachmentStream: Readable | undefined;
+    let accepted = false;
+    let smtpStarted = false;
     try {
+      if (this.users) {
+        const current = await this.users.findByIdWithPermissions(task.userId);
+        if (!current?.active || (!current.isSuperuser && !current.permissions.includes(Permission.EmailSend)))
+          throw new ForbiddenException({ code: 'DELIVERY_ACCESS_REVOKED' });
+        await this.bookService.verifyFileAccess(file.id, current as RequestUser);
+        if (task.recipientId) {
+          const recipient = await this.recipientService.getOwnedById(task.recipientId, current as RequestUser);
+          if (recipient.deviceType === 'kindle' && task.deliveryPolicy === 'original')
+            throw new BadRequestException({ code: 'KINDLE_ORIGINAL_UNAVAILABLE' });
+        }
+      }
+      attachment = await this.prepareAttachment(file, task);
+      if (attachment.artifact)
+        await this.sendLogService.updateDelivery(logId, {
+          artifactId: attachment.artifact.artifactId,
+          actualVariant: attachment.artifact.actualVariant,
+          dispatchPhase: 'prepared',
+          deliveryMetadata: task.capturedArtifact,
+        });
       const transporter = this.transportService.buildTransporter(smtpConfig);
       const effectiveSubject = task.deviceType === 'kindle' ? KINDLE_CONVERT_SUBJECT : subject;
       const from = this.buildFromHeader(smtpConfig.fromName, smtpConfig.fromAddress);
 
+      attachmentStream = attachment.artifact ? await openDeliveryStream(attachment.artifact) : createReadStream(attachment.path);
+      if (this.artifacts) await this.sendLogService.updateDelivery(logId, { dispatchPhase: 'smtp_started' });
+      smtpStarted = true;
       await transporter.sendMail({
         ...(from ? { from } : {}),
         to: task.recipientEmail,
@@ -260,12 +337,17 @@ export class EmailSendOrchestrator {
         text: bodyText,
         attachments: [
           {
-            filename: this.buildAttachmentFilename(file),
-            content: createReadStream(file.absolutePath),
+            filename:
+              attachment.artifact?.actualVariant === 'audioless_epub'
+                ? this.buildAttachmentFilename(file).replace(/\.epub$/i, ' - Text Only.epub')
+                : this.buildAttachmentFilename(file),
+            content: attachmentStream,
           },
         ],
       });
 
+      accepted = true;
+      if (this.artifacts) await this.sendLogService.updateDelivery(logId, { dispatchPhase: 'smtp_accepted' });
       await this.sendLogService.markSent(logId);
 
       this.notificationService
@@ -282,7 +364,23 @@ export class EmailSendOrchestrator {
       const errorMessage = this.getErrorMessage(error);
       const attempt = attemptCount + 1;
 
-      const { isFinal } = await this.sendLogService.markFailed(logId, errorMessage, attemptCount);
+      const transportCommand = (error as { command?: string }).command;
+      const indeterminate = accepted || (smtpStarted && (!transportCommand || transportCommand === 'DATA'));
+      const permanent = !smtpStarted || indeterminate || error instanceof BadRequestException || error instanceof ForbiddenException;
+      if (this.artifacts)
+        await this.sendLogService
+          .updateDelivery(logId, {
+            failureCode: accepted
+              ? 'SMTP_ACCEPTED_LOG_FAILED'
+              : indeterminate
+                ? 'SMTP_OUTCOME_UNKNOWN'
+                : !smtpStarted
+                  ? 'DELIVERY_PREPARATION_FAILED'
+                  : 'SMTP_FAILED',
+            dispatchPhase: accepted ? 'smtp_accepted' : indeterminate ? 'smtp_indeterminate' : 'failed',
+          })
+          .catch(() => {});
+      const { isFinal } = await this.sendLogService.markFailed(logId, errorMessage, permanent ? 2 : attemptCount);
 
       if (!isFinal) {
         const delayMs = SEND_RETRY_DELAYS_MS[attemptCount] ?? 0;
@@ -308,6 +406,51 @@ export class EmailSendOrchestrator {
           })
           .catch(() => {});
       }
+    } finally {
+      attachmentStream?.destroy();
+      await attachment?.cleanup().catch(() => undefined);
+    }
+  }
+
+  private async prepareAttachment(
+    file: BookFile,
+    task: SendTask,
+  ): Promise<{ path: string; cleanup: () => Promise<void>; artifact?: DeliveryArtifact }> {
+    if (this.artifacts) {
+      const artifact = await this.artifacts.prepare(
+        file,
+        task.capturedArtifact?.actualVariant === 'original' ? 'original' : (task.deliveryPolicy ?? null),
+        task.sourceRevision,
+      );
+      if (task.capturedArtifact && task.capturedArtifact.sha256 !== artifact.sha256) {
+        await artifact.release();
+        throw new ConflictException({ code: 'DELIVERY_ARTIFACT_UNAVAILABLE' });
+      }
+      if (!task.capturedArtifact) {
+        const { path: artifactPath, release: artifactRelease, ...metadata } = artifact;
+        void artifactPath;
+        void artifactRelease;
+        task.capturedArtifact = metadata;
+      }
+      Object.assign(artifact, task.capturedArtifact);
+      return { path: artifact.path, cleanup: artifact.release, artifact };
+    }
+    const original = { path: file.absolutePath, cleanup: () => Promise.resolve() };
+    if (!this.audiolessEpubService || file.format?.toLowerCase() !== 'epub' || !file.mediaOverlayAvailable) return original;
+
+    const tempDir = await mkdtemp(join(tmpdir(), 'bookorbit-email-epub-'));
+    const cleanup = () => rm(tempDir, { recursive: true, force: true });
+    try {
+      const path = join(tempDir, 'attachment.epub');
+      await this.audiolessEpubService.writeArchive(file.absolutePath, path);
+      return { path, cleanup };
+    } catch (error) {
+      await cleanup().catch(() => undefined);
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.logger.warn(
+        `[${EMAIL_DISPATCH_EVENT}] [fail] bookId=${task.bookId} fileId=${file.id} errorClass=${err.constructor.name} error="${sanitizeLogValue(err.message)}" - audioless rebuild failed, sending original EPUB`,
+      );
+      return original;
     }
   }
 

@@ -23,21 +23,38 @@ function review(overrides: Partial<BookRequestReview> = {}): BookRequestReview {
     files: [{ fileName: 'fablehaven-01.m4b', fileSize: 402_000_000, format: 'm4b', role: 'content' }],
     totalSizeBytes: 402_000_000,
     canFile: true,
+    heldOnRequest: false,
+    releaseInfoUrl: null,
+    edition: null,
+    hasCover: false,
     ...overrides,
   }
 }
 
-function render(overrides: Partial<BookRequestReview> = {}, props: { canManage?: boolean; busy?: boolean } = {}) {
+function render(overrides: Partial<BookRequestReview> = {}, props: { canManage?: boolean; coverUrl?: string | null } = {}) {
   return mount(RequestReviewPanel, {
-    props: { review: review(overrides), canManage: props.canManage ?? true, busy: props.busy ?? false },
+    props: { review: review(overrides), canManage: props.canManage ?? true, coverUrl: props.coverUrl ?? null },
     global: { stubs: { RouterLink: RouterLinkStub } },
   })
 }
 
 describe('RequestReviewPanel', () => {
-  it('states the score against the threshold that held it', () => {
-    expect(render().text()).toContain('scored 65')
-    expect(render().text()).toContain('below the 70')
+  /** The score itself is the status card's sentence; this section says what to do about it. */
+  it('leads with what the score means for the person checking it', () => {
+    const wrapper = render()
+
+    expect(wrapper.text()).toContain('Check the match')
+    expect(wrapper.text()).toContain('Check the fields below and decide whether it is the right book.')
+    expect(wrapper.text()).not.toContain('scored 65')
+  })
+
+  it('compares the request and the file in a table, field by field', () => {
+    const rows = render().findAll('tbody tr')
+
+    expect(rows).toHaveLength(3)
+    expect(rows[0]!.get('th').text()).toContain('Title')
+    expect(rows[0]!.get('th').text()).toContain('Does not match')
+    expect(rows[1]!.get('th').text()).toContain('Matches')
   })
 
   /** The question the panel exists to answer: which field cost the points. */
@@ -74,26 +91,16 @@ describe('RequestReviewPanel', () => {
     expect(text).toContain('Cover')
   })
 
-  it('files the import on request', async () => {
-    const wrapper = render()
-
-    await wrapper.get('button').trigger('click')
-
-    expect(wrapper.emitted('file')).toHaveLength(1)
-  })
-
-  it('cannot be filed when the request has nowhere to file it into', () => {
-    const wrapper = render({ canFile: false })
-
-    expect(wrapper.get('button').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('no destination library')
+  it('says when the request has nowhere to file it into', () => {
+    expect(render({ canFile: false }).text()).toContain('no destination library')
   })
 
   /** Backend-gated too, but an approve button a requester cannot use should not be there at all. */
   it('offers no action to somebody who cannot moderate the queue', () => {
-    const wrapper = render({}, { canManage: false })
+    const wrapper = render({ canFile: false }, { canManage: false })
 
     expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('no destination library')
     expect(wrapper.text()).toContain('fablehaven-01.m4b')
   })
 
@@ -104,17 +111,63 @@ describe('RequestReviewPanel', () => {
   it('says so when the entry it was held over has left the Book Dock', () => {
     const wrapper = render({ bookDockFileId: null, verification: null, files: [], totalSizeBytes: null, canFile: false })
 
-    expect(wrapper.text()).toContain('no longer in the Book Dock')
-    expect(wrapper.find('dl').exists()).toBe(false)
+    expect(wrapper.text()).toContain('If the book is already in your library')
+    expect(wrapper.find('table').exists()).toBe(false)
     expect(wrapper.find('button').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('What landed')
   })
 
-  it('explains a hold that no score produced, and compares nothing', () => {
+  it('compares nothing for a hold that no score produced, and still lists what landed', () => {
     const wrapper = render({ verification: null })
 
-    expect(wrapper.text()).toContain('Import checking is off')
-    expect(wrapper.find('dl').exists()).toBe(false)
+    expect(wrapper.find('table').exists()).toBe(false)
     expect(wrapper.text()).toContain('fablehaven-01.m4b')
+  })
+  it('links the page of the release the import came from', () => {
+    const link = render({ releaseInfoUrl: 'https://tracker.example.com/t/42' }).get('a[href="https://tracker.example.com/t/42"]')
+
+    expect(link.text()).toContain('Open the release page')
+    expect(link.attributes('rel')).toBe('noopener noreferrer')
+    expect(link.attributes('target')).toBe('_blank')
+  })
+
+  it('lists only the edition facts the file states, beside the cover it carried', () => {
+    const wrapper = render(
+      {
+        edition: {
+          publisher: 'Brilliance Audio',
+          publishedDate: '2007',
+          language: 'en',
+          pageCount: null,
+          isbn10: null,
+          narrators: ['E.B. Stevens'],
+          durationSeconds: 9 * 3600 + 30 * 60,
+          abridged: false,
+          chapterCount: 12,
+        },
+      },
+      { coverUrl: '/api/v1/admin/book-requests/7/review/cover?entry=100' },
+    )
+    const facts = wrapper.get('dl')
+
+    expect(facts.text()).toContain('PublisherBrilliance Audio')
+    expect(facts.text()).toContain('Narrated byE.B. Stevens')
+    expect(facts.text()).toContain('VersionUnabridged')
+    expect(facts.text()).toContain('Chapters12')
+    expect(facts.text()).not.toContain('Pages')
+    expect(wrapper.get('img').attributes('alt')).toBe('Cover found in the imported file')
+  })
+
+  it('draws no edition section for a file that states nothing and carries no cover', () => {
+    expect(render().text()).not.toContain('What the file says it is')
+  })
+
+  it('drops a cover that will not load and keeps the facts', async () => {
+    const wrapper = render({ edition: null }, { coverUrl: '/api/v1/admin/book-requests/7/review/cover?entry=100' })
+
+    await wrapper.get('img').trigger('error')
+
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('What the file says it is')
   })
 })

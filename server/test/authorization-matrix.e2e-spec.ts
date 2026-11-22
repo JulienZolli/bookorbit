@@ -5,10 +5,15 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 import { ConfigService } from '@nestjs/config';
-import { APP_FEATURES, Permission } from '@bookorbit/types';
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { MetadataScanner, ModulesContainer } from '@nestjs/core';
+import { Permission } from '@bookorbit/types';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { and, eq, inArray } from 'drizzle-orm';
 
+import { ALLOW_API_KEY_KEY, INTERACTIVE_ONLY_KEY, KEY_READ_SAFE_KEY } from '../src/common/decorators/api-key-policy.decorator';
+import { IS_PUBLIC_KEY } from '../src/common/decorators/public.decorator';
 import { createCoverToken } from '../src/modules/opds/opds-auth.guard';
 import * as schema from '../src/db/schema';
 import {
@@ -52,7 +57,14 @@ interface RouteInventoryRoute {
   isPublic: boolean;
   allowDefault: boolean;
   useGuards: string[];
+  /**
+   * What an API key may do here: `public` needs no credential, `read` admits read-only keys,
+   * `write` needs a read-and-write key, and `interactive` refuses every key.
+   */
+  apiKey: ApiKeyRouteClass;
 }
+
+type ApiKeyRouteClass = 'public' | 'read' | 'write' | 'interactive';
 
 interface RouteInventory {
   totalRoutes: number;
@@ -92,22 +104,15 @@ interface Personas {
   koboRevoked: TestUserSession;
   bookDockUser: TestUserSession;
   uploadUser: TestUserSession;
+  readAloudUser: TestUserSession;
   downloadOnlyUser: TestUserSession;
+  apiKeyOwner: TestUserSession;
   ownerUser: TestUserSession;
   otherUser: TestUserSession;
   targetSuperuser: TestUserSession;
 }
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
-const PODCAST_MODULE_DIR = 'server/src/modules/podcast/';
-
-/**
- * Podcast permissions are only ever carried by PodcastModule's guards, so while
- * APP_FEATURES.podcasts is off no registered route can prove them and the inventory holds none.
- */
-function isFeatureGatedPermission(permission: Permission): boolean {
-  return !APP_FEATURES.podcasts && permission.startsWith('podcast_');
-}
 
 const routeInventory = loadRouteInventory();
 const uncoveredRoutes = loadUncoveredRoutes();
@@ -121,17 +126,12 @@ function isSupportedMethod(method: string): method is SupportedHttpMethod {
 function loadRouteInventory(): RouteInventory {
   const inventoryDir = join(currentDir, 'e2e/authorization-matrix/route-inventory');
   const manifest = JSON.parse(readFileSync(join(inventoryDir, 'manifest.json'), 'utf8')) as RouteInventoryManifest;
-  const inventoried = manifest.routeChunks.flatMap(
+  const routes = manifest.routeChunks.flatMap(
     (chunkFile) => JSON.parse(readFileSync(join(inventoryDir, chunkFile), 'utf8')) as RouteInventoryRoute[],
   );
 
-  // PodcastModule registers its controllers only when APP_FEATURES.podcasts is on, so with the
-  // feature off Nest never mounts these paths and every probe below would read the resulting 404
-  // as a missing guard. The inventory keeps the entries so they return with the feature.
-  const routes = APP_FEATURES.podcasts ? inventoried : inventoried.filter((route) => !route.file.startsWith(PODCAST_MODULE_DIR));
-
   return {
-    totalRoutes: manifest.totalRoutes - (inventoried.length - routes.length),
+    totalRoutes: manifest.totalRoutes,
     byPermission: manifest.byPermission,
     byLibraryAccess: manifest.byLibraryAccess,
     routes,
@@ -179,12 +179,40 @@ function liveRouteLabels(app: NestFastifyApplication): string[] {
   return [...labels].sort();
 }
 
+/** Every routed handler the application registered, keyed the way the inventory labels routes. */
+function liveRouteHandlers(app: NestFastifyApplication): Map<string, Array<{ handler: object; controller: object }>> {
+  const scanner = new MetadataScanner();
+  const handlers = new Map<string, Array<{ handler: object; controller: object }>>();
+  const segments = (value: unknown): string[] => (Array.isArray(value) ? (value as string[]) : [typeof value === 'string' ? value : '']);
+  const join = (...parts: string[]): string => `/${parts.join('/')}`.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
+
+  for (const module of app.get(ModulesContainer).values()) {
+    for (const wrapper of module.controllers.values()) {
+      const controller = wrapper.metatype as (new (...args: never[]) => unknown) | null;
+      if (!controller?.prototype) continue;
+      const prototype = controller.prototype as Record<string, unknown>;
+      for (const name of scanner.getAllMethodNames(prototype)) {
+        const handler = prototype[name];
+        if (typeof handler !== 'function' || Reflect.getMetadata(PATH_METADATA, handler) === undefined) continue;
+        const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod];
+        for (const base of segments(Reflect.getMetadata(PATH_METADATA, controller))) {
+          for (const path of segments(Reflect.getMetadata(PATH_METADATA, handler))) {
+            const label = `${method} ${join(base, path)}`;
+            handlers.set(label, [...(handlers.get(label) ?? []), { handler, controller }]);
+          }
+        }
+      }
+    }
+  }
+
+  return handlers;
+}
+
 describe('Authorization matrix (e2e)', () => {
   let ctx: AuthorizationMatrixE2EContext;
   let libraryA: CreatedLibrary;
   let libraryB: CreatedLibrary;
   let libraryC: CreatedLibrary;
-  let podcastLibrary: CreatedLibrary;
   let bookA: LocatedBookFile;
   let bookB: LocatedBookFile;
   let bookC: LocatedBookFile;
@@ -205,7 +233,6 @@ describe('Authorization matrix (e2e)', () => {
     libraryA = await createLibraryWithFolder(ctx, { name: `authz-lib-a-${randomUUID()}` });
     libraryB = await createLibraryWithFolder(ctx, { name: `authz-lib-b-${randomUUID()}` });
     libraryC = await createLibraryWithFolder(ctx, { name: `authz-lib-c-${randomUUID()}` });
-    podcastLibrary = await createLibraryWithFolder(ctx, { name: `authz-podcast-lib-${randomUUID()}`, type: 'podcasts' });
 
     const fileAPath = await createEpubFixture(libraryA.folderPath, 'book-a.epub', { title: 'Authorization Matrix Library A' });
     const fileBPath = await createEpubFixture(libraryB.folderPath, 'book-b.epub', { title: 'Authorization Matrix Library B' });
@@ -244,7 +271,11 @@ describe('Authorization matrix (e2e)', () => {
       koboRevoked: await createUserAndLogin(ctx, { permissions: [Permission.KoboSync] }),
       bookDockUser: await createUserAndLogin(ctx, { permissions: [Permission.BookDockAccess, Permission.LibraryUpload] }),
       uploadUser: await createUserAndLogin(ctx, { permissions: [Permission.LibraryUpload] }),
+      readAloudUser: await createUserAndLogin(ctx, {
+        permissions: [Permission.LibraryUpload, Permission.LibraryGenerateReadAloud],
+      }),
       downloadOnlyUser: await createUserAndLogin(ctx, { permissions: [Permission.LibraryDownload] }),
+      apiKeyOwner: await createUserAndLogin(ctx, { permissions: [Permission.ApiKeys] }),
       ownerUser: await createUserAndLogin(ctx),
       otherUser: await createUserAndLogin(ctx),
       targetSuperuser: await createUserAndLogin(ctx, { isSuperuser: true }),
@@ -253,9 +284,9 @@ describe('Authorization matrix (e2e)', () => {
     await Promise.all([
       grantLibraryAccess(ctx, personas.allPermsUser.userId, libraryA.libraryId, 'owner'),
       grantLibraryAccess(ctx, personas.allPermsUser.userId, libraryB.libraryId, 'owner'),
-      grantLibraryAccess(ctx, personas.allPermsUser.userId, podcastLibrary.libraryId, 'owner'),
       grantLibraryAccess(ctx, personas.metadataEditor.userId, libraryA.libraryId, 'viewer'),
       grantLibraryAccess(ctx, personas.bookDockUser.userId, libraryA.libraryId, 'viewer'),
+      grantLibraryAccess(ctx, personas.readAloudUser.userId, libraryA.libraryId, 'viewer'),
       grantLibraryAccess(ctx, personas.downloadOnlyUser.userId, libraryA.libraryId, 'viewer'),
       grantLibraryAccess(ctx, personas.ownerUser.userId, libraryA.libraryId, 'viewer'),
       grantLibraryAccess(ctx, personas.opdsOwner.userId, libraryA.libraryId, 'viewer'),
@@ -652,6 +683,69 @@ describe('Authorization matrix (e2e)', () => {
       assertNoFailures('permission denial matrix', failures);
     }, 180_000);
 
+    /**
+     * The inventory's `apiKey` column is what the sweeps below probe, so it has to say what the
+     * decorators on the live handlers say. A route that gains or loses `@InteractiveOnly`,
+     * `@AllowApiKey` or `@KeyReadSafe` without the inventory following fails here.
+     */
+    it('keeps the API key classification of every route in parity with its decorators', () => {
+      const handlers = liveRouteHandlers(ctx.app);
+      const mismatches: string[] = [];
+
+      for (const route of routeInventory.routes.filter((candidate) => isSupportedMethod(candidate.httpMethod))) {
+        const label = routeLabel(route);
+        const resolved = handlers.get(label) ?? [];
+        if (resolved.length !== 1) {
+          mismatches.push(`${label}: resolves to ${resolved.length} handlers`);
+          continue;
+        }
+        const live = apiKeyClassOf(route.httpMethod, resolved[0].handler, resolved[0].controller);
+        if (live !== route.apiKey) mismatches.push(`${label}: inventory says ${route.apiKey}, decorators say ${live}`);
+      }
+
+      expect(mismatches).toEqual([]);
+    });
+
+    it('refuses a read-only key on every route that writes, before anything else runs', async () => {
+      const token = await createApiKey(personas.apiKeyOwner, 'read');
+      const failures: MatrixFailure[] = [];
+
+      for (const route of routeInventory.routes.filter((candidate) => candidate.apiKey === 'write' && isSupportedMethod(candidate.httpMethod))) {
+        const response = await invokeRoute(route, { apiKey: token });
+        if (response.statusCode !== 403 || parseBody(response)?.errorCode !== 'API_KEY_READ_ONLY') {
+          failures.push({
+            route: routeLabel(route),
+            status: response.statusCode,
+            reason: 'expected API_KEY_READ_ONLY',
+            message: extractMessage(response),
+          });
+        }
+      }
+
+      assertNoFailures('read-only API key matrix', failures);
+    }, 180_000);
+
+    it('refuses every API key on the routes only a signed-in session may use', async () => {
+      const token = await createApiKey(personas.apiKeyOwner, 'write');
+      const failures: MatrixFailure[] = [];
+
+      for (const route of routeInventory.routes.filter(
+        (candidate) => candidate.apiKey === 'interactive' && isSupportedMethod(candidate.httpMethod),
+      )) {
+        const response = await invokeRoute(route, { apiKey: token });
+        if (response.statusCode !== 403 || parseBody(response)?.errorCode !== 'API_KEY_ROUTE_FORBIDDEN') {
+          failures.push({
+            route: routeLabel(route),
+            status: response.statusCode,
+            reason: 'expected API_KEY_ROUTE_FORBIDDEN',
+            message: extractMessage(response),
+          });
+        }
+      }
+
+      assertNoFailures('interactive-only API key matrix', failures);
+    }, 180_000);
+
     it('allows a settings operator to read book-request source status without request access', async () => {
       const response = await ctx.app.inject({
         method: 'GET',
@@ -675,9 +769,7 @@ describe('Authorization matrix (e2e)', () => {
       // so they legitimately never appear on a guard. Every entry needs a service-level test
       // proving the capability is actually enforced; keep this list as short as it can be.
       const serviceEnforcedPermissions: Permission[] = [Permission.BookRequestAutoApprove];
-      const enumPermissions = [...Object.values(Permission)]
-        .filter((permission) => !serviceEnforcedPermissions.includes(permission) && !isFeatureGatedPermission(permission))
-        .sort();
+      const enumPermissions = [...Object.values(Permission)].filter((permission) => !serviceEnforcedPermissions.includes(permission)).sort();
       expect(inventoryPermissions).toEqual(enumPermissions);
 
       const probes: Record<
@@ -688,7 +780,7 @@ describe('Authorization matrix (e2e)', () => {
           query?: string;
           payload?: Record<string, unknown>;
           params?: Record<string, string>;
-          token: 'allPerms' | 'uploadUser';
+          token: 'allPerms' | 'uploadUser' | 'readAloudUser';
         }
       > = {
         [Permission.LibraryDownload]: {
@@ -702,6 +794,18 @@ describe('Authorization matrix (e2e)', () => {
           path: '/libraries/:id/upload',
           token: 'uploadUser',
         },
+        [Permission.LibraryGenerateReadAloud]: {
+          method: 'GET',
+          path: '/books/:bookId/read-aloud',
+          params: { bookId: String(bookA.bookId) },
+          token: 'readAloudUser',
+        },
+        [Permission.LibraryGenerateStoryGuide]: {
+          method: 'POST',
+          path: '/books/:bookId/story-guide/cancel',
+          params: { bookId: String(bookA.bookId) },
+          token: 'allPerms',
+        },
         [Permission.LibraryEditMetadata]: {
           method: 'GET',
           path: '/books/:id/write-log',
@@ -711,38 +815,6 @@ describe('Authorization matrix (e2e)', () => {
           method: 'DELETE',
           path: '/books',
           payload: { bookIds: [999_999] },
-          token: 'allPerms',
-        },
-        [Permission.PodcastManageFeeds]: {
-          method: 'GET',
-          path: '/podcast-libraries/:libraryId/jobs',
-          params: { libraryId: String(podcastLibrary.libraryId) },
-          token: 'allPerms',
-        },
-        [Permission.PodcastDownload]: {
-          method: 'POST',
-          path: '/podcast-episodes/:episodeId/download',
-          params: { episodeId: '999999' },
-          token: 'allPerms',
-        },
-        [Permission.PodcastEditMetadata]: {
-          method: 'PATCH',
-          path: '/podcasts/:podcastId/metadata',
-          params: { podcastId: '999999' },
-          payload: { title: 'Authorization probe' },
-          token: 'allPerms',
-        },
-        [Permission.PodcastManageRetention]: {
-          method: 'PATCH',
-          path: '/podcast-libraries/:libraryId/settings',
-          params: { libraryId: String(podcastLibrary.libraryId) },
-          payload: { completionRemainingSeconds: 60 },
-          token: 'allPerms',
-        },
-        [Permission.PodcastPurge]: {
-          method: 'GET',
-          path: '/podcasts/:podcastId/purge-preview',
-          params: { podcastId: '999999' },
           token: 'allPerms',
         },
         [Permission.KoboSync]: {
@@ -857,12 +929,24 @@ describe('Authorization matrix (e2e)', () => {
           path: '/book-request-fulfilment/download-clients',
           token: 'allPerms',
         },
+        [Permission.LibraryMergeBooks]: {
+          method: 'GET',
+          path: '/books/merge/jobs/:jobId',
+          params: { jobId: '2147483000' },
+          token: 'allPerms',
+        },
+        [Permission.ApiKeys]: {
+          method: 'POST',
+          path: '/api-keys/:id/regenerate',
+          params: { id: '2147483000' },
+          token: 'allPerms',
+        },
       };
 
       const failures: MatrixFailure[] = [];
 
       for (const permission of Object.values(Permission)) {
-        if (serviceEnforcedPermissions.includes(permission) || isFeatureGatedPermission(permission)) continue;
+        if (serviceEnforcedPermissions.includes(permission)) continue;
         const probe = probes[permission];
         const inventoryRoute = routeInventory.routes.find((route) => route.httpMethod === probe.method && route.path === probe.path);
         expect(inventoryRoute).toBeTruthy();
@@ -880,7 +964,7 @@ describe('Authorization matrix (e2e)', () => {
             : await ctx.app.inject({
                 method: probe.method,
                 url: buildUrl(probe.path, probe.query, probe.params),
-                headers: authHeader(personas.allPermsUser.accessToken),
+                headers: authHeader(probe.token === 'readAloudUser' ? personas.readAloudUser.accessToken : personas.allPermsUser.accessToken),
                 payload: probe.method === 'GET' ? undefined : (probe.payload ?? {}),
               });
 
@@ -902,25 +986,6 @@ describe('Authorization matrix (e2e)', () => {
       const guardedRoutes = routeInventory.routes.filter(
         (route) => !route.isPublic && route.libraryAccess.length > 0 && isSupportedMethod(route.httpMethod),
       );
-      const podcastGuardedRoutes = [
-        'GET /podcast-libraries/:libraryId/podcasts',
-        'GET /podcast-libraries/:libraryId/episodes',
-        'POST /podcast-libraries/:libraryId/queue-episodes',
-        'POST /podcast-libraries/:libraryId/feed-preview',
-        'POST /podcast-libraries/:libraryId/podcasts',
-        'POST /podcast-libraries/:libraryId/opml/import',
-        'POST /podcast-libraries/:libraryId/import-scan',
-        'GET /podcast-libraries/:libraryId/import-scan/latest',
-        'POST /podcast-libraries/:libraryId/shows/bulk-purge-preview',
-        'POST /podcast-libraries/:libraryId/shows/bulk-delete',
-        'GET /podcast-libraries/:libraryId/opml/export',
-        'GET /podcast-libraries/:libraryId/settings',
-        'PATCH /podcast-libraries/:libraryId/settings',
-        'GET /podcast-libraries/:libraryId/health',
-        'GET /podcast-libraries/:libraryId/activity',
-        'GET /podcast-libraries/:libraryId/jobs',
-        'GET /podcast-libraries/:libraryId/jobs/:jobId',
-      ];
       expect(guardedRoutes.map(routeLabel).sort()).toEqual(
         [
           'GET /libraries/:id',
@@ -930,11 +995,13 @@ describe('Authorization matrix (e2e)', () => {
           'POST /libraries/:id/recompute-added-at',
           'POST /libraries/:id/write-metadata-to-files',
           'GET /scanner/libraries/:id/scan-history',
+          'GET /scanner/libraries/:id/reapply-regex-metadata',
+          'POST /scanner/libraries/:id/reapply-regex-metadata',
           'POST /libraries/:id/books/jump-buckets',
+          'POST /libraries/:id/books/facets',
           'GET /libraries/:id/bulk-rename/preview',
           'GET /libraries/:id/bulk-rename/status',
           'POST /libraries/:id/bulk-rename/execute',
-          ...(APP_FEATURES.podcasts ? podcastGuardedRoutes : []),
         ].sort(),
       );
 
@@ -949,10 +1016,8 @@ describe('Authorization matrix (e2e)', () => {
       }
 
       for (const route of guardedRoutes) {
-        const params = route.path.startsWith('/podcast-libraries/') ? { libraryId: String(podcastLibrary.libraryId) } : undefined;
         const noAccessResponse = await invokeRoute(route, {
           token: personas.permsNoLibraryUser.accessToken,
-          params,
           query: route.path === '/libraries/:id/write-metadata-to-files' ? 'dryRun=true' : undefined,
         });
         expectError(noAccessResponse, 403, 'No library access');
@@ -971,15 +1036,6 @@ describe('Authorization matrix (e2e)', () => {
         headers: authHeader(ctx.adminToken),
       });
       expect(bypassResponse.statusCode).toBe(200);
-
-      if (APP_FEATURES.podcasts) {
-        const podcastBypassResponse = await ctx.app.inject({
-          method: 'GET',
-          url: `/api/v1/podcast-libraries/${podcastLibrary.libraryId}/settings`,
-          headers: authHeader(ctx.adminToken),
-        });
-        expect(podcastBypassResponse.statusCode).toBe(200);
-      }
     }, 120_000);
 
     it('enforces default-password lock with allow-list exceptions', async () => {
@@ -1008,114 +1064,6 @@ describe('Authorization matrix (e2e)', () => {
         },
       });
       expect(changePasswordResponse.statusCode).toBe(204);
-    });
-  });
-
-  describe.skipIf(!APP_FEATURES.podcasts)('custom public guards - podcast stream tickets', () => {
-    it('rejects an unauthenticated stream request that carries no ticket', async () => {
-      const response = await ctx.app.inject({ method: 'GET', url: '/api/v1/podcast-episodes/1/stream' });
-      expect(response.statusCode).toBe(401);
-    });
-
-    it('rejects a stream request whose ticket does not verify', async () => {
-      const response = await ctx.app.inject({ method: 'GET', url: '/api/v1/podcast-episodes/1/stream?ticket=not-a-real-ticket' });
-      expectError(response, 401, 'Invalid or expired podcast stream ticket');
-    });
-
-    it('rejects a stream request whose ticket is an ordinary access token', async () => {
-      const response = await ctx.app.inject({
-        method: 'GET',
-        url: `/api/v1/podcast-episodes/1/stream?ticket=${personas.allPermsUser.accessToken}`,
-      });
-      expect(response.statusCode).toBe(401);
-    });
-
-    it('still accepts header authentication on the stream route', async () => {
-      const response = await ctx.app.inject({
-        method: 'GET',
-        url: '/api/v1/podcast-episodes/1/stream',
-        headers: authHeader(personas.allPermsUser.accessToken),
-      });
-      expect(response.statusCode).toBe(404);
-    });
-
-    it('checks episode access before issuing a ticket', async () => {
-      const unauthenticated = await ctx.app.inject({ method: 'POST', url: '/api/v1/podcast-episodes/1/stream-ticket' });
-      expect(unauthenticated.statusCode).toBe(401);
-
-      const inaccessible = await ctx.app.inject({
-        method: 'POST',
-        url: '/api/v1/podcast-episodes/1/stream-ticket',
-        headers: authHeader(personas.basicUser.accessToken),
-      });
-      expect(inaccessible.statusCode).toBe(404);
-    });
-
-    it('omits inaccessible episodes from a batch state read instead of failing', async () => {
-      const unauthenticated = await ctx.app.inject({
-        method: 'POST',
-        url: '/api/v1/podcast-episodes/state-batch',
-        payload: { episodeIds: [1] },
-      });
-      expect(unauthenticated.statusCode).toBe(401);
-
-      const response = await ctx.app.inject({
-        method: 'POST',
-        url: '/api/v1/podcast-episodes/state-batch',
-        headers: authHeader(personas.basicUser.accessToken),
-        payload: { episodeIds: [1, 2, 3] },
-      });
-      expect(response.statusCode).toBe(201);
-      expect(response.json()).toEqual([]);
-    });
-
-    it('rejects a batch state read above the id cap', async () => {
-      const response = await ctx.app.inject({
-        method: 'POST',
-        url: '/api/v1/podcast-episodes/state-batch',
-        headers: authHeader(personas.basicUser.accessToken),
-        payload: { episodeIds: Array.from({ length: 201 }, (_, index) => index + 1) },
-      });
-      expect(response.statusCode).toBe(400);
-    });
-
-    /**
-     * Directory search has no `:libraryId` for the library guard to read, so its editor gate
-     * lives in the service. These probes cover that gate without reaching the directory host.
-     */
-    it('refuses directory search for a permitted user with no manageable podcast library', async () => {
-      const unauthenticated = await ctx.app.inject({ method: 'GET', url: '/api/v1/podcast-search?q=orbit' });
-      expect(unauthenticated.statusCode).toBe(401);
-
-      const noLibrary = await ctx.app.inject({
-        method: 'GET',
-        url: '/api/v1/podcast-search?q=orbit',
-        headers: authHeader(personas.permsNoLibraryUser.accessToken),
-      });
-      expectError(noLibrary, 403, 'No podcast library access');
-
-      const noPermission = await ctx.app.inject({
-        method: 'GET',
-        url: '/api/v1/podcast-search?q=orbit',
-        headers: authHeader(personas.basicUser.accessToken),
-      });
-      expect(noPermission.statusCode).toBe(403);
-    });
-
-    it('validates directory search bounds before reaching the directory', async () => {
-      const missingTerm = await ctx.app.inject({
-        method: 'GET',
-        url: '/api/v1/podcast-search',
-        headers: authHeader(personas.allPermsUser.accessToken),
-      });
-      const oversizedLimit = await ctx.app.inject({
-        method: 'GET',
-        url: '/api/v1/podcast-search?q=orbit&limit=51',
-        headers: authHeader(personas.allPermsUser.accessToken),
-      });
-
-      expect(missingTerm.statusCode).toBe(400);
-      expect(oversizedLimit.statusCode).toBe(400);
     });
   });
 
@@ -1609,6 +1557,123 @@ describe('Authorization matrix (e2e)', () => {
       expect(publicRead.statusCode).toBe(200);
     });
 
+    it('lets only the owner set a smartScope grid shape, and keeps it through a released iOS update (issue #1926)', async () => {
+      const portraitResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/smart-scopes',
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { name: `authz-portrait-smartScope-${randomUUID()}`, icon: 'Aperture', defaultSort: [] },
+      });
+      expect(portraitResponse.statusCode).toBe(201);
+      expect(portraitResponse.json()).toEqual(expect.objectContaining({ coverAspectRatio: '2/3' }));
+
+      const squareResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/smart-scopes',
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { name: `authz-square-smartScope-${randomUUID()}`, icon: 'Headphones', defaultSort: [], isPublic: true, coverAspectRatio: '1/1' },
+      });
+      expect(squareResponse.statusCode).toBe(201);
+      const squareScope = squareResponse.json() as { id: number; name: string; coverAspectRatio: string };
+      expect(squareScope.coverAspectRatio).toBe('1/1');
+
+      const sharedRead = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/v1/smart-scopes/${squareScope.id}`,
+        headers: authHeader(personas.otherUser.accessToken),
+      });
+      expect(sharedRead.statusCode).toBe(200);
+      expect(sharedRead.json()).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+
+      const foreignShapeChange = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/smart-scopes/${squareScope.id}`,
+        headers: authHeader(personas.otherUser.accessToken),
+        payload: { coverAspectRatio: '2/3' },
+      });
+      expectError(foreignShapeChange, 403, 'Cannot modify this smartScope');
+
+      // The released iOS app sends every field it knows on update, and the shape is not one of them.
+      const iosUpdate = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/smart-scopes/${squareScope.id}`,
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: {
+          name: squareScope.name,
+          icon: 'Headphones',
+          filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'listen' }] },
+          defaultSort: [],
+          isPublic: true,
+          syncToKobo: false,
+        },
+      });
+      expect(iosUpdate.statusCode).toBe(200);
+      expect(iosUpdate.json()).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+
+      const nullShape = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/smart-scopes/${squareScope.id}`,
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { coverAspectRatio: null },
+      });
+      expect(nullShape.statusCode).toBe(400);
+    });
+
+    it('lets only the owner set a collection grid shape, and keeps it through a released iOS update (issue #1926)', async () => {
+      const portraitResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/collections',
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { name: `authz-portrait-collection-${randomUUID()}`, icon: 'FolderOpen' },
+      });
+      expect(portraitResponse.statusCode).toBe(201);
+      expect(portraitResponse.json()).toEqual(expect.objectContaining({ coverAspectRatio: '2/3' }));
+
+      const squareResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/collections',
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { name: `authz-square-collection-${randomUUID()}`, icon: 'Headphones', isPublic: true, coverAspectRatio: '1/1' },
+      });
+      expect(squareResponse.statusCode).toBe(201);
+      const squareCollection = squareResponse.json() as { id: number; name: string; coverAspectRatio: string };
+      expect(squareCollection.coverAspectRatio).toBe('1/1');
+
+      const sharedList = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/v1/collections',
+        headers: authHeader(personas.otherUser.accessToken),
+      });
+      expect(sharedList.statusCode).toBe(200);
+      expect(sharedList.json()).toEqual(expect.arrayContaining([expect.objectContaining({ id: squareCollection.id, coverAspectRatio: '1/1' })]));
+
+      const foreignShapeChange = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/collections/${squareCollection.id}`,
+        headers: authHeader(personas.otherUser.accessToken),
+        payload: { coverAspectRatio: '2/3' },
+      });
+      expectError(foreignShapeChange, 403, 'Cannot modify this collection');
+
+      // The released iOS app sends every field it knows on update, and the shape is not one of them.
+      const iosUpdate = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/collections/${squareCollection.id}`,
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { name: squareCollection.name, icon: 'Headphones', description: 'For the commute', isPublic: true, syncToKobo: false },
+      });
+      expect(iosUpdate.statusCode).toBe(200);
+      expect(iosUpdate.json()).toEqual(expect.objectContaining({ coverAspectRatio: '1/1' }));
+
+      const nullShape = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/collections/${squareCollection.id}`,
+        headers: authHeader(personas.ownerUser.accessToken),
+        payload: { coverAspectRatio: null },
+      });
+      expect(nullShape.statusCode).toBe(400);
+    });
+
     it('enforces OPDS user ownership checks', async () => {
       const created = await ctx.app.inject({
         method: 'POST',
@@ -1658,7 +1723,7 @@ describe('Authorization matrix (e2e)', () => {
           headers: authHeader(personas.bookDockUser.accessToken),
           payload: request.payload,
         });
-        expectError(response, 403, 'You do not have access to this Book Dock file');
+        expectError(response, 403, 'You do not have access to this Library Dock file');
       }
     });
 
@@ -1838,8 +1903,6 @@ describe('Authorization matrix (e2e)', () => {
       isGreyscale: 'false',
       key: 'allow_registration',
       libraryId: String(libraryA.libraryId),
-      podcastId: '1',
-      episodeId: '1',
       pageIndex: '1',
       productId: '1',
       quality: '85',
@@ -1867,6 +1930,7 @@ describe('Authorization matrix (e2e)', () => {
     route: RouteInventoryRoute,
     options: {
       token?: string;
+      apiKey?: string;
       query?: string;
       payload?: Record<string, unknown>;
       params?: Record<string, string>;
@@ -1889,6 +1953,8 @@ describe('Authorization matrix (e2e)', () => {
 
     if (options.token) {
       request.headers = authHeader(options.token);
+    } else if (options.apiKey) {
+      request.headers = { 'x-api-key': options.apiKey };
     }
 
     if (method !== 'GET') {
@@ -1896,6 +1962,26 @@ describe('Authorization matrix (e2e)', () => {
     }
 
     return ctx.app.inject(request);
+  }
+
+  /** Mirrors `ApiKeyPolicyGuard`, read from the same metadata the guard reads. */
+  function apiKeyClassOf(httpMethod: string, handler: object, controller: object): ApiKeyRouteClass {
+    const read = (key: string): unknown => Reflect.getMetadata(key, handler) ?? Reflect.getMetadata(key, controller);
+    if (read(IS_PUBLIC_KEY)) return 'public';
+    if (!Reflect.getMetadata(ALLOW_API_KEY_KEY, handler) && read(INTERACTIVE_ONLY_KEY)) return 'interactive';
+    if (['GET', 'HEAD', 'OPTIONS'].includes(httpMethod) || read(KEY_READ_SAFE_KEY)) return 'read';
+    return 'write';
+  }
+
+  async function createApiKey(owner: TestUserSession, access: 'read' | 'write'): Promise<string> {
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/api-keys',
+      headers: authHeader(owner.accessToken),
+      payload: { name: `authz-${access}-${randomUUID().slice(0, 8)}`, access },
+    });
+    expect(response.statusCode, response.body).toBe(201);
+    return (response.json() as { token: string }).token;
   }
 
   function parseBody(response: InjectResponse): Record<string, unknown> | null {

@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { shallowRef, watchEffect } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
+import AppChart from '@/components/charts/AppChart.vue'
 import { Layers } from '@lucide/vue'
 
-import { useThemeStore } from '@/stores/theme'
-import { getThemePalette, readCssColor } from '@/lib/echarts'
+import { useChartTokens } from '@/composables/useChartTokens'
 import { useTopSeries } from '../../composables/useTopSeries'
 import ChartCard from '../ChartCard.vue'
 
-const themeStore = useThemeStore()
+const chartTokens = useChartTokens()
 const { t } = useI18n()
 
 const { data, loading, error } = useTopSeries()
@@ -34,9 +33,9 @@ watchEffect(() => {
     return parseFloat(((running / total) * 100).toFixed(1))
   })
 
-  const palette = getThemePalette(themeStore.resolvedTheme, themeStore.accent)
+  const palette = chartTokens.value.palette()
   const primary = palette[0] ?? '#6b7280'
-  const mutedColor = readCssColor('--muted-foreground')
+  const mutedColor = chartTokens.value.color('--muted-foreground')
 
   const barColors = items.map((_, i) => {
     if (i < 3) return primary
@@ -149,6 +148,6 @@ watchEffect(() => {
 
 <template>
   <ChartCard :title="t('statistics.charts.topSeries.title')" :icon="Layers" :color-index="8" :loading :error :empty="!data.items.length">
-    <VChart :option autoresize style="height: 100%" />
+    <AppChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

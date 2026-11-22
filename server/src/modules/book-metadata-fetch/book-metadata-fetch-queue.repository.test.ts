@@ -5,12 +5,14 @@ vi.mock('drizzle-orm', () => {
     chunks,
     separator,
   }));
+  (sqlFn as typeof sqlFn & { identifier: ReturnType<typeof vi.fn> }).identifier = vi.fn((value: string) => ({ op: 'sql.identifier', value }));
 
   return {
     and: vi.fn((...clauses: unknown[]) => ({ op: 'and', clauses })),
     asc: vi.fn((value: unknown) => ({ op: 'asc', value })),
     count: vi.fn(() => ({ op: 'count' })),
     eq: vi.fn((left: unknown, right: unknown) => ({ op: 'eq', left, right })),
+    getTableName: vi.fn(() => 'table'),
     inArray: vi.fn((left: unknown, values: unknown[]) => ({ op: 'inArray', left, values })),
     isNull: vi.fn((value: unknown) => ({ op: 'isNull', value })),
     max: vi.fn((value: unknown) => ({ op: 'max', value })),
@@ -19,10 +21,12 @@ vi.mock('drizzle-orm', () => {
   };
 });
 
+vi.mock('../jobs/job-keyset', () => ({ microseconds: vi.fn((expr: unknown) => ({ op: 'microseconds', expr })) }));
+
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { BookMetadataFetchConfig } from '@bookorbit/types';
 
-import { bookMetadata, bookMetadataFetchQueue, bookNarrators, books } from '../../db/schema';
+import { bookCovers, bookFiles, bookMetadata, bookMetadataFetchQueue, bookNarrators, books } from '../../db/schema';
 import { BookMetadataFetchQueueRepository } from './book-metadata-fetch-queue.repository';
 
 describe('BookMetadataFetchQueueRepository', () => {
@@ -137,6 +141,36 @@ describe('BookMetadataFetchQueueRepository', () => {
     expect(hasNarratorsClause).toBe(true);
     expect(hasDurationClause).toBe(true);
     expect(hasAbridgedClause).toBe(true);
+    // Each is gated on the book having audio, read-along EPUBs included: an ebook cannot lack them.
+    expect(sqlCalls.some((call) => call.slice(1).includes(bookFiles.mediaOverlayAvailable))).toBe(true);
+  });
+
+  it('fetchEligibleBookIds finds books whose cover media include audio and whose audio slot is empty', async () => {
+    const { db, selectBuilder } = makeDb();
+    selectBuilder.where.mockResolvedValueOnce([{ bookId: 9 }]);
+    const repo = new BookMetadataFetchQueueRepository(db as never);
+    const config = baseConfig();
+    config.conditions.missingFields.enabled = true;
+    config.conditions.missingFields.fields = ['audioCover'];
+
+    await expect(repo.fetchEligibleBookIds(config)).resolves.toEqual([9]);
+
+    const sqlCalls = vi.mocked(sql).mock.calls;
+    expect(sqlCalls.some((call) => call.slice(1).includes(bookCovers) && call.slice(1).includes('audio'))).toBe(true);
+    expect(sqlCalls.some((call) => call.slice(1).includes(bookFiles.mediaOverlayAvailable))).toBe(true);
+  });
+
+  it('checks both ISBN columns when scheduling books without an ISBN', async () => {
+    const { db, selectBuilder } = makeDb();
+    selectBuilder.where.mockResolvedValueOnce([{ bookId: 7 }]);
+    const repo = new BookMetadataFetchQueueRepository(db as never);
+    const config = baseConfig();
+    config.conditions.missingFields = { enabled: true, fields: ['isbn'] };
+    await expect(repo.fetchEligibleBookIds(config, 5)).resolves.toEqual([7]);
+    expect(vi.mocked(sql).mock.calls.some((call) => call.slice(1).includes(bookMetadata.isbn10) && call.slice(1).includes(bookMetadata.isbn13))).toBe(
+      true,
+    );
+    expect(eq).toHaveBeenCalledWith(books.libraryId, 5);
   });
 
   it('returns empty results without touching the database when no conditions are enabled', async () => {
@@ -220,6 +254,42 @@ describe('BookMetadataFetchQueueRepository', () => {
     });
   });
 
+  it('countForJobs reads grouped counts and the latest failure, keeping the oldest waiting entry', async () => {
+    const { db, selectBuilder } = makeDb();
+    selectBuilder.groupBy.mockResolvedValue([
+      { status: 'queued', cnt: '5', since: 1_763_200_000_000_000 },
+      { status: 'processing', cnt: '1', since: 1_763_100_000_000_000 },
+      { status: 'failed', cnt: 2, since: 1_763_000_000_000_000 },
+    ]);
+    selectBuilder.where.mockResolvedValueOnce([{ latest: 1_763_300_000_000_000 }]);
+    const repo = new BookMetadataFetchQueueRepository(db as never);
+
+    await expect(repo.countForJobs()).resolves.toEqual({
+      queued: 5,
+      processing: 1,
+      failed: 2,
+      queueSince: 1_763_100_000_000_000,
+      failedAt: 1_763_300_000_000_000,
+    });
+    expect(selectBuilder.groupBy).toHaveBeenCalledWith(bookMetadataFetchQueue.status);
+    expect(selectBuilder.where).toHaveBeenCalledWith(eq(bookMetadataFetchQueue.status, 'failed'));
+    expect(db.select).toHaveBeenCalledWith({
+      status: bookMetadataFetchQueue.status,
+      cnt: { op: 'count' },
+      since: { op: 'microseconds', expr: expect.objectContaining({ text: 'min()' }) },
+    });
+    expect(db.select).toHaveBeenCalledWith({ latest: { op: 'microseconds', expr: expect.objectContaining({ text: 'max()' }) } });
+  });
+
+  it('countForJobs reports an empty queue with no times', async () => {
+    const { db, selectBuilder } = makeDb();
+    selectBuilder.groupBy.mockResolvedValue([]);
+    selectBuilder.where.mockResolvedValueOnce([{ latest: null }]);
+    const repo = new BookMetadataFetchQueueRepository(db as never);
+
+    await expect(repo.countForJobs()).resolves.toEqual({ queued: 0, processing: 0, failed: 0, queueSince: null, failedAt: null });
+  });
+
   it('resetAllProcessingOnBoot and recoverStuckProcessing return recovered row counts', async () => {
     const { db, updateBuilder } = makeDb();
     updateBuilder.returning.mockResolvedValueOnce([{ bookId: 1 }, { bookId: 2 }]).mockResolvedValueOnce([{ bookId: 4 }]);
@@ -238,7 +308,7 @@ describe('BookMetadataFetchQueueRepository', () => {
     config.conditions.neverFetched.enabled = true;
 
     await expect(repo.scheduleEligibleBooksInBatches(config, 'manual_trigger', undefined, 2)).resolves.toBe(2);
-    expect(repo.upsertSchedule).toHaveBeenCalledWith([2, 5], 'manual_trigger');
+    expect(repo.upsertSchedule).toHaveBeenCalledWith([2, 5], 'manual_trigger', false);
   });
 
   it('fetchDue short-circuits for non-positive limits', async () => {

@@ -37,7 +37,7 @@ function makeService() {
     findRecommendationTitlesByBookIds: vi.fn(),
   };
   const libraryService = {
-    verifyUserAccess: vi.fn().mockResolvedValue(undefined),
+    verifyAccess: vi.fn().mockResolvedValue(undefined),
     findAll: vi.fn().mockResolvedValue([{ id: 7 }]),
     findAccessibleLibraryIds: vi.fn().mockResolvedValue([7]),
   };
@@ -47,6 +47,9 @@ function makeService() {
   const userBookStatusService = {
     findByBookIds: vi.fn().mockResolvedValue(new Map()),
   };
+  const coverStore = {
+    facesFor: vi.fn().mockResolvedValue(new Map()),
+  };
 
   const service = new RecommendationService(
     recRepo as never,
@@ -54,9 +57,10 @@ function makeService() {
     libraryService as never,
     embedder as never,
     userBookStatusService as never,
+    coverStore as never,
   );
 
-  return { service, recRepo, bookRepo, libraryService, embedder, userBookStatusService };
+  return { service, recRepo, bookRepo, libraryService, embedder, userBookStatusService, coverStore };
 }
 
 describe('RecommendationService', () => {
@@ -80,7 +84,7 @@ describe('RecommendationService', () => {
 
     await service.getRecommendations(1, user);
 
-    expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(user.id, 21, true);
+    expect(libraryService.verifyAccess).toHaveBeenCalledWith(expect.objectContaining({ id: user.id, isSuperuser: true }), 21);
   });
 
   it('uses fallback embedding when the target book has no metadata row', async () => {
@@ -356,7 +360,7 @@ describe('RecommendationService', () => {
 
       await service.getSeriesBooks(1, makeUser(true));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(12, 21, true);
+      expect(libraryService.verifyAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 12, isSuperuser: true }), 21);
     });
 
     it('returns empty array when the book has no series', async () => {
@@ -475,7 +479,7 @@ describe('RecommendationService', () => {
 
       await service.getAuthorBooks(1, makeUser(true));
 
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledWith(12, 21, true);
+      expect(libraryService.verifyAccess).toHaveBeenCalledWith(expect.objectContaining({ id: 12, isSuperuser: true }), 21);
     });
 
     it('returns books by the same author excluding the current book', async () => {
@@ -538,6 +542,24 @@ describe('RecommendationService', () => {
       expect(userBookStatusService.findByBookIds).toHaveBeenCalledWith(12, [10, 20]);
       expect(result[0].readStatus).toEqual(status);
       expect(result[1].readStatus).toBeNull();
+    });
+
+    it("replaces the library's shape with each book's cover face", async () => {
+      const { service, bookRepo, recRepo, libraryService, coverStore } = makeService();
+      bookRepo.findLibraryIdByBookId.mockResolvedValue(5);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([5]);
+      recRepo.findAuthorBooks.mockResolvedValue([
+        { bookId: 10, title: 'Audio First', coverAspectRatio: '2/3', updatedAt: null, coverSource: 'extracted', authorNames: [], isAudiobook: true },
+        { bookId: 20, title: 'No Face', coverAspectRatio: '2/3', updatedAt: null, coverSource: null, authorNames: [], isAudiobook: false },
+      ]);
+      coverStore.facesFor.mockResolvedValue(new Map([[10, { coverAspectRatio: '1/1', coverVersion: 'audio:a:b' }]]));
+
+      const result = await service.getAuthorBooks(1, makeUser());
+
+      expect(coverStore.facesFor).toHaveBeenCalledWith([10, 20]);
+      expect(result[0]).toMatchObject({ coverAspectRatio: '1/1', coverVersion: 'audio:a:b' });
+      expect(result[1].coverAspectRatio).toBe('2/3');
+      expect(result[1].coverVersion).toBeUndefined();
     });
 
     it('returns empty array when author has no other books', async () => {

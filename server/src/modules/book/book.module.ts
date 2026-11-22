@@ -1,11 +1,16 @@
 import { Module, forwardRef } from '@nestjs/common';
+import { SelfWriteRegistryModule } from '../../common/self-write-registry.module';
 
 import { AchievementModule } from '../achievement/achievement.module';
 import { AppSettingsModule } from '../app-settings/app-settings.module';
+import { AudiobookChaptersModule } from '../audiobook-chapters/audiobook-chapters.module';
+import { BookAliasModule } from '../book-alias/book-alias.module';
+import { BulkRunsModule } from '../bulk-runs/bulk-runs.module';
 import { EmbeddingModule } from '../embedding/embedding.module';
 import { FileWriteModule } from '../file-write/file-write.module';
 import { LibraryModule } from '../library/library.module';
 import { BookMetadataLockModule } from '../book-metadata-lock/book-metadata-lock.module';
+import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
 import { CustomMetadataModule } from '../custom-metadata/custom-metadata.module';
 import { MetadataModule } from '../metadata/metadata.module';
 import { MetadataFetchModule } from '../metadata-fetch/metadata-fetch.module';
@@ -15,25 +20,40 @@ import { UserBookNoteModule } from '../user-book-note/user-book-note.module';
 import { PositionConverterModule } from '../position-converter/position-converter.module';
 import { UserBookStatusModule } from '../user-book-status/user-book-status.module';
 import { AudiobookEbookProgressSyncService } from './audiobook-ebook-progress-sync.service';
+import { DeliveryArtifactRepository } from './delivery-artifact.repository';
+import { DeliveryHashRegistrationService } from './delivery-hash-registration.service';
+import { DeliverySelectionService } from './delivery-selection.service';
+import { DeliveryArtifactService } from './delivery-artifact.service';
 import { AudiolessEpubService } from './audioless-epub.service';
 import { BookReadService } from './book-read.service';
 import { BookQueryBuilder } from './book-query-builder.service';
 import { BookSortBuilder } from './book-sort-builder.service';
 import { BookController } from './book.controller';
+import { BookEmbedAudioCoverBulkHandler, BookReExtractCoverBulkHandler, BookRefreshMetadataBulkHandler } from './book-bulk-run-handlers';
+import { BookLinkMembersRepository } from './book-link-members.repository';
 import { BookRepository } from './book.repository';
+import { BookJobSubjects } from './book-job-subjects.service';
+import { BookJobSubjectsRepository } from './book-job-subjects.repository';
 import { BookService } from './book.service';
 import { BookAuthorSortKeyBackfillService } from './book-author-sort-key-backfill.service';
 import { ReadingAttemptController } from './reading-attempt.controller';
+import { ReadingProgressController } from './reading-progress.controller';
+import { ReadingProgressService } from './reading-progress.service';
 
 @Module({
   imports: [
     forwardRef(() => LibraryModule),
+    AudiobookChaptersModule,
+    BookAliasModule,
+    BulkRunsModule,
     BookMetadataLockModule,
+    BookCoverStoreModule,
     CustomMetadataModule,
     MetadataModule,
     EmbeddingModule,
     MetadataFetchModule,
     FileWriteModule,
+    SelfWriteRegistryModule,
     AppSettingsModule,
     MetadataScoreModule,
     NarratorModule,
@@ -42,17 +62,28 @@ import { ReadingAttemptController } from './reading-attempt.controller';
     AchievementModule,
     PositionConverterModule,
   ],
-  controllers: [BookController, ReadingAttemptController],
+  controllers: [BookController, ReadingAttemptController, ReadingProgressController],
   providers: [
     BookService,
+    BookRefreshMetadataBulkHandler,
+    BookReExtractCoverBulkHandler,
+    BookEmbedAudioCoverBulkHandler,
     BookRepository,
+    BookJobSubjects,
+    BookJobSubjectsRepository,
+    BookLinkMembersRepository,
     BookReadService,
     BookSortBuilder,
     BookQueryBuilder,
     BookAuthorSortKeyBackfillService,
     AudiobookEbookProgressSyncService,
     AudiolessEpubService,
+    DeliveryArtifactService,
+    DeliveryArtifactRepository,
+    DeliverySelectionService,
+    DeliveryHashRegistrationService,
+    ReadingProgressService,
   ],
-  exports: [BookService, BookReadService, BookQueryBuilder, AudiolessEpubService],
+  exports: [BookService, BookJobSubjects, BookReadService, BookQueryBuilder, AudiolessEpubService, DeliveryArtifactService, DeliverySelectionService],
 })
 export class BookModule {}

@@ -8,16 +8,6 @@ export interface DisplayOrderEntry {
 }
 
 /**
- * Scopes and collections share one displayOrder sequence per user across both media, so a reorder
- * inside one section has to rewrite the whole run: books take the low slots, podcasts follow.
- * Renumbering a single section from zero would collide with the other section's slots, and the
- * server's `(displayOrder, name)` ordering would then silently reshuffle it by name.
- */
-export function mergedMediaOrder(books: Identified[], podcasts: Identified[]): DisplayOrderEntry[] {
-  return [...books, ...podcasts].map((entry, index) => ({ id: entry.id, displayOrder: index }))
-}
-
-/**
  * The reordered entries the user actually owns, in their new order.
  *
  * Shared scopes appear in the list but belong to their owner. The reorder endpoint updates only
@@ -27,4 +17,18 @@ export function mergedMediaOrder(books: Identified[], podcasts: Identified[]): D
 export function ownedInOrder(order: DisplayOrderEntry[], owned: Identified[]): Identified[] {
   const ownedIds = new Set(owned.map((entry) => entry.id))
   return order.filter((entry) => ownedIds.has(entry.id)).map((entry) => ({ id: entry.id }))
+}
+
+export type PersistOrder = (order: DisplayOrderEntry[]) => Promise<void>
+
+/**
+ * Persists a reordered section: only the rows the user may reorder, read at persist time, and
+ * renumbered from zero with no gaps.
+ */
+export function orderPersister(owned: () => Identified[], reorder: PersistOrder): PersistOrder {
+  return async (order) => {
+    const entries = ownedInOrder(order, owned())
+    if (entries.length === 0) return
+    await reorder(entries.map((entry, index) => ({ id: entry.id, displayOrder: index })))
+  }
 }

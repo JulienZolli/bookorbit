@@ -7,11 +7,13 @@ const mocks = vi.hoisted(() => ({
   execFile: vi.fn(),
   randomUUID: vi.fn(),
   replaceFileAtomically: vi.fn(),
+  runFfmpeg: vi.fn(),
   sharpFactory: vi.fn(),
   sharpJpeg: vi.fn(),
   sharpToBuffer: vi.fn(),
   unlink: vi.fn(),
   writeFile: vi.fn(),
+  writeMp4FreeformTags: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
@@ -36,8 +38,19 @@ vi.mock('../shared/atomic-file-replace', () => ({
   replaceFileAtomically: mocks.replaceFileAtomically,
 }));
 
+vi.mock('./ffmpeg-runner', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ffmpeg-runner')>()),
+  runFfmpeg: mocks.runFfmpeg,
+}));
+
+vi.mock('./mp4-freeform-tags', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./mp4-freeform-tags')>()),
+  writeMp4FreeformTags: mocks.writeMp4FreeformTags,
+}));
+
 import { replaceFileAtomically } from '../shared/atomic-file-replace';
-import { AudioMetadataEmbedder, testing } from './audio-metadata-embedder';
+import { AudioMetadataEmbedder, probeAudioDurationMs, testing } from './audio-metadata-embedder';
+import { FfmpegStalledError } from './ffmpeg-runner';
 
 const execFileMock = execFile as unknown as typeof mocks.execFile;
 const randomUUIDMock = randomUUID as unknown as typeof mocks.randomUUID;
@@ -59,14 +72,15 @@ describe('AudioMetadataEmbedder', () => {
         callback(null, '', '');
       },
     );
+    mocks.runFfmpeg.mockResolvedValue(undefined);
     writeFileMock.mockResolvedValue(undefined);
     unlinkMock.mockResolvedValue(undefined);
     replaceFileAtomicallyMock.mockResolvedValue(undefined);
+    mocks.writeMp4FreeformTags.mockResolvedValue(undefined);
   });
 
   it('writes text metadata, replaces cover when cover bytes are present, and atomically replaces the source file', async () => {
-    vi.stubEnv('FFMPEG_PATH', '/opt/bin/ffmpeg');
-    const embedder = new AudioMetadataEmbedder();
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: '/opt/bin/ffmpeg', ffprobePath: 'ffprobe' });
 
     await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', {
       coverBytes: Buffer.from('raw-cover'),
@@ -79,7 +93,7 @@ describe('AudioMetadataEmbedder', () => {
     expect(sharpMock).toHaveBeenCalledWith(Buffer.from('raw-cover'));
     expect(mocks.sharpJpeg).toHaveBeenCalledWith({ quality: 92 });
     expect(writeFileMock).toHaveBeenCalledWith('/books/audio/.bookorbit-cover-fixed-id.jpg', Buffer.from('jpeg-cover'));
-    expect(execFileMock).toHaveBeenCalledWith(
+    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       '/opt/bin/ffmpeg',
       expect.arrayContaining([
         '-v',
@@ -104,33 +118,90 @@ describe('AudioMetadataEmbedder', () => {
         'composer=Scott Brick',
         '/books/audio/.bookorbit-write-fixed-id.m4b',
       ]),
-      expect.objectContaining({ maxBuffer: expect.any(Number), timeout: 60_000 }),
-      expect.any(Function),
     );
     expect(replaceFileAtomicallyMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4b', '/books/audio/book.m4b');
     expect(unlinkMock).toHaveBeenCalledTimes(1);
     expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-cover-fixed-id.jpg');
   });
 
+  it('converts one shared cover to JPEG once across every track of a run', async () => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+    const sharedCover = Buffer.from('png-cover');
+
+    for (const track of ['01', '02', '03']) {
+      await embedder.embedMetadata(`/books/audio/${track}.mp3`, 'mp3', { coverBytes: sharedCover, metadata: [] });
+    }
+
+    expect(sharpMock).toHaveBeenCalledTimes(1);
+    expect(writeFileMock).toHaveBeenCalledTimes(3);
+    expect(writeFileMock).toHaveBeenCalledWith('/books/audio/.bookorbit-cover-fixed-id.jpg', Buffer.from('jpeg-cover'));
+  });
+
+  it('converts a different cover buffer again rather than reusing an earlier run', async () => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/a.mp3', 'mp3', { coverBytes: Buffer.from('first'), metadata: [] });
+    await embedder.embedMetadata('/books/audio/b.mp3', 'mp3', { coverBytes: Buffer.from('second'), metadata: [] });
+
+    expect(sharpMock).toHaveBeenCalledTimes(2);
+  });
+
   it('preserves existing embedded cover streams when no replacement cover is provided', async () => {
-    const embedder = new AudioMetadataEmbedder();
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
 
     await embedder.embedMetadata('/books/audio/book.flac', 'flac', { coverBytes: null, metadata: [{ key: 'album', value: 'Book' }] });
 
     expect(sharpMock).not.toHaveBeenCalled();
     expect(writeFileMock).not.toHaveBeenCalled();
-    expect(execFileMock).toHaveBeenCalledWith(
-      'ffmpeg',
-      expect.arrayContaining(['-map', '0', '-metadata', 'album=Book', '/books/audio/.bookorbit-write-fixed-id.flac']),
-      expect.any(Object),
-      expect.any(Function),
-    );
+    const args = mocks.runFfmpeg.mock.calls[0]![1] as string[];
+    expect(args).toEqual(expect.arrayContaining(['-metadata', 'album=Book', '/books/audio/.bookorbit-write-fixed-id.flac']));
+    // Audio, existing art, and subtitles only: a copied MP4 chapter data track fails the whole write.
+    expect(mapArgs(args)).toEqual(['0:a', '0:v?', '0:s?']);
     expect(unlinkMock).not.toHaveBeenCalledWith('/books/audio/.bookorbit-cover-fixed-id.jpg');
   });
 
+  it('never maps data streams, with or without a replacement cover', () => {
+    expect(mapArgs(testing.buildFfmpegArgs('/a.m4b', null, '/t.m4b', 'm4b', []))).toEqual(['0:a', '0:v?', '0:s?']);
+    expect(mapArgs(testing.buildFfmpegArgs('/a.m4b', '/c.jpg', '/t.m4b', 'm4b', []))).toEqual(['0:a', '0:s?', '1:v:0']);
+  });
+
+  it('bounds the ffprobe stream check and treats a timed-out probe as having art', async () => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+      callback(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }), '');
+    });
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: '/opt/bin/ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: null, metadata: [{ key: 'album', value: 'Book' }] });
+
+    const probeCall = execFileMock.mock.calls.find(([bin]) => bin === '/opt/bin/ffprobe')!;
+    expect(probeCall[2]).toEqual({ timeout: 30_000 });
+    expect(ffmpegArgs()).not.toContain('use_metadata_tags');
+    expect(ffmpegArgs()).not.toContain('-f');
+  });
+
+  function mockProbedStreams(streams: Array<{ codec_type: string; codec_name?: string }>): void {
+    mockProbeOutput(JSON.stringify({ streams }));
+  }
+
+  function mockProbeOutput(stdout: string): void {
+    execFileMock.mockImplementation(
+      (_bin: string, _args: string[], _options: unknown, callback: (error: Error | null, result: { stdout: string; stderr: string }) => void) => {
+        callback(null, { stdout, stderr: '' });
+      },
+    );
+  }
+
+  function ffmpegArgs(): string[] {
+    return mocks.runFfmpeg.mock.calls[0]![1] as string[];
+  }
+
+  function mapArgs(args: string[]): string[] {
+    return args.flatMap((arg, index) => (arg === '-map' ? [args[index + 1]!] : []));
+  }
+
   it('ignores temporary-file cleanup failures after a successful write', async () => {
     unlinkMock.mockRejectedValue(new Error('cleanup failed'));
-    const embedder = new AudioMetadataEmbedder();
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
 
     await expect(
       embedder.embedMetadata('/books/audio/book.flac', 'flac', { coverBytes: Buffer.from('raw-cover'), metadata: [] }),
@@ -142,8 +213,16 @@ describe('AudioMetadataEmbedder', () => {
   it('adds MP3-specific ID3v2 compatibility args', () => {
     const args = testing.buildFfmpegArgs('/books/audio/book.mp3', '/books/audio/cover.jpg', '/books/audio/out.mp3', 'mp3', []);
 
+    expect(args).toContain('-copyts');
+    expect(args.indexOf('-copyts')).toBeLessThan(args.indexOf('-i'));
     expect(args).toContain('-id3v2_version');
     expect(args[args.indexOf('-id3v2_version') + 1]).toBe('3');
+  });
+
+  it.each(['m4b', 'm4a', 'flac'])('does not add MP3 timestamp handling to %s output', (format) => {
+    const args = testing.buildFfmpegArgs(`/books/audio/book.${format}`, null, `/books/audio/out.${format}`, format, []);
+
+    expect(args).not.toContain('-copyts');
   });
 
   it.each(['m4b', 'm4a'])('enables extended metadata tags for %s output', (format) => {
@@ -181,14 +260,345 @@ describe('AudioMetadataEmbedder', () => {
     expect(args).toEqual(expect.arrayContaining(['-metadata:s:a:0', 'language=eng']));
   });
 
-  it('preserves the ffmpeg error when cleanup also fails', async () => {
-    execFileMock.mockImplementation(
-      (_bin: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
-        callback(new Error('ffmpeg failed'), '', '');
-      },
+  it('reads replacement chapters from the second input when no cover is replaced', () => {
+    const args = testing.buildFfmpegArgs('/books/audio/book.m4b', null, '/books/audio/out.m4b', 'm4b', [], {
+      chaptersPath: '/books/audio/chapters.ffmeta',
+    });
+
+    expect(getInputs(args)).toEqual(['/books/audio/book.m4b', '/books/audio/chapters.ffmeta']);
+    expect(args.slice(args.indexOf('-f'), args.indexOf('-f') + 4)).toEqual(['-f', 'ffmetadata', '-i', '/books/audio/chapters.ffmeta']);
+    expect(getMapTargets(args)).toEqual(['0:a', '0:v?', '0:s?']);
+    expect(args[args.indexOf('-map_metadata') + 1]).toBe('0');
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('1');
+  });
+
+  it('reads replacement chapters from the third input when a cover is replaced too', () => {
+    const args = testing.buildFfmpegArgs('/books/audio/book.mp3', '/books/audio/cover.jpg', '/books/audio/out.mp3', 'mp3', [], {
+      chaptersPath: '/books/audio/chapters.ffmeta',
+    });
+
+    expect(getInputs(args)).toEqual(['/books/audio/book.mp3', '/books/audio/cover.jpg', '/books/audio/chapters.ffmeta']);
+    expect(getMapTargets(args)).toEqual(['0:a', '0:s?', '1:v:0']);
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('2');
+  });
+
+  it('builds a chapters-only ffmetadata file in milliseconds', () => {
+    expect(
+      testing.buildChapterMetadata([
+        { title: 'One', startMs: 0, endMs: 1_500.4 },
+        { title: 'Two', startMs: 1_500.4, endMs: 3_000 },
+      ]),
+    ).toBe(
+      [
+        ';FFMETADATA1',
+        '[CHAPTER]',
+        'TIMEBASE=1/1000',
+        'START=0',
+        'END=1500',
+        'title=One',
+        '[CHAPTER]',
+        'TIMEBASE=1/1000',
+        'START=1500',
+        'END=3000',
+        'title=Two',
+        '',
+      ].join('\n'),
     );
+  });
+
+  it('escapes the characters ffmetadata treats as syntax in a title', () => {
+    const metadata = testing.buildChapterMetadata([{ title: 'a=b;c#d\\e\nf', startMs: 0, endMs: 1 }]);
+
+    expect(metadata.split('[CHAPTER]\n')[1]).toBe('TIMEBASE=1/1000\nSTART=0\nEND=1\ntitle=a\\=b\\;c\\#d\\\\e\\\nf\n');
+  });
+
+  it('writes the chapters beside the file, maps them in, and removes them afterwards', async () => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+    const chapters = [
+      { title: 'One', startMs: 0, endMs: 1_000 },
+      { title: 'Two', startMs: 1_000, endMs: 2_000 },
+    ];
+
+    await embedder.embedMetadata('/books/audio/book.mp3', 'mp3', { coverBytes: null, metadata: [], chapters });
+
+    expect(writeFileMock).toHaveBeenCalledWith('/books/audio/.bookorbit-chapters-fixed-id.ffmeta', testing.buildChapterMetadata(chapters), 'utf8');
+    const args = ffmpegArgs();
+    expect(getInputs(args)).toEqual(['/books/audio/book.mp3', '/books/audio/.bookorbit-chapters-fixed-id.ffmeta']);
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('1');
+    expect(replaceFileAtomicallyMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.mp3', '/books/audio/book.mp3');
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-chapters-fixed-id.ffmeta');
+  });
+
+  it('removes the chapters file when ffmpeg fails', async () => {
+    mocks.runFfmpeg.mockRejectedValue(new Error('ffmpeg failed'));
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await expect(
+      embedder.embedMetadata('/books/audio/book.mp3', 'mp3', { coverBytes: null, metadata: [], chapters: [{ title: 'One', startMs: 0, endMs: 1 }] }),
+    ).rejects.toThrow('ffmpeg failed');
+
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.mp3');
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-chapters-fixed-id.ffmeta');
+  });
+
+  it('leaves the existing chapters to -map_chapters 0 when none are given', async () => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/book.mp3', 'mp3', { coverBytes: null, metadata: [{ key: 'album', value: 'Book' }] });
+
+    expect(writeFileMock).not.toHaveBeenCalled();
+    const args = ffmpegArgs();
+    expect(getInputs(args)).toEqual(['/books/audio/book.mp3']);
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('0');
+  });
+
+  it('writes the tags the iTunes mode drops as freeform atoms before replacing the file', async () => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', {
+      coverBytes: Buffer.from('raw-cover'),
+      metadata: [
+        { key: 'album', value: 'Dune' },
+        { key: 'subtitle', value: 'Book One' },
+        { key: 'series-part', value: '' },
+        { key: 'language', value: 'eng', specifier: 's:a:0' },
+      ],
+    });
+
+    expect(mocks.writeMp4FreeformTags).toHaveBeenCalledWith(
+      '/books/audio/.bookorbit-write-fixed-id.m4b',
+      [
+        { name: 'SUBTITLE', value: 'Book One' },
+        { name: 'SERIES-PART', value: '' },
+      ],
+      { carryOverFrom: '/books/audio/book.m4b' },
+    );
+    expect(mocks.writeMp4FreeformTags.mock.invocationCallOrder[0]).toBeLessThan(replaceFileAtomicallyMock.mock.invocationCallOrder[0]!);
+  });
+
+  it('adds freeform atoms when keeping existing art in an MP4', async () => {
+    mockProbedStreams([
+      { codec_type: 'audio', codec_name: 'aac' },
+      { codec_type: 'video', codec_name: 'mjpeg' },
+    ]);
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/book.m4a', 'm4a', { coverBytes: null, metadata: [{ key: 'publisher', value: 'Ace' }] });
+
+    expect(mocks.writeMp4FreeformTags).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4a', [{ name: 'PUBLISHER', value: 'Ace' }], {
+      carryOverFrom: '/books/audio/book.m4a',
+    });
+  });
+
+  it('leaves extended tags to FFmpeg when it writes QuickTime metadata keys', async () => {
+    mockProbedStreams([{ codec_type: 'audio', codec_name: 'aac' }]);
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: null, metadata: [{ key: 'subtitle', value: 'Book One' }] });
+
+    expect(ffmpegArgs()).toContain('use_metadata_tags');
+    expect(mocks.writeMp4FreeformTags).not.toHaveBeenCalled();
+  });
+
+  describe('MP4 output muxer', () => {
+    it.each(['mp3', 'mp2', 'opus', 'flac', 'eac3'])('writes %s audio with the mp4 muxer, which the ipod muxer rejects', (codec) => {
+      expect(testing.outputMuxer('m4b', [{ codecType: 'audio', codecName: codec }])).toBe('mp4');
+      expect(testing.outputMuxer('m4a', [{ codecType: 'audio', codecName: codec }])).toBe('mp4');
+    });
+
+    it.each(['aac', 'alac', 'ac3'])('leaves %s audio to the ipod muxer FFmpeg picks for the file name', (codec) => {
+      expect(
+        testing.outputMuxer('m4b', [
+          { codecType: 'audio', codecName: codec },
+          { codecType: 'video', codecName: 'mjpeg' },
+          { codecType: 'data', codecName: 'bin_data' },
+        ]),
+      ).toBeUndefined();
+    });
+
+    it('uses the mp4 muxer when any audio stream is one the ipod muxer rejects', () => {
+      expect(
+        testing.outputMuxer('m4b', [
+          { codecType: 'audio', codecName: 'aac' },
+          { codecType: 'audio', codecName: 'mp3' },
+        ]),
+      ).toBe('mp4');
+    });
+
+    it('uses the mp4 muxer for audio FFmpeg could not name', () => {
+      expect(testing.outputMuxer('m4b', [{ codecType: 'audio', codecName: null }])).toBe('mp4');
+    });
+
+    it('leaves the muxer alone when the streams are unknown or the format is not MP4', () => {
+      expect(testing.outputMuxer('m4b', null)).toBeUndefined();
+      expect(testing.outputMuxer('mp3', [{ codecType: 'audio', codecName: 'mp3' }])).toBeUndefined();
+      expect(testing.outputMuxer('flac', [{ codecType: 'audio', codecName: 'flac' }])).toBeUndefined();
+    });
+
+    it('names the muxer immediately before the output path', () => {
+      const args = testing.buildFfmpegArgs('/a.m4b', '/c.jpg', '/t.m4b', 'm4b', [{ key: 'album', value: 'Book' }], { muxer: 'mp4' });
+
+      expect(args.slice(-3)).toEqual(['-f', 'mp4', '/t.m4b']);
+      expect(testing.buildFfmpegArgs('/a.m4b', '/c.jpg', '/t.m4b', 'm4b', [])).not.toContain('-f');
+    });
+
+    it('probes an MP4 being given a new cover and writes its MP3 audio with the mp4 muxer', async () => {
+      mockProbedStreams([
+        { codec_type: 'audio', codec_name: 'mp3' },
+        { codec_type: 'data', codec_name: 'bin_data' },
+        { codec_type: 'video', codec_name: 'mjpeg' },
+      ]);
+      const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+      await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', {
+        coverBytes: Buffer.from('raw-cover'),
+        metadata: [{ key: 'subtitle', value: 'Book One' }],
+      });
+
+      expect(execFileMock).toHaveBeenCalledWith(
+        'ffprobe',
+        ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', '/books/audio/book.m4b'],
+        { timeout: 30_000 },
+        expect.any(Function),
+      );
+      expect(ffmpegArgs().slice(-3)).toEqual(['-f', 'mp4', '/books/audio/.bookorbit-write-fixed-id.m4b']);
+      expect(ffmpegArgs()).not.toContain('use_metadata_tags');
+      expect(mocks.writeMp4FreeformTags).toHaveBeenCalledWith(
+        '/books/audio/.bookorbit-write-fixed-id.m4b',
+        [{ name: 'SUBTITLE', value: 'Book One' }],
+        {
+          carryOverFrom: '/books/audio/book.m4b',
+        },
+      );
+      expect(replaceFileAtomicallyMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4b', '/books/audio/book.m4b');
+    });
+
+    it('writes an artless MP3 M4B with the mp4 muxer and FFmpeg metadata keys together', async () => {
+      mockProbedStreams([{ codec_type: 'audio', codec_name: 'mp3' }]);
+      const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+      await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: null, metadata: [{ key: 'subtitle', value: 'Book One' }] });
+
+      expect(ffmpegArgs()).toContain('use_metadata_tags');
+      expect(ffmpegArgs().slice(-3)).toEqual(['-f', 'mp4', '/books/audio/.bookorbit-write-fixed-id.m4b']);
+      expect(mocks.writeMp4FreeformTags).not.toHaveBeenCalled();
+    });
+
+    it('keeps the ipod muxer for an AAC M4B', async () => {
+      mockProbedStreams([
+        { codec_type: 'audio', codec_name: 'aac' },
+        { codec_type: 'video', codec_name: 'mjpeg' },
+      ]);
+      const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+      await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: Buffer.from('raw-cover'), metadata: [] });
+
+      expect(ffmpegArgs()).not.toContain('-f');
+    });
+
+    it.each([
+      ['not JSON', 'Invalid data found when processing input'],
+      ['without a stream list', '{}'],
+    ])('treats probe output %s as unknown streams', async (_label, stdout) => {
+      mockProbeOutput(stdout);
+      const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+      await embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: null, metadata: [{ key: 'subtitle', value: 'Book One' }] });
+
+      expect(ffmpegArgs()).not.toContain('-f');
+      expect(ffmpegArgs()).not.toContain('use_metadata_tags');
+      expect(mocks.writeMp4FreeformTags).toHaveBeenCalled();
+    });
+
+    it.each(['mp3', 'flac'])('never probes a %s file', async (format) => {
+      const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+      await embedder.embedMetadata(`/books/audio/book.${format}`, format, { coverBytes: null, metadata: [] });
+
+      expect(execFileMock).not.toHaveBeenCalled();
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each(['mp3', 'flac'])('never edits MP4 atoms in %s files', async (format) => {
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata(`/books/audio/book.${format}`, format, {
+      coverBytes: Buffer.from('raw-cover'),
+      metadata: [{ key: 'subtitle', value: 'x' }],
+    });
+
+    expect(mocks.writeMp4FreeformTags).not.toHaveBeenCalled();
+  });
+
+  it('keeps the original file when the freeform tags cannot be written', async () => {
+    mocks.writeMp4FreeformTags.mockRejectedValue(new Error('MP4 movie box is not at the end of the file'));
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await expect(
+      embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: Buffer.from('raw-cover'), metadata: [{ key: 'subtitle', value: 'x' }] }),
+    ).rejects.toThrow('MP4 movie box is not at the end of the file');
+
+    expect(replaceFileAtomicallyMock).not.toHaveBeenCalled();
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4b');
+  });
+
+  it('keeps the original file and removes the partial output when ffmpeg stalls', async () => {
+    mocks.runFfmpeg.mockRejectedValue(new FfmpegStalledError(120_000, 'SIGTERM'));
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await expect(
+      embedder.embedMetadata('/books/audio/book.m4b', 'm4b', { coverBytes: Buffer.from('raw-cover'), metadata: [] }),
+    ).rejects.toBeInstanceOf(FfmpegStalledError);
+
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+    expect(mocks.writeMp4FreeformTags).not.toHaveBeenCalled();
+    expect(replaceFileAtomicallyMock).not.toHaveBeenCalled();
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4b');
+    expect(unlinkMock).toHaveBeenCalledWith('/books/audio/.bookorbit-cover-fixed-id.jpg');
+  });
+
+  it('retries an unprobed MP4 with the mp4 muxer when the ipod muxer refuses it', async () => {
+    mockProbeOutput('not json');
+    mocks.runFfmpeg.mockRejectedValueOnce(new Error("Tag mp4a incompatible with output codec id '86017'")).mockResolvedValueOnce(undefined);
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await embedder.embedMetadata('/books/audio/merged.m4b', 'm4b', { coverBytes: Buffer.from('raw-cover'), metadata: [] });
+
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
+    expect(mocks.runFfmpeg.mock.calls[0]![1]).not.toContain('-f');
+    expect(mocks.runFfmpeg.mock.calls[1]![1]).toEqual(expect.arrayContaining(['-f', 'mp4', '/books/audio/.bookorbit-write-fixed-id.m4b']));
+    expect(replaceFileAtomicallyMock).toHaveBeenCalledWith('/books/audio/.bookorbit-write-fixed-id.m4b', '/books/audio/merged.m4b');
+  });
+
+  it('reports the first ffmpeg failure when the mp4 retry fails as well', async () => {
+    mockProbeOutput('not json');
+    mocks.runFfmpeg.mockRejectedValueOnce(new Error('first failure')).mockRejectedValueOnce(new Error('retry failure'));
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await expect(embedder.embedMetadata('/books/audio/merged.m4a', 'm4a', { coverBytes: null, metadata: [] })).rejects.toThrow('first failure');
+
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
+    expect(replaceFileAtomicallyMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a probed MP4', 'm4b', true],
+    ['an MP3', 'mp3', false],
+  ])('does not retry a failed write of %s', async (_label, format, probed) => {
+    if (probed) mockProbedStreams([{ codec_type: 'audio', codec_name: 'aac' }]);
+    mocks.runFfmpeg.mockRejectedValue(new Error('ffmpeg failed'));
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
+
+    await expect(embedder.embedMetadata(`/books/audio/book.${format}`, format, { coverBytes: null, metadata: [] })).rejects.toThrow('ffmpeg failed');
+
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the ffmpeg error when cleanup also fails', async () => {
+    mocks.runFfmpeg.mockRejectedValue(new Error('ffmpeg failed'));
     unlinkMock.mockRejectedValue(new Error('cleanup failed'));
-    const embedder = new AudioMetadataEmbedder();
+    const embedder = new AudioMetadataEmbedder({ ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' });
 
     await expect(embedder.embedMetadata('/books/audio/book.m4a', 'm4a', { coverBytes: Buffer.from('raw-cover'), metadata: [] })).rejects.toThrow(
       'ffmpeg failed',
@@ -208,4 +618,47 @@ function getMapTargets(args: string[]): string[] {
     }
   });
   return targets;
+}
+
+describe('probeAudioDurationMs', () => {
+  function answerProbe(result: { stdout: string } | Error) {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const callback = args.at(-1) as (error: Error | null, value?: { stdout: string; stderr: string }) => void;
+      if (result instanceof Error) callback(result);
+      else callback(null, { stdout: result.stdout, stderr: '' });
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('reads the container duration in whole milliseconds', async () => {
+    answerProbe({ stdout: '3723.4567\n' });
+
+    await expect(probeAudioDurationMs('/books/audio/Part 1.mp3')).resolves.toBe(3_723_457);
+    expect(execFileMock).toHaveBeenCalledWith(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', '/books/audio/Part 1.mp3'],
+      expect.objectContaining({ timeout: 30000, killSignal: 'SIGKILL' }),
+      expect.any(Function),
+    );
+  });
+
+  it.each(['N/A', '0', ''])('answers null for an unusable duration %j', async (stdout) => {
+    answerProbe({ stdout });
+
+    await expect(probeAudioDurationMs('/books/audio/Part 1.mp3')).resolves.toBeNull();
+  });
+
+  it('answers null when ffprobe fails', async () => {
+    answerProbe(new Error('ffprobe failed'));
+
+    await expect(probeAudioDurationMs('/books/audio/Part 1.mp3')).resolves.toBeNull();
+  });
+});
+
+function getInputs(args: string[]): string[] {
+  return args.flatMap((arg, index) => (arg === '-i' ? [args[index + 1]!] : []));
 }

@@ -379,6 +379,21 @@ describe('disc folder flattening', () => {
     expect(candidates[0].files).toHaveLength(3);
   });
 
+  it('orders tracks disc by disc when the discs reuse file names', async () => {
+    await file('Book/CD 2/01.mp3');
+    await file('Book/CD 1/02.mp3');
+    await file('Book/CD 10/01.mp3');
+    await file('Book/CD 1/01.mp3');
+    await file('Book/CD 2/02.mp3');
+
+    const { candidates } = await findBookCandidates(root);
+    const expected = ['CD 1/01.mp3', 'CD 1/02.mp3', 'CD 2/01.mp3', 'CD 2/02.mp3', 'CD 10/01.mp3'].map((name) => join(root, 'Book', name));
+    expect(candidates[0].files.map((f) => f.absolutePath)).toEqual(expected);
+
+    const single = await buildSingleBookCandidate(join(root, 'Book'), root);
+    expect(single?.files.map((f) => f.absolutePath)).toEqual(expected);
+  });
+
   it('flattens Disc, Disk, Part, Pt, Side patterns', async () => {
     await file('MultiDisc/Disc 1/track-01.mp3');
     await file('MultiDisc/Disk 2/track-02.mp3');
@@ -397,6 +412,28 @@ describe('disc folder flattening', () => {
 
     const { candidates } = await findBookCandidates(root);
     expect(candidates).toHaveLength(2);
+  });
+
+  it("never folds a library folder whose own name looks like a disc folder, such as unRAID's disk1", async () => {
+    await file('disk1/Dune.epub');
+    await file('disk1/Emma.epub');
+    await file('disk1/Saga/Saga 001.cbz');
+    const library = join(root, 'disk1');
+
+    const { candidates } = await findBookCandidates(library);
+
+    expect(candidatePaths(candidates)).toEqual([join(library, 'Dune.epub'), join(library, 'Emma.epub'), join(library, 'Saga')]);
+  });
+
+  it('still reads disc folders directly inside a disc-named library folder as loose files', async () => {
+    await file('Part 1/Intro.mp3');
+    await file('Part 1/CD 1/01.mp3');
+    await file('Part 1/CD 1/02.mp3');
+    const library = join(root, 'Part 1');
+
+    const { candidates } = await findBookCandidates(library);
+
+    expect(candidatePaths(candidates)).toEqual([join(library, 'CD 1', '01.mp3'), join(library, 'CD 1', '02.mp3'), join(library, 'Intro.mp3')]);
   });
 
   it('does NOT treat names like "Discography" as disc directories', async () => {

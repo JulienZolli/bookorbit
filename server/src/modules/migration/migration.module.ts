@@ -1,11 +1,10 @@
+import { ReadingAttemptEventsModule } from '../user-book-status/reading-attempt-events.module';
 import { Module, forwardRef } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
-import type { StringValue } from 'ms';
 
 import { AuthModule } from '../auth/auth.module';
 import { NotificationModule } from '../notification/notification.module';
 import { ScannerModule } from '../scanner/scanner.module';
+import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
 import { MigrationController } from './migration.controller';
 import { MigrationProgressGateway } from './migration-progress.gateway';
 import { MigrationRepository } from './migration.repository';
@@ -35,18 +34,7 @@ import { MigrationExecutorService } from './executor/migration-executor.service'
 import { MigrationReportingService } from './reporting/migration-reporting.service';
 
 @Module({
-  imports: [
-    AuthModule,
-    forwardRef(() => NotificationModule),
-    ScannerModule,
-    JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.getOrThrow<string>('auth.jwtSecret'),
-        signOptions: { expiresIn: config.getOrThrow<StringValue | number>('auth.jwtExpiresIn') },
-      }),
-    }),
-  ],
+  imports: [ReadingAttemptEventsModule, AuthModule, forwardRef(() => NotificationModule), ScannerModule, BookCoverStoreModule],
   controllers: [MigrationController],
   providers: [
     MigrationRepository,

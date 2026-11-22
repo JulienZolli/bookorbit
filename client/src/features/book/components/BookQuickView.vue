@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, ExternalLink, Eye, Folder, FolderPlus, Headphones, Pencil, Star, Trash2, X } from '@lucide/vue'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DialogRoot, DialogContent, DialogPortal, DialogOverlay, DialogClose, DialogTitle, DialogDescription } from 'reka-ui'
@@ -11,22 +12,24 @@ import { getProviderColor } from '@/lib/provider-colors'
 import { createBookProviderLinks } from '@/features/book/lib/provider-links'
 import { useBookDetail } from '../composables/useBookDetail'
 import { useCoverVersions } from '../composables/useCoverVersions'
-import { getFormatColor } from '../lib/format-colors'
+import BookFormatChip from './BookFormatChip.vue'
+import { bookFormatEntries, fileFormatKey } from '../lib/book-formats'
 import { displayPublishedDate } from '../lib/published-date'
-import { FORMAT_TO_GROUP, type BookFileRef } from '@bookorbit/types'
-import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../lib/cover-aspect-ratio'
+import { FORMAT_TO_GROUP, getPrimaryBookFile, isComicFormat } from '@bookorbit/types'
+import { useBookCoverAspectRatio } from '../composables/useBookCoverAspectRatio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import BookCoverArtwork from './BookCoverArtwork.vue'
 import BookCoverSurface from './BookCoverSurface.vue'
 import { useI18n } from 'vue-i18n'
-import { hasReadAlong, isReadAlongFormat, READ_ALONG_FORMAT_COLOR, READ_ALONG_FORMAT_TITLE } from '@/features/book/lib/file-capabilities'
 
 const { t } = useI18n()
 
 const props = defineProps<{ bookId: number | null; open: boolean }>()
 const { hasPermission } = usePermissions()
+const { hasLibraryPermission } = useLibraryPermissions()
+const canEditMetadata = computed(() => hasLibraryPermission('library_edit_metadata', detail.value?.libraryId, 'editor'))
 const emit = defineEmits<{
   'update:open': [value: boolean]
   action: [type: 'add-to-collection' | 'delete']
@@ -60,7 +63,7 @@ watch(
 )
 
 const { coverUrl } = useCoverVersions()
-const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.updatedAt ?? detail.value.addedAt) : null))
+const coverSrc = computed(() => (detail.value ? coverUrl(detail.value.id, 'cover', detail.value.coverVersion) : null))
 
 const coverSeed = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? String(detail.value.id)) : ''))
 const coverPlaceholderTitle = computed(() => (detail.value ? (detail.value.title ?? detail.value.folderPath.split('/').pop() ?? null) : null))
@@ -72,12 +75,13 @@ const seriesLine = computed(() => {
 })
 
 const authorLine = computed(() => detail.value?.authors.map((a) => a.name).join(', ') ?? null)
+const coverAuthors = computed(() => detail.value?.authors.map((a) => a.name) ?? null)
 const ratingStars = [1, 2, 3, 4, 5]
 const providerLinks = computed(() => (detail.value ? createBookProviderLinks(detail.value.providerIds) : []))
 
 const safeDescription = useSafeHtml(() => detail.value?.description)
 
-const coverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
+const coverAspectRatio = useBookCoverAspectRatio(() => detail.value)
 const { bookCoverDisplayMode } = useDisplaySettings()
 const quickViewCoverAspectRatio = computed(() => {
   if (
@@ -93,43 +97,18 @@ const quickViewCoverAspectRatio = computed(() => {
   return `${coverImageRatio.value} / 1`
 })
 
-const primaryFile = computed(() => detail.value?.files.find((f) => f.role === 'primary') ?? detail.value?.files[0] ?? null)
-const readAlongFile = computed(() => detail.value?.files.find((file) => hasReadAlong(file)) ?? null)
+const primaryFile = computed(() => (detail.value ? getPrimaryBookFile(detail.value.files) : null))
 const isPrimaryAudio = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
-const isPrimaryComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
-const knownFormats = computed(() => [
-  ...new Set((detail.value?.files ?? []).filter((f) => f.format && FORMAT_TO_GROUP[f.format]).map((f) => f.format!)),
-])
+const isPrimaryComic = computed(() => primaryFile.value?.format != null && isComicFormat(primaryFile.value.format))
+const formatEntries = computed(() => (detail.value ? bookFormatEntries(detail.value.files, detail.value.formatPriority) : []))
 const publishedDisplay = computed(() => (detail.value ? displayPublishedDate(detail.value.publishedDate, detail.value.publishedYear) : null))
 
 function providerLinkStyle(provider: string) {
   const color = getProviderColor(provider)
   return {
-    borderColor: `${color}66`,
-    backgroundColor: `${color}12`,
+    borderColor: `color-mix(in srgb, ${color} 40%, transparent)`,
+    backgroundColor: `color-mix(in srgb, ${color} 7%, transparent)`,
   }
-}
-
-function formatBadgeStyle(fmt: string) {
-  const color = formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_COLOR : getFormatColor(fmt)
-  return {
-    color,
-    borderColor: `${color}66`,
-    backgroundColor: `${color}1a`,
-  }
-}
-
-function fileFormatBadgeStyle(file: Pick<BookFileRef, 'format' | 'mediaOverlay'>) {
-  const color = hasReadAlong(file) ? READ_ALONG_FORMAT_COLOR : getFormatColor(file.format ?? '?')
-  return {
-    color,
-    borderColor: `${color}66`,
-    backgroundColor: `${color}1a`,
-  }
-}
-
-function formatHasReadAlong(fmt: string): boolean {
-  return isReadAlongFormat(fmt, readAlongFile.value != null)
 }
 
 function handleCoverLoad(ratio: number | null) {
@@ -205,7 +184,7 @@ function handleDelete() {
           <!-- Header: cover + title block -->
           <div class="p-5 pt-10 border-b shrink-0">
             <div v-if="loading" class="flex gap-4 items-start">
-              <Skeleton class="w-24 rounded shrink-0" :style="{ aspectRatio: coverAspectRatio }" />
+              <Skeleton class="w-24 rounded-xs shrink-0" :style="{ aspectRatio: coverAspectRatio }" />
               <div class="flex-1 space-y-2 pt-1">
                 <Skeleton class="h-4 w-full" />
                 <Skeleton class="h-3 w-3/4" />
@@ -217,7 +196,7 @@ function handleDelete() {
               <!-- Cover -->
               <BookCoverSurface
                 size="mini"
-                class="book-cover-surface--spine-fitted w-24 shrink-0 rounded overflow-hidden relative"
+                class="book-cover-surface--spine-fitted w-24 shrink-0 rounded-xs overflow-hidden relative"
                 :disable-spine="isPrimaryAudio"
                 :is-comic="isPrimaryComic"
                 :class="detail.coverSource && !coverFailed ? 'cursor-zoom-in' : ''"
@@ -236,6 +215,11 @@ function handleDelete() {
                   loading="eager"
                   :spine="!isPrimaryAudio"
                   :is-comic="isPrimaryComic"
+                  :authors="coverAuthors"
+                  :subtitle="detail.subtitle"
+                  :series-name="detail.seriesName"
+                  :series-index="detail.seriesIndex"
+                  :genres="detail.genres"
                   @load="handleCoverLoad"
                   @error="handleCoverError"
                 />
@@ -257,7 +241,7 @@ function handleDelete() {
                     target="_blank"
                     rel="noopener noreferrer"
                     :title="t('book.quickView.openIn', { provider: link.label })"
-                    class="inline-flex size-6 items-center justify-center rounded border transition-colors hover:bg-muted/60"
+                    class="inline-flex size-6 items-center justify-center rounded-xs border transition-colors hover:bg-muted/60"
                     :style="providerLinkStyle(link.key)"
                   >
                     <img
@@ -290,36 +274,33 @@ function handleDelete() {
           <div class="flex-1 overflow-y-auto p-5 space-y-4">
             <template v-if="loading">
               <div class="flex gap-1.5">
-                <Skeleton class="h-5 w-12 rounded" />
-                <Skeleton class="h-5 w-16 rounded" />
-                <Skeleton class="h-5 w-10 rounded" />
+                <Skeleton class="h-5 w-12 rounded-xs" />
+                <Skeleton class="h-5 w-16 rounded-xs" />
+                <Skeleton class="h-5 w-10 rounded-xs" />
               </div>
               <Skeleton class="h-3 w-1/2" />
-              <Skeleton class="h-32 w-full rounded" />
+              <Skeleton class="h-32 w-full rounded-xs" />
             </template>
 
             <template v-else-if="detail">
               <!-- Format badges + meta chips -->
               <div class="flex flex-wrap gap-1.5">
-                <span
-                  v-for="fmt in knownFormats"
-                  :key="fmt"
-                  class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                  :style="formatBadgeStyle(fmt)"
-                  :title="formatHasReadAlong(fmt) ? READ_ALONG_FORMAT_TITLE : undefined"
-                >
-                  {{ fmt }}
-                  <Headphones v-if="formatHasReadAlong(fmt)" class="size-3 shrink-0" :stroke-width="2.5" aria-hidden="true" />
-                </span>
-                <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                <BookFormatChip
+                  v-for="entry in formatEntries"
+                  :key="entry.key"
+                  :format-key="entry.key"
+                  :primary="entry.primary"
+                  class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider"
+                />
+                <span v-if="detail.pageCount" class="text-[10px] font-semibold px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                   {{ t('book.quickView.pages', { count: detail.pageCount }) }}
                 </span>
-                <span v-if="publishedDisplay" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                <span v-if="publishedDisplay" class="text-[10px] font-semibold px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                   {{ publishedDisplay }}
                 </span>
                 <span
                   v-if="detail.language"
-                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-muted text-muted-foreground"
+                  class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-xs bg-muted text-muted-foreground"
                 >
                   {{ detail.language }}
                 </span>
@@ -337,15 +318,8 @@ function handleDelete() {
                   {{ primaryFile.filename ?? t('book.quickView.fileNumber', { id: primaryFile.id }) }}
                 </p>
                 <div class="mt-1.5 flex items-center gap-1.5">
-                  <span
-                    class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border"
-                    :style="fileFormatBadgeStyle(primaryFile)"
-                    :title="hasReadAlong(primaryFile) ? READ_ALONG_FORMAT_TITLE : undefined"
-                  >
-                    {{ (primaryFile.format ?? '?').toUpperCase() }}
-                    <Headphones v-if="hasReadAlong(primaryFile)" class="size-3 shrink-0" :stroke-width="2.5" aria-hidden="true" />
-                  </span>
-                  <span class="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground">
+                  <BookFormatChip :format-key="fileFormatKey(primaryFile) ?? '?'" class="rounded-xs px-2 py-0.5 text-[10px] tracking-wider" />
+                  <span class="text-[10px] px-2 py-0.5 rounded-xs bg-muted text-muted-foreground">
                     {{ formatBytes(primaryFile.sizeBytes) }}
                   </span>
                 </div>
@@ -447,7 +421,7 @@ function handleDelete() {
               </TooltipTrigger>
               <TooltipContent>{{ t('book.actions.peek') }}</TooltipContent>
             </Tooltip>
-            <Tooltip v-if="hasPermission('library_edit_metadata')">
+            <Tooltip v-if="canEditMetadata">
               <TooltipTrigger as-child>
                 <button
                   class="flex items-center justify-center gap-1.5 h-9 px-3 rounded-md border border-input bg-background text-sm hover:bg-muted transition-colors"
@@ -491,7 +465,7 @@ function handleDelete() {
     <DialogRoot :open="coverLightboxOpen" @update:open="coverLightboxOpen = $event">
       <DialogPortal>
         <DialogOverlay
-          class="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+          class="fixed inset-0 z-50 bg-scrim-media data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
         />
         <DialogContent
           class="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 max-w-[90vw] max-h-[90vh] outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"

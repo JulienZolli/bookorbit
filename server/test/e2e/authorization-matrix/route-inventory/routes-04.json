@@ -9,7 +9,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/email/email-template.controller.ts",
@@ -21,7 +22,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/email/email-template.controller.ts",
@@ -33,7 +35,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/email/email-template.controller.ts",
@@ -45,7 +48,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/email/email-template.controller.ts",
@@ -57,7 +61,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/email/email-template.controller.ts",
+    "className": "EmailTemplateController",
+    "methodName": "previewText",
+    "httpMethod": "POST",
+    "path": "/email/templates/preview",
+    "permissions": ["Permission.EmailSend"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/email/email-template.controller.ts",
@@ -69,19 +87,21 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/health/health.controller.ts",
     "className": "HealthController",
     "methodName": "check",
     "httpMethod": "GET",
-    "path": "/",
+    "path": "/health",
     "permissions": [],
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-auth.controller.ts",
@@ -93,7 +113,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-auth.controller.ts",
@@ -105,7 +126,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -117,7 +139,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -129,7 +152,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -141,7 +165,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -153,7 +178,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -165,7 +191,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -177,7 +204,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -189,7 +217,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -201,7 +230,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -213,7 +243,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -225,7 +256,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-device.controller.ts",
@@ -237,7 +269,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -249,7 +282,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -261,7 +295,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -273,7 +308,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -285,7 +321,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -297,7 +334,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-sync.controller.ts",
@@ -309,7 +347,8 @@
     "libraryAccess": [],
     "isPublic": true,
     "allowDefault": false,
-    "useGuards": ["KoboTokenGuard"]
+    "useGuards": ["KoboTokenGuard"],
+    "apiKey": "public"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -321,7 +360,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -333,7 +373,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -345,7 +386,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -357,7 +399,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -369,7 +412,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/kobo/kobo-user.controller.ts",
@@ -381,7 +425,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -393,7 +438,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -405,7 +451,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -417,7 +464,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -429,7 +477,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -441,7 +490,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -453,7 +503,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/smart-scope/smart-scope.controller.ts",
@@ -465,7 +516,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -477,7 +529,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -489,7 +542,34 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/library/library.controller.ts",
+    "className": "LibraryController",
+    "methodName": "validateRegexMetadata",
+    "httpMethod": "POST",
+    "path": "/libraries/regex-metadata/validate",
+    "permissions": ["Permission.ManageLibraries"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/library/library.controller.ts",
+    "className": "LibraryController",
+    "methodName": "previewRegexMetadata",
+    "httpMethod": "POST",
+    "path": "/libraries/regex-metadata/preview",
+    "permissions": ["Permission.ManageLibraries"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -501,7 +581,8 @@
     "libraryAccess": ["'viewer'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -513,7 +594,8 @@
     "libraryAccess": ["'viewer'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -525,7 +607,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -537,7 +620,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -549,7 +633,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -561,7 +646,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -573,7 +659,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -585,7 +672,8 @@
     "libraryAccess": ["'viewer'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -597,7 +685,8 @@
     "libraryAccess": ["'editor'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -609,7 +698,8 @@
     "libraryAccess": ["'editor'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -621,7 +711,8 @@
     "libraryAccess": ["'editor'"],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -633,7 +724,8 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "read"
   },
   {
     "file": "server/src/modules/library/library.controller.ts",
@@ -645,6 +737,124 @@
     "libraryAccess": [],
     "isPublic": false,
     "allowDefault": false,
-    "useGuards": []
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "prepareReplacement",
+    "httpMethod": "POST",
+    "path": "/kobo/devices/:id/books/:bookId/replacement",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "offerReplacement",
+    "httpMethod": "POST",
+    "path": "/kobo/devices/:id/replacements/:deliveryId/offer",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "confirmReplacement",
+    "httpMethod": "POST",
+    "path": "/kobo/devices/:id/replacements/:deliveryId/confirm",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "cancelReplacement",
+    "httpMethod": "POST",
+    "path": "/kobo/devices/:id/replacements/:deliveryId/cancel",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "getReplacement",
+    "httpMethod": "GET",
+    "path": "/kobo/devices/:id/replacements/:deliveryId",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/kobo/kobo-user.controller.ts",
+    "className": "KoboUserController",
+    "methodName": "getDelivery",
+    "httpMethod": "GET",
+    "path": "/kobo/devices/:id/books/:bookId/delivery",
+    "permissions": ["Permission.KoboSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "read"
+  },
+  {
+    "file": "server/src/modules/koreader/koreader-delivery.controller.ts",
+    "className": "KoreaderDeliveryController",
+    "methodName": "getSettings",
+    "httpMethod": "GET",
+    "path": "/koreader/plugin/delivery-settings/:deviceId",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": true,
+    "allowDefault": false,
+    "useGuards": ["KoreaderAuthGuard"],
+    "apiKey": "public"
+  },
+  {
+    "file": "server/src/modules/koreader/koreader-delivery.controller.ts",
+    "className": "KoreaderDeliveryController",
+    "methodName": "updatePluginSettings",
+    "httpMethod": "PUT",
+    "path": "/koreader/plugin/delivery-settings/:deviceId",
+    "permissions": [],
+    "libraryAccess": [],
+    "isPublic": true,
+    "allowDefault": false,
+    "useGuards": ["KoreaderAuthGuard"],
+    "apiKey": "public"
+  },
+  {
+    "file": "server/src/modules/koreader/koreader-delivery.controller.ts",
+    "className": "KoreaderDeliveryController",
+    "methodName": "updateSettings",
+    "httpMethod": "PATCH",
+    "path": "/koreader/devices/:deviceId/delivery-settings",
+    "permissions": ["Permission.KoreaderSync"],
+    "libraryAccess": [],
+    "isPublic": false,
+    "allowDefault": false,
+    "useGuards": [],
+    "apiKey": "write"
   }
 ]

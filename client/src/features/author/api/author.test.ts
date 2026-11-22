@@ -10,7 +10,8 @@ import {
   mergeAuthors,
   deleteAuthors,
   fetchAuthorMetadataCandidates,
-  bulkRefreshAuthorsMetadata,
+  streamAuthorMetadataCandidates,
+  startBulkAuthorsMetadataRefresh,
   refreshAuthorMetadata,
   MAX_AUTHOR_IMAGE_BYTES,
 } from './author'
@@ -286,46 +287,61 @@ describe('fetchAuthorMetadataCandidates', () => {
 
     await expect(fetchAuthorMetadataCandidates({ q: 'tolkien' })).rejects.toThrow('Failed to load author metadata')
   })
+
+  it('asks for a live search only when cache=refresh is requested', async () => {
+    mockedApi.mockResolvedValue(mockOkResponse([]))
+
+    await fetchAuthorMetadataCandidates({ q: 'tolkien' })
+    await fetchAuthorMetadataCandidates({ q: 'tolkien', cache: 'refresh' })
+
+    expect(mockedApi.mock.calls[0]![0]).toBe('/api/v1/authors/metadata/search?q=tolkien')
+    expect(mockedApi.mock.calls[1]![0]).toBe('/api/v1/authors/metadata/search?q=tolkien&cache=refresh')
+  })
 })
 
-describe('bulkRefreshAuthorsMetadata', () => {
-  it('returns zero counts immediately when authorIds is empty', async () => {
-    const result = await bulkRefreshAuthorsMetadata([])
+describe('streamAuthorMetadataCandidates', () => {
+  it('hands the cache marker over beside each candidate rather than on it', async () => {
+    const fetchedAt = '2026-10-05T08:00:00.000Z'
+    mockedApi.mockResolvedValue(
+      mockStreamResponse([
+        `data: ${JSON.stringify({ provider: 'goodreads', providerId: 'g1', name: 'Tolkien', cache: { fetchedAt, stale: true } })}\n`,
+        `data: ${JSON.stringify({ provider: 'audnexus', providerId: 'a1', name: 'Tolkien' })}\n`,
+      ]),
+    )
+    const onCandidate = vi.fn<(...args: unknown[]) => void>()
 
-    expect(mockedApi).not.toHaveBeenCalled()
-    expect(result).toEqual({ processed: 0, failed: 0, updated: 0 })
+    await streamAuthorMetadataCandidates({ q: 'tolkien', cache: 'refresh' }, onCandidate)
+
+    expect(mockedApi).toHaveBeenCalledWith('/api/v1/authors/metadata/stream?q=tolkien&cache=refresh', { signal: undefined })
+    expect(onCandidate).toHaveBeenNthCalledWith(1, { provider: 'goodreads', providerId: 'g1', name: 'Tolkien' }, { fetchedAt, stale: true })
+    expect(onCandidate).toHaveBeenNthCalledWith(2, { provider: 'audnexus', providerId: 'a1', name: 'Tolkien' }, null)
+  })
+})
+
+describe('startBulkAuthorsMetadataRefresh', () => {
+  it('posts the authors and hands back the streaming response with the abort signal', async () => {
+    const response = mockStreamResponse(['data: {"done":true,"processed":1,"failed":0,"updated":1}'])
+    mockedApi.mockResolvedValue(response)
+    const controller = new AbortController()
+
+    const result = await startBulkAuthorsMetadataRefresh([1], {}, controller.signal)
+
+    expect(result).toBe(response)
+    expect(mockedApi).toHaveBeenCalledWith(
+      '/api/v1/authors/bulk-refresh-metadata',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ authorIds: [1] }), signal: controller.signal }),
+    )
   })
 
-  it('returns summary from done SSE event', async () => {
-    const lines = ['data: {"authorId":1,"updated":true}', 'data: {"done":true,"processed":1,"failed":0,"updated":1}']
-    mockedApi.mockResolvedValue(mockStreamResponse(lines))
+  it('sends ignoreCache only when cached results are ignored', async () => {
+    mockedApi.mockImplementation(async () => mockStreamResponse(['data: {"done":true,"processed":0,"failed":0,"updated":0}']))
 
-    const result = await bulkRefreshAuthorsMetadata([1])
+    await startBulkAuthorsMetadataRefresh([1, 2])
+    await startBulkAuthorsMetadataRefresh([1, 2], { ignoreCache: false })
+    await startBulkAuthorsMetadataRefresh([1, 2], { ignoreCache: true })
 
-    expect(mockedApi).toHaveBeenCalledWith('/api/v1/authors/bulk-refresh-metadata', expect.objectContaining({ method: 'POST' }))
-    expect(result).toEqual({ processed: 1, failed: 0, updated: 1 })
-  })
-
-  it('calls onProgress for each progress event', async () => {
-    const lines = [
-      'data: {"authorId":10,"updated":true,"imageUpdated":false}',
-      'data: {"authorId":11,"updated":false,"error":"timeout"}',
-      'data: {"done":true,"processed":2,"failed":1,"updated":1}',
-    ]
-    mockedApi.mockResolvedValue(mockStreamResponse(lines))
-
-    const onProgress = vi.fn<(...args: unknown[]) => unknown>()
-    await bulkRefreshAuthorsMetadata([10, 11], onProgress)
-
-    expect(onProgress).toHaveBeenCalledTimes(2)
-    expect(onProgress).toHaveBeenNthCalledWith(1, expect.objectContaining({ authorId: 10, updated: true }))
-    expect(onProgress).toHaveBeenNthCalledWith(2, expect.objectContaining({ authorId: 11, error: 'timeout' }))
-  })
-
-  it('throws on non-ok response', async () => {
-    mockedApi.mockResolvedValue(mockErrorResponse())
-
-    await expect(bulkRefreshAuthorsMetadata([1])).rejects.toThrow('Failed to refresh author metadata')
+    const bodies = mockedApi.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+    expect(bodies).toEqual([{ authorIds: [1, 2] }, { authorIds: [1, 2] }, { authorIds: [1, 2], ignoreCache: true }])
   })
 })
 

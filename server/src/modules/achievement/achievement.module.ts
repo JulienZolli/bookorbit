@@ -1,11 +1,14 @@
 import { Module } from '@nestjs/common';
 
+import { AppAttestModule } from '../app-attest/app-attest.module';
 import { AppSettingsModule } from '../app-settings/app-settings.module';
 import { NotificationModule } from '../notification/notification.module';
 import { UserModule } from '../user/user.module';
 import { AchievementController } from './achievement.controller';
 import { AchievementService } from './achievement.service';
 import { AchievementBackfillService } from './achievement-backfill.service';
+import { AchievementHintsRepository } from './achievement-hints.repository';
+import { AchievementHintsService } from './achievement-hints.service';
 import { AchievementRepository } from './achievement.repository';
 import { AchievementEventsService } from './achievement-events.service';
 import { EvaluatorRegistry } from './evaluators/evaluator-registry';
@@ -18,12 +21,14 @@ import { RatingEvaluator } from './evaluators/rating.evaluator';
 import { DevicesEvaluator } from './evaluators/devices.evaluator';
 
 @Module({
-  imports: [NotificationModule, AppSettingsModule, UserModule],
+  imports: [AppAttestModule, NotificationModule, AppSettingsModule, UserModule],
   controllers: [AchievementController],
   providers: [
     AchievementService,
     AchievementBackfillService,
+    AchievementHintsService,
     AchievementRepository,
+    AchievementHintsRepository,
     AchievementEventsService,
     EvaluatorRegistry,
     ReadingEvaluator,
@@ -34,7 +39,7 @@ import { DevicesEvaluator } from './evaluators/devices.evaluator';
     RatingEvaluator,
     DevicesEvaluator,
   ],
-  exports: [AchievementEventsService],
+  exports: [AchievementEventsService, AchievementService],
 })
 export class AchievementModule {
   constructor(

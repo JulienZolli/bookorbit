@@ -1,6 +1,14 @@
 import { ref } from 'vue'
 import type { AuthUser, AuthResponse } from '@bookorbit/types'
-import { api, refreshAccessToken, setAccessToken, setOnAuthFailure } from '@/lib/api'
+import {
+  api,
+  fetchWithAuthProxyRecovery,
+  isServerUnavailableStatus,
+  NetworkError,
+  refreshAccessToken,
+  setAccessToken,
+  setOnAuthFailure,
+} from '@/lib/api'
 import router from '@/router'
 import { cancelPendingDisplaySettingsSync, initDisplaySettingsSync, loadDisplaySettingsFromServer } from '@/composables/useDisplaySettingsSync'
 import { cancelPendingThemeSync, initThemeSync, loadFromServer } from '@/composables/useThemeSync'
@@ -8,14 +16,20 @@ import { cancelPendingLocaleSync, hydrateLocalePreference, initLocaleSync } from
 import { useSetupStatus } from './useSetupStatus'
 import { disconnectAuthorEnrichmentSocket } from '@/features/settings/composables/useAuthorEnrichmentStatus'
 import { disconnectBookMetadataFetchSocket } from '@/features/book-metadata-fetch/composables/useBookMetadataFetchStatus'
+import { disconnectStoryGuideSocket } from '@/features/story-guide/lib/story-guide-socket'
+import { disconnectJobsSocket } from '@/features/jobs/lib/jobs-socket'
 import { resetWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import { resetLibraries } from '@/features/library/composables/useLibraries'
 import { resetSmartScopes } from '@/features/smart-scope/composables/useSmartScopes'
 import { resetCollections } from '@/features/collection/composables/useCollections'
 import { resetBrowseCounts } from '@/composables/useBrowseCounts'
 import { resetBookRequestSummary } from '@/features/book-requests/composables/useBookRequestSummary'
+import { clearReleaseSearchCache } from '@/features/book-requests/composables/useReleasePicker'
 
 const SESSION_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+
+/** `unreachable` is no answer about the session at all, which is not the same as having none. */
+export type SessionOutcome = 'authenticated' | 'anonymous' | 'unreachable'
 
 const user = ref<AuthUser | null>(null)
 const isLoading = ref(false)
@@ -61,10 +75,13 @@ function clearAuth() {
   resetCollections()
   resetBrowseCounts()
   resetBookRequestSummary()
+  clearReleaseSearchCache()
   user.value = null
   setAccessToken(null)
   disconnectAuthorEnrichmentSocket()
   disconnectBookMetadataFetchSocket()
+  disconnectStoryGuideSocket()
+  disconnectJobsSocket()
   resetWhatsNew()
 }
 
@@ -79,7 +96,7 @@ setOnAuthFailure(() => {
 
 async function me(): Promise<void> {
   const res = await api('/api/v1/auth/me')
-  if (!res.ok) throw new Error('Failed to load user')
+  if (!res.ok) throw isServerUnavailableStatus(res.status) ? new NetworkError(`me answered ${res.status}`) : new Error('Failed to load user')
   user.value = await res.json()
 }
 
@@ -119,25 +136,30 @@ export class LoginError extends Error {
 }
 
 export function useAuth() {
-  async function init(): Promise<void> {
+  async function init(): Promise<SessionOutcome> {
     isLoading.value = true
+    let outcome: SessionOutcome = 'authenticated'
     try {
       await refreshAccessToken()
       await me()
       await hydratePreferences()
       startSessionRefresh()
-    } catch {
-      // no valid session
+    } catch (reason) {
+      if (!user.value) outcome = reason instanceof NetworkError ? 'unreachable' : 'anonymous'
     } finally {
-      initThemeSync()
-      initDisplaySettingsSync()
-      initLocaleSync()
+      // An unreachable server is asked again, so the syncs start once, with whichever answer comes back.
+      if (outcome !== 'unreachable') {
+        initThemeSync()
+        initDisplaySettingsSync()
+        initLocaleSync()
+      }
       isLoading.value = false
     }
+    return outcome
   }
 
   async function login(username: string, password: string): Promise<void> {
-    const res = await fetch('/api/v1/auth/login', {
+    const res = await fetchWithAuthProxyRecovery('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -169,7 +191,7 @@ export function useAuth() {
       headers['x-setup-token'] = payload.setupToken
     }
 
-    const res = await fetch('/api/v1/auth/setup', {
+    const res = await fetchWithAuthProxyRecovery('/api/v1/auth/setup', {
       method: 'POST',
       headers,
       credentials: 'include',
@@ -197,7 +219,7 @@ export function useAuth() {
   }
 
   async function register(payload: { username: string; name: string; email: string; password: string }): Promise<void> {
-    const res = await fetch('/api/v1/auth/register', {
+    const res = await fetchWithAuthProxyRecovery('/api/v1/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -214,7 +236,7 @@ export function useAuth() {
 
   async function logout(): Promise<void> {
     try {
-      await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => undefined)
+      await fetchWithAuthProxyRecovery('/api/v1/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => undefined)
     } finally {
       clearAuth()
       router.push('/login')
@@ -222,7 +244,7 @@ export function useAuth() {
   }
 
   async function loginWithMagicLink(token: string): Promise<void> {
-    const res = await fetch('/api/v1/auth/magic-links/login', {
+    const res = await fetchWithAuthProxyRecovery('/api/v1/auth/magic-links/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',

@@ -4,23 +4,33 @@ import { Observable } from 'rxjs';
 import type {
   AuthorBooksPage,
   AuthorDetail,
-  AuthorMetadataCandidate,
   AuthorMetadataProviderInfo,
+  AuthorMetadataSearchCandidateEvent,
   AuthorSummary,
   AuthorsPage,
   JumpBucketsResponse,
   MergeAuthorsResult,
+  MetadataCacheServedProvider,
+  MetadataCacheUsage,
 } from '@bookorbit/types';
 import { assembleBookCards, assembleCollapsedBookCards } from '../book/utils/assemble-book-cards';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { normalizeMetadataText } from '../../common/utils/metadata-text-normalize.utils';
+import type { CacheDirective } from '../../common/provider-cache/provider-cache-spec';
 import type { RequestUser } from '../../common/types/request-user';
 import { BookReadService } from '../book/book-read.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { LibraryService } from '../library/library.service';
 import { AuthorMetadataPreferencesService } from './author-metadata-preferences.service';
 import { MetadataScoreService } from '../metadata-score/metadata-score.service';
 import { AuthorImageStorageError, AuthorImageStorageService } from './author-image-storage.service';
+import {
+  bulkRefreshCacheDirective,
+  CACHE_ONLY_ITEM_YIELD_MS,
+  interactiveCacheDirective,
+  SINGLE_REFRESH_CACHE_DIRECTIVE,
+} from './author-cache-directives';
 import { AUTHOR_ENRICHMENT_REASONS } from './author-enrichment-reasons';
 import { AuthorEnrichmentExecutorService } from './author-enrichment-executor.service';
 import { AuthorEnrichmentOrchestratorService } from './author-enrichment-orchestrator.service';
@@ -31,8 +41,73 @@ import { ListAuthorMetadataDto } from './dto/list-author-metadata.dto';
 import { ListAuthorLettersDto, ListAuthorsDto } from './dto/list-authors.dto';
 import { LookupAuthorMetadataDto } from './dto/lookup-author-metadata.dto';
 import { MergeAuthorsDto } from './dto/merge-authors.dto';
+import { PinAuthorMetadataMatchDto } from './dto/pin-author-metadata-match.dto';
 import { UpdateAuthorDto } from './dto/update-author.dto';
 import { AuthorMetadataFetchService } from './metadata/author-metadata-fetch.service';
+
+/** A refreshed author, plus the providers that failed live and were answered from saved results. */
+export type AuthorRefreshResult = AuthorDetail & { metadataCache?: MetadataCacheUsage };
+
+/** The libraries a bulk refresh's actor may see, and the ones it may edit. */
+export interface AuthorBulkRefreshScope {
+  libraryIds: number[];
+  editableLibraryIds: ReadonlySet<number>;
+}
+
+/** How one author of a bulk refresh went; `outboundRequests` paces the pause before the next. */
+export type AuthorBulkRefreshItem =
+  | { kind: 'refreshed'; updated: boolean; imageUpdated: boolean; imageUrl: string | null | undefined; outboundRequests: number }
+  | { kind: 'failed'; error: string }
+  | { kind: 'not-found' };
+
+type EnrichmentRefreshOutcome = {
+  descriptionUpdated: boolean;
+  imageUpdated: boolean;
+  provider: string | null;
+  outboundRequests: number;
+  cacheServed: MetadataCacheServedProvider[];
+};
+
+type LifeDateUpdate = { date?: string | null; year?: number | null };
+
+/** A full date carries its own year, and a year sent on its own clears a date that may name another. */
+function resolveLifeDate(
+  field: string,
+  hasDate: boolean,
+  date: string | null | undefined,
+  hasYear: boolean,
+  year: number | null | undefined,
+): LifeDateUpdate {
+  if (hasDate && date) {
+    if (!isCalendarDate(date)) throw new BadRequestException(`${field} is not a calendar date`);
+    return { date, year: Number(date.slice(0, 4)) };
+  }
+  if (hasDate) return hasYear ? { date: null, year: year ?? null } : { date: null };
+  if (hasYear) return { date: null, year: year ?? null };
+  return {};
+}
+
+function isCalendarDate(value: string): boolean {
+  const [year, month, day] = value.split('-').map(Number);
+  if (year < 1) return false;
+  // setUTCFullYear, because Date.UTC reads years below 100 as 19xx.
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function normalizeAuthorList(values: string[] | null | undefined): string[] | null {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values ?? []) {
+    const trimmed = value.trim();
+    const key = trimmed.toLocaleLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result.length > 0 ? result : null;
+}
 
 @Injectable()
 export class AuthorsService {
@@ -51,6 +126,7 @@ export class AuthorsService {
     private readonly enrichmentExecutor: AuthorEnrichmentExecutorService,
     private readonly enrichmentOrchestrator: AuthorEnrichmentOrchestratorService,
     private readonly metadataScoreService: MetadataScoreService,
+    private readonly coverStore: BookCoverStore,
   ) {}
 
   private assertPaginationWindow(page: number, size: number): void {
@@ -174,7 +250,9 @@ export class AuthorsService {
       cardData.narratorRows,
       cardData.tagRows,
       cardData.seriesMembershipRows,
-    ).sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
+    );
+    await this.coverStore.enrichCardFaces(items);
+    items.sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
 
     return { items, total: page.total, bookTotal: page.total, page: page.page, size: page.size };
   }
@@ -217,6 +295,7 @@ export class AuthorsService {
       collapsed.tagRows,
       collapsed.seriesMembershipRows,
     );
+    await this.coverStore.enrichCardFaces(items);
 
     return { items, total: collapsed.total, bookTotal: collapsed.bookTotal, page, size };
   }
@@ -225,11 +304,11 @@ export class AuthorsService {
     return this.authorMetadataFetchService.listProviders();
   }
 
-  async searchMetadata(dto: ListAuthorMetadataDto): Promise<AuthorMetadataCandidate[]> {
+  async searchMetadata(dto: ListAuthorMetadataDto): Promise<AuthorMetadataSearchCandidateEvent[]> {
     const event = 'author.search_metadata';
     const startedAt = Date.now();
     this.logger.log(
-      `[${event}] [start] query=${JSON.stringify(dto.q)} region=${dto.region ?? 'default'} limit=${dto.limit ?? 0} providerCount=${dto.providers?.length ?? 0} - author metadata search started`,
+      `[${event}] [start] query=${JSON.stringify(dto.q)} region=${dto.region ?? 'default'} limit=${dto.limit ?? 0} providerCount=${dto.providers?.length ?? 0} cache=${dto.cache ?? 'default'} - author metadata search started`,
     );
     try {
       const result = await this.authorMetadataFetchService.search(
@@ -238,7 +317,7 @@ export class AuthorsService {
           region: dto.region,
           limit: dto.limit,
         },
-        { keys: dto.providers },
+        { keys: dto.providers, directive: interactiveCacheDirective(dto.cache) },
       );
       this.logger.log(
         `[${event}] [end] query=${JSON.stringify(dto.q)} durationMs=${Date.now() - startedAt} resultCount=${result.length} - author metadata search completed`,
@@ -254,14 +333,16 @@ export class AuthorsService {
     }
   }
 
-  async lookupMetadata(dto: LookupAuthorMetadataDto): Promise<AuthorMetadataCandidate | null> {
+  async lookupMetadata(dto: LookupAuthorMetadataDto): Promise<AuthorMetadataSearchCandidateEvent | null> {
     const event = 'author.lookup_metadata';
     const startedAt = Date.now();
     this.logger.log(
-      `[${event}] [start] provider=${dto.provider} providerId=${JSON.stringify(dto.id)} region=${dto.region ?? 'default'} - author metadata lookup started`,
+      `[${event}] [start] provider=${dto.provider} providerId=${JSON.stringify(dto.id)} region=${dto.region ?? 'default'} cache=${dto.cache ?? 'default'} - author metadata lookup started`,
     );
     try {
-      const result = await this.authorMetadataFetchService.lookupById(dto.provider, dto.id, dto.region);
+      const result = await this.authorMetadataFetchService.lookupById(dto.provider, dto.id, dto.region, {
+        directive: interactiveCacheDirective(dto.cache),
+      });
       this.logger.log(
         `[${event}] [end] provider=${dto.provider} providerId=${JSON.stringify(dto.id)} durationMs=${Date.now() - startedAt} found=${result != null} - author metadata lookup completed`,
       );
@@ -276,14 +357,14 @@ export class AuthorsService {
     }
   }
 
-  streamMetadata(dto: ListAuthorMetadataDto): Observable<AuthorMetadataCandidate> {
+  streamMetadata(dto: ListAuthorMetadataDto): Observable<AuthorMetadataSearchCandidateEvent> {
     return this.authorMetadataFetchService.stream(
       {
         name: dto.q,
         region: dto.region,
         limit: dto.limit,
       },
-      { keys: dto.providers },
+      { keys: dto.providers, directive: interactiveCacheDirective(dto.cache) },
     );
   }
 
@@ -308,6 +389,30 @@ export class AuthorsService {
 
       if ('description' in dto) {
         values.description = dto.description?.trim() || null;
+      }
+
+      if ('gender' in dto) {
+        values.gender = dto.gender ?? null;
+      }
+
+      if ('website' in dto) {
+        values.website = dto.website?.trim() || null;
+      }
+
+      const birth = resolveLifeDate('birthDate', 'birthDate' in dto, dto.birthDate, 'birthYear' in dto, dto.birthYear);
+      if (birth.date !== undefined) values.birthDate = birth.date;
+      if (birth.year !== undefined) values.birthYear = birth.year;
+
+      const death = resolveLifeDate('deathDate', 'deathDate' in dto, dto.deathDate, 'deathYear' in dto, dto.deathYear);
+      if (death.date !== undefined) values.deathDate = death.date;
+      if (death.year !== undefined) values.deathYear = death.year;
+
+      if ('genres' in dto) {
+        values.genres = normalizeAuthorList(dto.genres);
+      }
+
+      if ('influences' in dto) {
+        values.influences = normalizeAuthorList(dto.influences);
       }
 
       const fieldNames = Object.keys(values);
@@ -415,19 +520,20 @@ export class AuthorsService {
     }
   }
 
-  async refreshEnrichment(user: RequestUser, authorId: number): Promise<AuthorDetail> {
+  async refreshEnrichment(user: RequestUser, authorId: number): Promise<AuthorRefreshResult> {
     const event = 'author.refresh_enrichment';
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] userId=${user.id} authorId=${authorId} - author enrichment refresh started`);
     try {
       await this.assertMutationAccess(user, [authorId]);
 
-      const result = await this.refreshEnrichmentInternal(authorId);
+      const result = await this.refreshEnrichmentInternal(authorId, SINGLE_REFRESH_CACHE_DIRECTIVE);
       const detail = await this.findOne(user, authorId);
+      const fallbackProviders = result.cacheServed.filter((served) => served.source === 'fallback');
       this.logger.log(
-        `[${event}] [end] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} provider=${result.provider ?? 'none'} descriptionUpdated=${result.descriptionUpdated} imageUpdated=${result.imageUpdated} - author enrichment refresh completed`,
+        `[${event}] [end] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} provider=${result.provider ?? 'none'} descriptionUpdated=${result.descriptionUpdated} imageUpdated=${result.imageUpdated} cacheFallbacks=${fallbackProviders.length} - author enrichment refresh completed`,
       );
-      return detail;
+      return fallbackProviders.length > 0 ? { ...detail, metadataCache: { fallbackProviders } } : detail;
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
       const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
@@ -436,6 +542,57 @@ export class AuthorsService {
       );
       throw err;
     }
+  }
+
+  /** Points the author at one provider's person, replacing its metadata, and keeps refreshes on that id. */
+  async pinMetadataMatch(user: RequestUser, authorId: number, dto: PinAuthorMetadataMatchDto): Promise<AuthorRefreshResult> {
+    const event = 'author.pin_metadata_match';
+    const startedAt = Date.now();
+    this.logger.log(
+      `[${event}] [start] userId=${user.id} authorId=${authorId} provider=${dto.provider} providerId=${JSON.stringify(dto.providerId)} - author metadata match pin started`,
+    );
+    try {
+      await this.assertMutationAccess(user, [authorId]);
+      const author = await this.authorsRepo.findByIdForEnrichment(authorId);
+      if (!author) throw new NotFoundException('Author not found');
+
+      const lookup = await this.authorMetadataFetchService.lookupByIdDetailed(dto.provider, dto.providerId, 'us', {
+        directive: SINGLE_REFRESH_CACHE_DIRECTIVE,
+      });
+      if (lookup.failure) {
+        if (lookup.failure.httpStatus === 404) throw new NotFoundException(`No ${dto.provider} author has that id`);
+        throw new ServiceUnavailableException(`Author lookup failed for provider ${dto.provider}: ${lookup.failure.message}`);
+      }
+      if (!lookup.candidate) throw new NotFoundException(`No ${dto.provider} author has that id`);
+
+      const preferences = await this.metadataPreferences.getPreferences();
+      const applied = await this.enrichmentExecutor.applyMatch(author, preferences, lookup.candidate);
+      if (applied.kind === 'failed') {
+        throw new ServiceUnavailableException(`Author image download failed for provider ${dto.provider}: ${applied.message}`);
+      }
+
+      const detail = await this.findOne(user, authorId);
+      const fallbackProviders = lookup.cacheServed.filter((served) => served.source === 'fallback');
+      this.logger.log(
+        `[${event}] [end] userId=${user.id} authorId=${authorId} provider=${dto.provider} durationMs=${Date.now() - startedAt} fields=${applied.fieldsUpdated.join(',') || 'none'} imageUpdated=${applied.imageUpdated} cacheFallbacks=${fallbackProviders.length} - author metadata match pin completed`,
+      );
+      return fallbackProviders.length > 0 ? { ...detail, metadataCache: { fallbackProviders } } : detail;
+    } catch (err) {
+      const errorClass = err instanceof Error ? err.name : 'Error';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[${event}] [fail] userId=${user.id} authorId=${authorId} provider=${dto.provider} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - author metadata match pin failed`,
+      );
+      throw err;
+    }
+  }
+
+  /** Lets refreshes search by name again; the metadata and the provider id stay as they are. */
+  async unpinMetadataMatch(user: RequestUser, authorId: number): Promise<AuthorDetail> {
+    await this.assertMutationAccess(user, [authorId]);
+    const updated = await this.authorsRepo.updateAuthorById(authorId, { metadataProviderPinned: false });
+    if (!updated) throw new NotFoundException('Author not found');
+    return this.findOne(user, authorId);
   }
 
   async getThumbnailPath(user: RequestUser, authorId: number): Promise<string | null> {
@@ -518,83 +675,62 @@ export class AuthorsService {
     }
   }
 
-  async bulkRefreshMetadata(
-    authorIds: number[],
-    user: RequestUser,
-    onProgress?: (event: { authorId: number; updated: boolean; imageUpdated?: boolean; imageUrl?: string | null; error?: string }) => void,
-  ): Promise<{ processed: number; failed: number; updated: number }> {
+  /**
+   * Checks a bulk refresh selection before its run is created: every author must be visible to
+   * `user`, and every library holding their books editable. Answers the ids without duplicates.
+   */
+  async authorizeBulkRefresh(user: RequestUser, authorIds: readonly number[]): Promise<number[]> {
+    const uniqueAuthorIds = [...new Set(authorIds)];
+    if (uniqueAuthorIds.length > 0) await this.assertMutationAccess(user, uniqueAuthorIds);
+    return uniqueAuthorIds;
+  }
+
+  /** The libraries a bulk run's actor may see and edit; worked out once per actor, not per author. */
+  async bulkRefreshScope(user: RequestUser): Promise<AuthorBulkRefreshScope> {
+    const [libraryIds, editableLibraryIds] = await Promise.all([this.resolveLibraryIds(user), this.libraryService.findEditableLibraryIds(user)]);
+    return { libraryIds, editableLibraryIds: new Set(editableLibraryIds) };
+  }
+
+  /** The selection check for one author as a run reaches it: its books may have moved, or it may be gone. */
+  async bulkRefreshItemAccess(authorId: number, scope: AuthorBulkRefreshScope): Promise<'ok' | 'not-found' | 'no-access'> {
+    const [visible, relatedLibraryIds] = await Promise.all([
+      this.authorsRepo.findVisibleAuthorIds([authorId], scope.libraryIds),
+      this.authorsRepo.findRelatedLibraryIds([authorId]),
+    ]);
+    if (visible.length === 0) return 'not-found';
+    return relatedLibraryIds.every((libraryId) => scope.editableLibraryIds.has(libraryId)) ? 'ok' : 'no-access';
+  }
+
+  /** Refreshes one author of a bulk run; the caller has already checked access. A failure is reported, never thrown. */
+  async refreshAuthorForBulk(authorId: number, ignoreCache: boolean, userId: number): Promise<AuthorBulkRefreshItem> {
     const event = 'author.bulk_refresh_metadata';
     const startedAt = Date.now();
-    this.logger.log(`[${event}] [start] userId=${user.id} count=${authorIds.length} - bulk author metadata refresh started`);
     try {
-      const uniqueAuthorIds = [...new Set(authorIds)];
-      if (uniqueAuthorIds.length === 0) {
-        this.logger.log(
-          `[${event}] [end] userId=${user.id} count=0 durationMs=${Date.now() - startedAt} processed=0 updated=0 failed=0 - bulk author metadata refresh completed`,
-        );
-        return { processed: 0, failed: 0, updated: 0 };
-      }
-
-      await this.assertMutationAccess(user, uniqueAuthorIds);
-
-      let processed = 0;
-      let failed = 0;
-      let updated = 0;
-      let callbackInterrupted = false;
-
-      for (let index = 0; index < uniqueAuthorIds.length; index += 1) {
-        const authorId = uniqueAuthorIds[index]!;
-        let didUpdate = false;
-        let imageUpdated = false;
-        let imageUrl: string | null | undefined;
-        let errorMessage: string | undefined;
-
-        try {
-          const result = await this.refreshEnrichmentInternal(authorId);
-          didUpdate = result.descriptionUpdated || result.imageUpdated;
-          imageUpdated = result.imageUpdated;
-          if (imageUpdated) {
-            imageUrl = await this.authorImageStorage.getThumbnailUrlIfExists(authorId);
-          }
-          if (didUpdate) {
-            updated += 1;
-          }
-        } catch (error) {
-          failed += 1;
-          const itemErrorClass = error instanceof Error ? error.name : 'Error';
-          errorMessage = error instanceof Error ? error.message : 'Failed to refresh metadata';
-          const itemError = sanitizeLogValue(errorMessage);
-          this.logger.warn(
-            `[${event}] [fail] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} errorClass=${itemErrorClass} error="${itemError}" - author metadata refresh item failed`,
-          );
-        }
-
-        processed += 1;
-        try {
-          onProgress?.({ authorId, updated: didUpdate, imageUpdated, imageUrl, error: errorMessage });
-        } catch {
-          // callback threw (e.g. client disconnected) - stop the loop
-          callbackInterrupted = true;
-          break;
-        }
-
-        if (index < uniqueAuthorIds.length - 1) {
-          await this.sleep(this.getBulkAudnexusDelayMs());
-        }
-      }
-
-      this.logger.log(
-        `[${event}] [end] userId=${user.id} count=${uniqueAuthorIds.length} durationMs=${Date.now() - startedAt} processed=${processed} updated=${updated} failed=${failed} callbackInterrupted=${callbackInterrupted} - bulk author metadata refresh completed`,
-      );
-      return { processed, failed, updated };
-    } catch (err) {
-      const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      const result = await this.refreshEnrichmentInternal(authorId, bulkRefreshCacheDirective(ignoreCache));
+      const imageUrl = result.imageUpdated ? await this.authorImageStorage.getThumbnailUrlIfExists(authorId) : undefined;
+      return {
+        kind: 'refreshed',
+        updated: result.descriptionUpdated || result.imageUpdated,
+        imageUpdated: result.imageUpdated,
+        imageUrl,
+        outboundRequests: result.outboundRequests,
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) return { kind: 'not-found' };
+      const errorMessage = error instanceof Error ? error.message : 'Failed to refresh metadata';
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} count=${authorIds.length} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - bulk author metadata refresh failed`,
+        `[${event}] [fail] userId=${userId} authorId=${authorId} durationMs=${Date.now() - startedAt} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(errorMessage)}" - author metadata refresh item failed`,
       );
-      throw err;
+      return { kind: 'failed', error: errorMessage };
     }
+  }
+
+  /**
+   * The pause before a bulk run's next author: a short yield after one served from the cache, and
+   * the provider delay otherwise, a failed author included.
+   */
+  async pauseBetweenBulkAuthors(previousOutboundRequests: number | undefined): Promise<void> {
+    await this.sleep(previousOutboundRequests === 0 ? CACHE_ONLY_ITEM_YIELD_MS : this.getBulkAudnexusDelayMs());
   }
 
   private async resolveLibraryIds(user: RequestUser, scopedLibraryId?: number): Promise<number[]> {
@@ -614,7 +750,7 @@ export class AuthorsService {
   }
 
   private async assertMutationAccess(user: RequestUser, authorIds: number[]) {
-    const libraryIds = await this.resolveLibraryIds(user);
+    const [libraryIds, editableLibraryIds] = await Promise.all([this.resolveLibraryIds(user), this.libraryService.findEditableLibraryIds(user)]);
     const [visible, relatedLibraryIds] = await Promise.all([
       this.authorsRepo.findVisibleAuthorIds(authorIds, libraryIds),
       this.authorsRepo.findRelatedLibraryIds(authorIds),
@@ -622,8 +758,8 @@ export class AuthorsService {
     if (visible.length !== authorIds.length) {
       throw new NotFoundException('Author not found');
     }
-    const accessibleSet = new Set(libraryIds);
-    if (relatedLibraryIds.some((libraryId) => !accessibleSet.has(libraryId))) {
+    const editableSet = new Set(editableLibraryIds);
+    if (relatedLibraryIds.some((libraryId) => !editableSet.has(libraryId))) {
       throw new ForbiddenException('Insufficient library access to mutate one or more selected authors');
     }
   }
@@ -636,6 +772,7 @@ export class AuthorsService {
     return {
       ...this.mapAuthorSummary(row),
       description: row.description,
+      gender: row.gender,
       birthDate: row.birthDate,
       birthYear: row.birthYear,
       deathDate: row.deathDate,
@@ -645,6 +782,7 @@ export class AuthorsService {
       influences: row.influences ?? [],
       metadataProvider: (row.metadataProvider as AuthorDetail['metadataProvider']) ?? null,
       metadataProviderId: row.metadataProviderId,
+      metadataProviderPinned: row.metadataProviderPinned,
     };
   }
 
@@ -689,11 +827,9 @@ export class AuthorsService {
     };
   }
 
-  private async refreshEnrichmentInternal(
-    authorId: number,
-  ): Promise<{ descriptionUpdated: boolean; imageUpdated: boolean; provider: string | null }> {
+  private async refreshEnrichmentInternal(authorId: number, directive: CacheDirective): Promise<EnrichmentRefreshOutcome> {
     const preferences = await this.metadataPreferences.getPreferences();
-    const result = await this.enrichmentExecutor.execute({ authorId, preferences });
+    const result = await this.enrichmentExecutor.execute({ authorId, preferences }, directive);
 
     if (result.kind === 'skipped' && result.reason === 'author_not_found') {
       throw new NotFoundException('Author not found');
@@ -708,6 +844,8 @@ export class AuthorsService {
       descriptionUpdated: result.descriptionUpdated,
       imageUpdated: result.imageUpdated,
       provider: result.provider,
+      outboundRequests: result.outboundRequests,
+      cacheServed: result.cacheServed,
     };
   }
 

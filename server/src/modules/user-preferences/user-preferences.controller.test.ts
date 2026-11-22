@@ -48,6 +48,7 @@ const validDisplayPreferences: DisplayPreferences = {
   squareGridGap: 20,
   viewMode: 'grid',
   cardOverlays: ['progress-bar', 'format', 'rating'],
+  formatBadgeStyle: 'primary',
   showJumpRails: true,
   smartScopeFilterExpanded: true,
   authorCoverSize: 140,
@@ -66,6 +67,8 @@ const validDisplayPreferences: DisplayPreferences = {
   gridCardSecondaryLabel: 'hidden',
   cardInfoMode: 'hover-overlay',
   thumbnailClickAction: 'reader',
+  openHighlightsInPeek: false,
+  placeholderCoverStyle: 'bauhaus',
 };
 
 const validLocalePreferences: LocalePreferences = {
@@ -92,6 +95,10 @@ describe('UserPreferencesController', () => {
       upsertLocalePreferences: vi.fn(),
       upsertCoverSearchPreferences: vi.fn(),
       upsertBookRequestPreferences: vi.fn(),
+      getReadAloudPreferences: vi.fn(),
+      upsertReadAloudPreferences: vi.fn(),
+      getAnnotationColorNamePreferences: vi.fn(),
+      upsertAnnotationColorNamePreferences: vi.fn(),
     } as unknown as Mocked<UserPreferencesService>;
 
     controller = new UserPreferencesController(service);
@@ -184,6 +191,20 @@ describe('UserPreferencesController', () => {
     expect(service.upsertBookRequestPreferences).toHaveBeenCalledWith(42, dto.settings);
   });
 
+  it("GET /read-aloud returns the current user's saved default language", async () => {
+    service.getReadAloudPreferences.mockResolvedValueOnce({ defaultLanguage: 'en' });
+
+    await expect(controller.getReadAloudPreferences(makeUser({ id: 11 }))).resolves.toEqual({ settings: { defaultLanguage: 'en' } });
+    expect(service.getReadAloudPreferences).toHaveBeenCalledWith(11);
+  });
+
+  it('PUT /read-aloud forwards the current user id and settings', async () => {
+    const dto = { settings: { defaultLanguage: 'de' } };
+
+    await expect(controller.upsertReadAloudPreferences(dto, makeUser({ id: 42 }))).resolves.toBeUndefined();
+    expect(service.upsertReadAloudPreferences).toHaveBeenCalledWith(42, dto.settings);
+  });
+
   it('GET /locale returns null settings when no saved preferences exist', async () => {
     service.getLocalePreferences.mockResolvedValueOnce(null);
 
@@ -211,5 +232,21 @@ describe('UserPreferencesController', () => {
     await controller.upsertLocalePreferences({ settings: validLocalePreferences as unknown as Record<string, unknown> }, user);
 
     expect(service.upsertLocalePreferences).toHaveBeenCalledWith(99, validLocalePreferences);
+  });
+
+  it('GET /annotation-colors wraps the named colours in settings', async () => {
+    service.getAnnotationColorNamePreferences.mockResolvedValueOnce({ names: { '#FACC15': 'Ideas' } });
+
+    await expect(controller.getAnnotationColorNamePreferences(makeUser({ id: 11 }))).resolves.toEqual({
+      settings: { names: { '#FACC15': 'Ideas' } },
+    });
+    expect(service.getAnnotationColorNamePreferences).toHaveBeenCalledWith(11);
+  });
+
+  it('PUT /annotation-colors forwards the current user id and settings', async () => {
+    const settings = { names: { '#facc15': 'Ideas' } };
+
+    await expect(controller.upsertAnnotationColorNamePreferences({ settings }, makeUser({ id: 42 }))).resolves.toBeUndefined();
+    expect(service.upsertAnnotationColorNamePreferences).toHaveBeenCalledWith(42, settings);
   });
 });

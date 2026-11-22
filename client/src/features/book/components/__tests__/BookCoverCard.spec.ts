@@ -66,15 +66,25 @@ function mountCard(book: BookCard, coverAspectRatio: '2/3' | '1/1' = '2/3', cove
   })
 }
 
-const { cardOverlays, bookSpineOverlay, bookShadowStrength, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, thumbnailClickAction } =
-  useDisplaySettings()
+const {
+  cardOverlays,
+  formatBadgeStyle,
+  bookSpineOverlay,
+  bookShadowStrength,
+  gridCardPrimaryLabel,
+  gridCardSecondaryLabel,
+  cardInfoMode,
+  thumbnailClickAction,
+} = useDisplaySettings()
 
 beforeEach(() => {
   routerPushMock.mockClear()
+  formatBadgeStyle.value = 'primary'
 })
 
 afterEach(() => {
   cardOverlays.value = ['progress-bar', 'format', 'rating', 'read-status']
+  formatBadgeStyle.value = 'primary'
   bookSpineOverlay.value = 'off'
   bookShadowStrength.value = 'default'
   gridCardPrimaryLabel.value = 'hidden'
@@ -102,6 +112,7 @@ const missingBook: BookCard = {
   readStatus: null,
   addedAt: '2026-01-01T00:00:00.000Z',
   updatedAt: null,
+  coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
   metadataScore: null,
   hasCover: false,
   hasMetadataLocks: false,
@@ -133,6 +144,7 @@ const presentBook: BookCard = {
   readStatus: null,
   addedAt: '2026-01-01T00:00:00.000Z',
   updatedAt: null,
+  coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
   metadataScore: null,
   hasCover: false,
   hasMetadataLocks: false,
@@ -164,7 +176,7 @@ describe('BookCoverCard — missing state', () => {
     const wrapper = mountCard(missingBook)
     const coverDiv = wrapper.find('[style*="aspect-ratio"]')
     const classes = coverDiv.classes().join(' ')
-    expect(classes).not.toContain('group-hover:scale-[1.02]')
+    expect(classes).not.toContain('group-hover:[transform:var(--cover-hover-transform)]')
   })
 
   it('renders the amber missing badge with TriangleAlert icon', () => {
@@ -208,6 +220,66 @@ describe('BookCoverCard - present state', () => {
     expect(wrapper.text()).toContain('EPUB')
     expect(wrapper.text()).not.toContain('NARR')
     expect(wrapper.find('.lucide-headphones').exists()).toBe(true)
+  })
+
+  const multiFormatBook: BookCard = {
+    ...presentBook,
+    files: [
+      { id: 10, format: 'epub', role: 'primary', sizeBytes: null },
+      { id: 11, format: 'pdf', role: 'content', sizeBytes: null },
+    ],
+  }
+
+  it('shows only the primary format pill in the primary style, even for a multi-format book', () => {
+    cardOverlays.value = ['format']
+    formatBadgeStyle.value = 'primary'
+    const wrapper = mountCard(multiFormatBook)
+
+    const badges = wrapper.findAll('[data-testid="card-format-badge"]')
+    expect(badges.map((badge) => badge.text())).toEqual([expect.stringContaining('EPUB')])
+    expect(wrapper.find('[data-testid="card-format-list"]').exists()).toBe(false)
+  })
+
+  it('keeps the primary pill and underlines the other formats in the underline style', () => {
+    cardOverlays.value = ['format']
+    formatBadgeStyle.value = 'underline'
+    const wrapper = mountCard(multiFormatBook)
+
+    expect(wrapper.findAll('[data-testid="card-format-badge"]').map((badge) => badge.text())).toEqual([expect.stringContaining('EPUB')])
+    expect(wrapper.findAll('[data-testid="card-format-segment"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-testid="card-format-list-chip"]')).toHaveLength(2)
+  })
+
+  it('folds every format into one badge in the dots style, a linked book format marked as linked (G1)', () => {
+    cardOverlays.value = ['format']
+    formatBadgeStyle.value = 'dots'
+    const wrapper = mountCard({
+      ...presentBook,
+      linked: { groupId: 1, memberCount: 2, books: [{ bookId: 50, libraryId: 4, formats: ['m4b'], mediaKind: 'audiobook' }] },
+    })
+
+    const dots = wrapper.findAll('[data-testid="card-format-dot"]')
+    expect(dots).toHaveLength(2)
+    expect(dots[0]!.attributes('data-linked')).toBeUndefined()
+    expect(dots[1]!.attributes('data-linked')).toBe('true')
+  })
+
+  it('lists every format in the hover overlay for any style but the primary pill', () => {
+    cardOverlays.value = ['format']
+    formatBadgeStyle.value = 'seal'
+    const wrapper = mountCard(multiFormatBook)
+
+    const chips = wrapper.findAll('[data-testid="card-format-list-chip"]')
+    expect(chips.map((chip) => chip.text())).toEqual([expect.stringContaining('EPUB'), expect.stringContaining('PDF')])
+  })
+
+  it('draws the plain pill for a single-format book whatever the style', () => {
+    cardOverlays.value = ['format']
+    formatBadgeStyle.value = 'seal'
+    const wrapper = mountCard(presentBook)
+
+    expect(wrapper.get('[data-testid="card-format-badges"]').attributes('data-badge-style')).toBe('primary')
+    expect(wrapper.find('[data-testid="card-format-list"]').exists()).toBe(false)
   })
 
   it('opens the reader on desktop card click by default', async () => {
@@ -304,7 +376,7 @@ describe('BookCoverCard - present state', () => {
     const wrapper = mountCard(presentBook)
     const coverDiv = wrapper.find('[style*="aspect-ratio"]')
     const classes = coverDiv.classes().join(' ')
-    expect(classes).toContain('group-hover:scale-[1.02]')
+    expect(classes).toContain('group-hover:[transform:var(--cover-hover-transform)]')
   })
 
   it('clamps fallback title to 2 lines for 2/3 covers and keeps author to one line', () => {

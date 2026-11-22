@@ -16,6 +16,7 @@ local util = require("util")
 
 local TransferPolicy = require("bookorbit_transfer_policy")
 local TransferProgress = require("bookorbit_transfer_progress")
+local Proxy = require("bookorbit_proxy")
 
 local MAX_BODY_BYTES = 900 * 1024 -- stays under the server's 1 MiB body limit
 local MATCH_HASH_LENGTH = 32
@@ -136,6 +137,12 @@ local function absoluteUrl(base, location)
     if location:match("^https?://") then return location end
     local parsed = parseHttpUrl(base)
     if not parsed then return nil end
+    if location:sub(1, 1) == "?" then
+        return base:gsub("[?#].*$", "") .. location
+    end
+    if location:sub(1, 1) == "#" then
+        return base:gsub("#.*$", "") .. location
+    end
     if location:sub(1, 2) == "//" then
         return parsed.scheme .. ":" .. location
     end
@@ -143,6 +150,18 @@ local function absoluteUrl(base, location)
     if location:sub(1, 1) == "/" then return origin .. location end
     local directory = base:match("^(.*)/") or origin
     return directory .. "/" .. location
+end
+
+local function safeRequestRedirect(initial_url, current_url, location)
+    if type(location) ~= "string" or location == "" then return nil end
+    local resolved = absoluteUrl(current_url, location:gsub("%s", ""))
+    local initial = parseHttpUrl(initial_url)
+    local current = parseHttpUrl(current_url)
+    local target = parseHttpUrl(resolved)
+    if not initial or not current or not target or target.host ~= initial.host then return nil end
+    if target.scheme == current.scheme and target.port == current.port then return resolved end
+    if current.scheme == "http" and target.scheme == "https" then return resolved end
+    return nil
 end
 
 local function forkSafeServerUrl(value)
@@ -164,9 +183,11 @@ BookOrbitApi.decodeResponse = decodeResponse
 -- Normalizes a user-entered server address to the API base, e.g.
 -- "https://books.example.com/" -> "https://books.example.com/api/v1".
 function BookOrbitApi.normalizeServerUrl(input)
-    if not input then return nil end
+    if type(input) ~= "string" then return nil end
     local url = util.trim(input)
-    if url == "" then return nil end
+    if url == "" or url:find("[%s%c%?#]") then return nil end
+    local parsed = parseHttpUrl(url)
+    if not parsed or parsed.port < 1 or parsed.port > 65535 then return nil end
     url = url:gsub("/+$", "")
     url = url:gsub("/api/v1/koreader$", "/api/v1")
     if not url:match("/api/v1$") then
@@ -176,6 +197,7 @@ function BookOrbitApi.normalizeServerUrl(input)
 end
 
 function BookOrbitApi.new(opts)
+    opts = opts or {}
     return setmetatable({
         server_url = forkSafeServerUrl(opts.server_url),
         username = opts.username,
@@ -184,7 +206,49 @@ function BookOrbitApi.new(opts)
         device_model = opts.device_model,
         plugin_version = opts.plugin_version,
         background_requests = opts.background_requests == true,
+        proxy = opts.proxy,
     }, BookOrbitApi)
+end
+
+-- Resolves the HTTP proxy for a target URL.
+-- Prefers an explicit proxy option, then KOReader's enabled global HTTP proxy.
+function BookOrbitApi:getProxy(target_url)
+    local url = (target_url and tostring(target_url):match("^https?://")) and tostring(target_url) or self.server_url
+    local parsed = parseHttpUrl(url)
+    if not parsed then return nil end
+
+    if self.proxy and self.proxy ~= "" then
+        return self.proxy
+    end
+
+    if G_reader_settings and G_reader_settings:isTrue("http_proxy_enabled") then
+        local p = G_reader_settings:readSetting("http_proxy")
+        if p and p ~= "" then
+            return p
+        end
+    end
+
+    return nil
+end
+
+local function sendHttpRequest(request)
+    if not request.url:lower():match("^https://") then
+        return http.request(request)
+    end
+
+    local transport_request = {}
+    for key, value in pairs(request) do transport_request[key] = value end
+    if request.proxy then
+        transport_request.create = Proxy.connectSocket(request.proxy)
+        transport_request.proxy = nil
+    end
+    -- LuaSocket's global proxy overrides a custom HTTPS socket unless cleared.
+    local global_proxy = http.PROXY
+    http.PROXY = nil
+    local ok, result, code, headers, status = pcall(http.request, transport_request)
+    http.PROXY = global_proxy
+    if not ok then return nil, tostring(result) end
+    return result, code, headers, status
 end
 
 function BookOrbitApi:isConfigured()
@@ -193,18 +257,22 @@ end
 
 -- Returns decoded_body on success, or nil, err_code, decoded_error_body.
 -- err_code is a number for HTTP errors and a string for transport errors.
-function BookOrbitApi:requestBlocking(method, path, body)
-    local sink = {}
+function BookOrbitApi:requestBlocking(method, path, body, extra_headers)
+    local initial_url = self.server_url .. path
     local request = {
-        url = self.server_url .. path,
+        url = initial_url,
         method = method,
-        sink = ltn12.sink.table(sink),
+        redirect = false,
         headers = {
             ["accept"] = "application/json",
             ["x-auth-user"] = self.username,
             ["x-auth-key"] = self.userkey,
         },
     }
+
+    for name, value in pairs(extra_headers or {}) do
+        request.headers[name] = value
+    end
 
     if body then
         local body_json, encode_err = rapidjson.encode(body, ENCODE_OPTIONS)
@@ -219,26 +287,40 @@ function BookOrbitApi:requestBlocking(method, path, body)
         request.headers["Content-Length"] = #body_json
     end
 
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local code, _, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
+    local current_url = initial_url
+    for redirect_count = 0, MAX_DOWNLOAD_REDIRECTS do
+        local sink = {}
+        request.url = current_url
+        request.sink = ltn12.sink.table(sink)
+        request.proxy = self:getProxy(current_url)
 
-    if type(code) ~= "number" then
-        logger.dbg("BookOrbit: network error:", status or code)
-        return nil, tostring(status or code or "network_error")
+        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        local code, headers, status = socket.skip(1, sendHttpRequest(request))
+        socketutil:reset_timeout()
+
+        if type(code) ~= "number" then
+            logger.dbg("BookOrbit: network error:", status or code)
+            return nil, tostring(status or code or "network_error")
+        end
+
+        if not request.source and (method == "GET" or method == "HEAD")
+                and (code == 301 or code == 302 or code == 303 or code == 307 or code == 308) then
+            if redirect_count >= MAX_DOWNLOAD_REDIRECTS then
+                return nil, "too_many_redirects"
+            end
+            local location = headers and (headers.location or headers.Location)
+            local redirected = safeRequestRedirect(initial_url, current_url, location)
+            if not redirected then return nil, "unsafe_redirect" end
+            current_url = redirected
+        else
+            local decoded, decode_err = decodeResponse(sink)
+            if code < 200 or code >= 300 then return nil, code, decoded end
+            if decode_err then return nil, decode_err end
+            return decoded or {}
+        end
     end
 
-    local decoded, decode_err = decodeResponse(sink)
-
-    if code < 200 or code >= 300 then
-        return nil, code, decoded
-    end
-
-    if decode_err then
-        return nil, decode_err
-    end
-
-    return decoded or {}
+    return nil, "too_many_redirects"
 end
 
 -- True when this call may fork its own background worker: the client is in
@@ -287,13 +369,13 @@ function BookOrbitApi:runInSubprocess(fn, trap_widget)
     return true, result
 end
 
-function BookOrbitApi:request(method, path, body)
+function BookOrbitApi:request(method, path, body, extra_headers)
     if not self:canForkSubprocess() then
-        return self:requestBlocking(method, path, body)
+        return self:requestBlocking(method, path, body, extra_headers)
     end
 
     local completed, result = self:runInSubprocess(function()
-        return self:requestBlocking(method, path, body)
+        return self:requestBlocking(method, path, body, extra_headers)
     end)
     if not completed then
         return nil, "background_request_interrupted"
@@ -306,7 +388,7 @@ function BookOrbitApi:query(path, params)
 
     local keys = {}
     for key, value in pairs(params) do
-        if value ~= nil and value ~= "" then
+        if key ~= "on_device_filter" and value ~= nil and value ~= "" then
             table.insert(keys, key)
         end
     end
@@ -338,27 +420,14 @@ function BookOrbitApi:downloadBlocking(path, local_path, opts)
         generation = opts.progress_generation,
         total = tonumber(opts.expected_bytes) or 0,
     })
-    local current_url = self.server_url .. path
-    local origin = parseHttpUrl(current_url)
+    local initial_url = self.server_url .. path
+    local current_url = initial_url
     local total_received = 0
 
     local function fail(out, err)
         if out then pcall(function() out:close() end) end
         util.removeFile(temp_path)
         return nil, err
-    end
-
-    local function sameOriginRedirect(location)
-        if type(location) ~= "string" or location == "" then return nil end
-        local resolved = absoluteUrl(current_url, location:gsub("%s", ""))
-        local parsed = parseHttpUrl(resolved)
-        if not origin or not parsed
-                or parsed.scheme ~= origin.scheme
-                or parsed.host ~= origin.host
-                or parsed.port ~= origin.port then
-            return nil
-        end
-        return resolved
     end
 
     for redirect_count = 0, MAX_DOWNLOAD_REDIRECTS do
@@ -397,10 +466,12 @@ function BookOrbitApi:downloadBlocking(path, local_path, opts)
             },
         }
 
+        request.proxy = self:getProxy(current_url)
+
         socketutil:set_timeout(
             opts.block_timeout or socketutil.FILE_BLOCK_TIMEOUT,
             opts.total_timeout or socketutil.FILE_TOTAL_TIMEOUT)
-        local code, headers, status = socket.skip(1, http.request(request))
+        local code, headers, status = socket.skip(1, sendHttpRequest(request))
         socketutil:reset_timeout()
 
         if too_large then return fail(out, "response_too_large") end
@@ -415,7 +486,7 @@ function BookOrbitApi:downloadBlocking(path, local_path, opts)
                 return nil, "too_many_redirects"
             end
             local location = headers and (headers.location or headers.Location)
-            local redirected = sameOriginRedirect(location)
+            local redirected = safeRequestRedirect(initial_url, current_url, location)
             if not redirected then return nil, "unsafe_redirect" end
             current_url = redirected
         else
@@ -431,13 +502,15 @@ function BookOrbitApi:downloadBlocking(path, local_path, opts)
                 end
             end
 
+            local content_length = headers and tonumber(headers["content-length"] or headers["Content-Length"])
+            if (content_length and received ~= content_length) or (opts.expected_bytes and received ~= opts.expected_bytes) then return fail(out, "size_mismatch") end
             if progress_writer then progress_writer(received, true) end
 
             -- The parent owns publishing for user-cancellable transfers: a
             -- dismissed subprocess cannot be stopped once it starts renaming,
             -- which is harmless for a cover but wrong for a cancelled book.
             if opts.publish == "parent" then
-                local result = { temp_path = temp_path, bytes = received }
+                local result = { temp_path = temp_path, bytes = received, server_hash = headers and headers["x-bookorbit-file-hash"], artifact_id = headers and headers["x-bookorbit-artifact"] }
                 -- Hashing here keeps the digest off the UI thread and lets the
                 -- caller compare it to the manifest without a match request.
                 if opts.hash == "partial_md5" then
@@ -569,6 +642,10 @@ function BookOrbitApi:exchangeAnnotations(books)
     return self:request("POST", "/koreader/plugin/annotations/exchange", self:withDevice({ books = books }))
 end
 
+function BookOrbitApi:annotationPendingBooks(hashes)
+    return self:request("POST", "/koreader/plugin/annotations/pending", self:withDevice({ hashes = hashes }))
+end
+
 function BookOrbitApi:exchangeAck(books)
     return self:request("POST", "/koreader/plugin/annotations/exchange-ack", self:withDevice({ books = books }))
 end
@@ -646,12 +723,24 @@ function BookOrbitApi:catalogManifest(params)
     return self:request("GET", self:query("/koreader/plugin/catalog/manifest", params))
 end
 
-function BookOrbitApi:catalogBook(book_id)
-    return self:request("GET", self:query("/koreader/plugin/catalog/books/" .. tostring(book_id), { deviceId = self.device_id }))
+function BookOrbitApi:getDeliverySettings()
+    return self:request("GET", "/koreader/plugin/delivery-settings/" .. util.urlEncode(tostring(self.device_id)))
+end
+
+function BookOrbitApi:setDeliverySettings(variant, migrate_only)
+    return self:request("PUT", "/koreader/plugin/delivery-settings/" .. util.urlEncode(tostring(self.device_id)), {
+        readAloudDelivery = variant or rapidjson.null,
+        migrateOnly = migrate_only == true,
+    })
+end
+
+function BookOrbitApi:catalogBook(book_id, variant)
+    return self:request("GET", self:query("/koreader/plugin/catalog/books/" .. tostring(book_id), { deviceId = self.device_id, variant = variant }))
 end
 
 function BookOrbitApi:downloadCatalogFile(file_id, local_path, opts)
-    return self:download("/koreader/plugin/catalog/files/" .. tostring(file_id) .. "/download", local_path, opts)
+    opts = opts or {}
+    return self:download(self:query("/koreader/plugin/catalog/files/" .. tostring(file_id) .. "/download", { variant = opts.variant, selection = opts.selection }), local_path, opts)
 end
 
 function BookOrbitApi:downloadCatalogThumbnail(book_id, local_path, opts)
@@ -661,10 +750,29 @@ function BookOrbitApi:downloadCatalogThumbnail(book_id, local_path, opts)
     return self:download("/koreader/plugin/catalog/books/" .. tostring(book_id) .. "/thumbnail", local_path, opts)
 end
 
+-- An author's portrait, from servers advertising catalogListsV2.
+function BookOrbitApi:downloadCatalogAuthorPhoto(author_id, local_path, opts)
+    opts = opts or {}
+    opts.accept = "image/jpeg,image/*"
+    opts.expect_content_type = "image/"
+    return self:download("/koreader/plugin/catalog/authors/" .. tostring(author_id) .. "/photo", local_path, opts)
+end
+
 -- Plugin self-update endpoints
 
 function BookOrbitApi:getPluginVersion()
-    return self:request("GET", "/koreader/plugin/version")
+    local headers = {}
+    local valid_device_id = type(self.device_id) == "string"
+        and #self.device_id <= 100
+        and self.device_id:match("^[A-Za-z0-9-]+$") ~= nil
+    local valid_plugin_version = type(self.plugin_version) == "string"
+        and #self.plugin_version <= 20
+        and self.plugin_version:find("[\r\n]") == nil
+    if valid_device_id and valid_plugin_version then
+        headers["x-bookorbit-device-id"] = self.device_id
+        headers["x-bookorbit-plugin-version"] = self.plugin_version
+    end
+    return self:request("GET", "/koreader/plugin/version", nil, headers)
 end
 
 function BookOrbitApi:downloadPluginUpdate(local_path, opts)

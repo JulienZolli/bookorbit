@@ -204,7 +204,7 @@ watch(
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="handleClose" />
+      <div class="absolute inset-0 bg-scrim" @click="handleClose" />
       <div class="relative z-10 w-full max-w-lg mx-4 max-h-[90vh] bg-card border border-border rounded-lg shadow-2xl flex flex-col">
         <!-- Header -->
         <div class="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
@@ -228,7 +228,7 @@ watch(
             <button type="button" class="flex items-center gap-2 w-full text-left" @click="toggleField(key)">
               <div
                 :class="[
-                  'w-4 h-4 rounded border transition-colors flex items-center justify-center shrink-0',
+                  'w-4 h-4 rounded-xs border transition-colors flex items-center justify-center shrink-0',
                   enabledFields[key] ? 'bg-primary border-primary' : 'border-muted-foreground/40 hover:border-foreground/60',
                 ]"
               >
@@ -255,7 +255,7 @@ watch(
                   :key="m"
                   type="button"
                   :class="[
-                    'px-2.5 py-1 rounded text-xs font-medium transition-colors',
+                    'px-2.5 py-1 rounded-xs text-xs font-medium transition-colors',
                     arrayModes[key] === m
                       ? m === 'clear'
                         ? 'bg-destructive text-destructive-foreground'
@@ -285,7 +285,7 @@ watch(
             <button type="button" class="flex items-center gap-2 w-full text-left" @click="toggleField(key)">
               <div
                 :class="[
-                  'w-4 h-4 rounded border transition-colors flex items-center justify-center shrink-0',
+                  'w-4 h-4 rounded-xs border transition-colors flex items-center justify-center shrink-0',
                   enabledFields[key] ? 'bg-primary border-primary' : 'border-muted-foreground/40 hover:border-foreground/60',
                 ]"
               >

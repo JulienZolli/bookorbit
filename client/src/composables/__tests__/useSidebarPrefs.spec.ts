@@ -33,13 +33,11 @@ describe('useSidebarPrefs', () => {
       const { parseSidebarConfig } = await loadModule()
 
       expect(parseSidebarConfig(undefined)).toEqual({
+        reading: { open: true },
         browse: { open: true },
         libraries: { open: true, cap: 8 },
-        podcasts: { open: true, cap: 8 },
         smartScopes: { open: true, cap: 8 },
         collections: { open: true, cap: 8 },
-        podcastScopes: { open: true, cap: 8 },
-        podcastCollections: { open: true, cap: 8 },
       })
     })
 
@@ -69,6 +67,76 @@ describe('useSidebarPrefs', () => {
       const { parseSidebarConfig } = await loadModule()
 
       expect(parseSidebarConfig({ sections: { browse: { open: false, cap: 20 } } }).browse).toEqual({ open: false })
+    })
+
+    it('drops stored sections this client no longer has', async () => {
+      const { parseSidebarConfig } = await loadModule()
+
+      const parsed = parseSidebarConfig({
+        sections: {
+          libraries: { open: false, cap: 12 },
+          retiredSection: { open: false, cap: 5 },
+          otherRetiredSection: { open: true, cap: 8 },
+        },
+      })
+
+      expect(Object.keys(parsed)).toEqual(['reading', 'browse', 'libraries', 'smartScopes', 'collections'])
+      expect(parsed.libraries).toEqual({ open: false, cap: 12 })
+    })
+  })
+
+  describe('parseSidebarLayout', () => {
+    it.each([undefined, null, 'nonsense', 42, []])('falls back to the stock layout for %s', async (raw) => {
+      const { parseSidebarLayout } = await loadModule()
+
+      expect(parseSidebarLayout(raw)).toEqual({ hidden: [], groupOrder: [], rowOrder: {}, primaryStyle: 'list', groupStyles: {} })
+    })
+
+    it.each([
+      ['icons', 'icons'],
+      ['list', 'list'],
+      ['grid', 'list'],
+      [1, 'list'],
+      [undefined, 'list'],
+    ])('reads primaryStyle %s as %s', async (stored, expected) => {
+      const { parseSidebarLayout } = await loadModule()
+
+      expect(parseSidebarLayout({ primaryStyle: stored }).primaryStyle).toBe(expected)
+    })
+
+    it('keeps group styles only for groups that offer icons, with a known style', async () => {
+      const { parseSidebarLayout } = await loadModule()
+
+      expect(parseSidebarLayout({ groupStyles: { reading: 'icons', browse: 'icons' } }).groupStyles).toEqual({ reading: 'icons' })
+      expect(parseSidebarLayout({ groupStyles: { reading: 'grid' } }).groupStyles).toEqual({})
+      expect(parseSidebarLayout({ groupStyles: 'icons' }).groupStyles).toEqual({})
+    })
+
+    it('keeps string ids only, once each', async () => {
+      const { parseSidebarLayout } = await loadModule()
+
+      expect(
+        parseSidebarLayout({
+          hidden: ['series', 7, null, 'series', '', 'annotations'],
+          groupOrder: 'reading',
+          rowOrder: { browse: ['series', 'authors', false], reading: 'statistics' },
+        }),
+      ).toEqual({
+        hidden: ['series', 'annotations'],
+        groupOrder: [],
+        rowOrder: { browse: ['series', 'authors'], reading: [] },
+        primaryStyle: 'list',
+        groupStyles: {},
+      })
+    })
+
+    it('bounds what it keeps from an oversized payload', async () => {
+      const { parseSidebarLayout } = await loadModule()
+
+      const parsed = parseSidebarLayout({ hidden: Array.from({ length: 500 }, (_, index) => `row-${index}`).concat('x'.repeat(65)) })
+
+      expect(parsed.hidden).toHaveLength(200)
+      expect(parsed.hidden).not.toContain('x'.repeat(65))
     })
   })
 
@@ -141,20 +209,71 @@ describe('useSidebarPrefs', () => {
             settings: {
               sidebarConfig: {
                 sections: {
+                  reading: { open: true },
                   browse: { open: true },
                   libraries: { open: true, cap: 8 },
-                  podcasts: { open: true, cap: 8 },
                   smartScopes: { open: true, cap: 8 },
                   collections: { open: false, cap: 20 },
-                  podcastScopes: { open: true, cap: 8 },
-                  podcastCollections: { open: true, cap: 8 },
                 },
               },
+              sidebarLayout: { hidden: [], groupOrder: [], rowOrder: {}, primaryStyle: 'list', groupStyles: {} },
             },
           }),
         }),
       )
       vi.useRealTimers()
+    })
+
+    it('persists a layout change in its own settings key', async () => {
+      vi.useFakeTimers()
+      const { useSidebarPrefs } = await loadModule()
+      const { layout } = useSidebarPrefs()
+      await nextTick()
+
+      layout.hidden = ['series']
+      layout.groupOrder = ['reading', 'browse']
+      layout.primaryStyle = 'icons'
+      layout.groupStyles = { reading: 'icons' }
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(apiMock).toHaveBeenCalledTimes(1)
+      const [, init] = apiMock.mock.calls[0] as [string, { body: string }]
+      const body = JSON.parse(init.body)
+      expect(body.settings.sidebarLayout).toEqual({
+        hidden: ['series'],
+        groupOrder: ['reading', 'browse'],
+        rowOrder: {},
+        primaryStyle: 'icons',
+        groupStyles: { reading: 'icons' },
+      })
+      vi.useRealTimers()
+    })
+
+    it('hydrates the layout from the signed-in user settings', async () => {
+      user.value = {
+        id: 7,
+        settings: {
+          sidebarLayout: {
+            hidden: ['annotations'],
+            groupOrder: ['reading'],
+            rowOrder: { browse: ['series', 'authors'] },
+            primaryStyle: 'icons',
+            groupStyles: { reading: 'icons' },
+          },
+        },
+      }
+
+      const { useSidebarPrefs } = await loadModule()
+      const { layout } = useSidebarPrefs()
+      await nextTick()
+
+      expect(layout).toEqual({
+        hidden: ['annotations'],
+        groupOrder: ['reading'],
+        rowOrder: { browse: ['series', 'authors'] },
+        primaryStyle: 'icons',
+        groupStyles: { reading: 'icons' },
+      })
     })
 
     it('rejects a cap outside the allowed set', async () => {
